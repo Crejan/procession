@@ -17,7 +17,10 @@ isolated CPUs the same thread only competes with its owner's own work.
 ## Scope
 
 - Enforces where RT threads may run. It does not cure starvation (that is
-  stalld's job), does not throttle, never kills or demotes.
+  stalld's job), does not throttle, never kills. It demotes a thread only
+  when the watchdog's `demote` is switched on (see Watchdog).
+- Watches the housekeeping CPUs for starvation that affinity enforcement
+  cannot prevent: exempt threads, failed moves, IRQ floods.
 - One host, one daemon, no network dependency for enforcement.
 
 ## Model
@@ -120,6 +123,87 @@ what to do (block or sleep in the loop, pin RT threads to the allowed CPUs),
 plus an optional `help_url`. Wording follows `enforced`: "was moved" versus
 "would have been moved (report mode, nothing changed)".
 
+## Watchdog
+
+Affinity enforcement keeps unprivileged RT threads off H. It cannot help
+when the thread on H is exempt (root, `exempt_*`), when the move failed
+(`failed`, e.g. a cgroup cpuset), when the thread is `SCHED_DEADLINE`, or
+when an IRQ thread on H floods. The watchdog notices the result instead:
+a housekeeping CPU that no longer runs ordinary work. Ported from
+clockwork's watchdog, with the changes noted below.
+
+**Canaries.** One thread per housekeeping CPU, pinned there, `SCHED_OTHER`
+at nice 0 (the class of `ksoftirqd` and the kworkers it stands in for),
+waking every `canary_interval` and stamping a monotonic time.
+- Only on H. On the isolated CPUs an RT thread owns its CPU by design; a
+  starved canary there is the normal case. (clockwork ran canaries on every
+  CPU and would demote the user's own cyclic thread on an isolated CPU.)
+- Nice 0, not 19: a nice-19 canary falls behind under ordinary load and
+  raises false alarms.
+
+**Sentinel.** The daemon's main loop, at its own priority (`[self]`) on its
+own housekeeping CPU, every `check_interval`:
+- staleness of each canary ≥ `starvation_warn` → `starvation` event, once
+  per episode; ≥ `starvation_act` → action (below); back under
+  `starvation_warn` → `recovered`;
+- attribution: from two thread-table snapshots (p-roc `task` rates), the
+  threads with the most runtime on that CPU in the window, RT first, with
+  policy, priority, owner and whether they are exempt;
+- IRQ threads (`irq/<n>-<name>`) on a housekeeping CPU above
+  `irq_warn_percent` → `irq-flood` event, above `irq_act_percent` → action.
+- The sentinel cannot watch the CPU it runs on when that CPU is the one
+  starved by a thread above `[self] priority`; with one housekeeping CPU the
+  watchdog says so at start.
+
+**Actions**, each off by default, so the watchdog reports first:
+
+| Switch | When | What |
+|---|---|---|
+| `demote` | starvation ≥ `starvation_act`, top offender is a user RT thread | `SCHED_OTHER`, nice 0; exempt threads are never demoted, only named |
+| `irq_move` | IRQ thread ≥ `irq_act_percent` | IRQ affinity to `irq_target`, default the housekeeping CPU with the fewest interrupts in the window |
+
+At most one action per CPU per `cooldown`. `mode = "report"` applies here
+too: actions are evaluated and notified with `enforced = false`. Kernel
+threads are never acted on.
+
+**Relation to stalld.** stalld cures starvation by briefly boosting the
+starved thread; the watchdog names the culprit and tells its owner. Both
+can run; the README recommends stalld for production.
+
+**Events.** Watchdog events go through the same notifiers:
+
+```rust
+enum Event { Intervention(Intervention), Watchdog(WatchdogEvent) }
+
+struct WatchdogEvent {
+    host: String, at: SystemTime, cpu: u32,
+    kind: WatchdogKind,            // Starvation | Recovered | IrqFlood | Demoted | IrqMoved | Failed
+    staleness: Duration,
+    offenders: Vec<Offender>,      // tid, comm, user, policy, priority, cpu %, exempt
+    change: Option<Change>,        // p-roc Change of the action, with its `from`
+    enforced: bool,
+}
+
+trait Notifier: Send {
+    fn notify(&mut self, ev: &Event) -> anyhow::Result<()>;
+}
+```
+
+Email: `demoted` goes to the thread's owner (as interventions do),
+`starvation`, `irq-flood` and `irq-moved` to `admin`. Prometheus adds:
+
+```
+p_usher_watchdog_staleness_seconds{cpu}             gauge
+p_usher_watchdog_events_total{kind, enforced}       counter
+```
+
+## Status file
+
+`/run/p-usher/state.json`, written atomically after every change of state:
+mode, allowed and housekeeping sets, the watchdog's staleness per CPU, the
+last 100 events. Read by p-layer; nothing else depends on it. p-usher has
+no network API.
+
 ## Configuration
 
 `/etc/p-usher.toml`, every key optional:
@@ -145,6 +229,19 @@ failed = true
 [prometheus]
 dir = "/var/lib/node_exporter"
 retain = "15m"
+
+[watchdog]
+enabled = false
+canary_interval = "100ms"
+check_interval = "500ms"
+starvation_warn = "2s"
+starvation_act = "5s"
+irq_warn_percent = 60
+irq_act_percent = 80
+cooldown = "5s"
+demote = false
+irq_move = false
+# irq_target = 0               # default: least-loaded housekeeping CPU
 
 # [email]
 # relay = "mail.example.org:25"
@@ -173,3 +270,15 @@ retain = "15m"
   resolution (no SMTP in tests).
 - An integration test that spawns a FIFO thread pinned to H, gated on
   `CAP_SYS_NICE`, skipped otherwise.
+- Watchdog with a fake clock and synthetic thread tables: warn, act and
+  recover thresholds; one event per episode; cooldown; attribution order;
+  exempt and kernel threads never acted on; no canary on an isolated CPU;
+  report mode yields the same events with `enforced = false`.
+- Status file: content and atomic replace.
+
+## Shared code
+
+The `/proc` parsing, `CpuSet`, `Policy`, `ThreadInfo` and the `sys` writers
+move to p-roc (see `crates/p-roc/SPEC.md`); p-usher keeps its decision,
+engine, configuration and notifiers. The extraction must not change
+behaviour: the existing tests pass with only their imports changed.
