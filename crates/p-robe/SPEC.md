@@ -16,8 +16,9 @@ calls an action: one row of p-robe's table.
 
 License: MIT OR Apache-2.0.
 
-Status: a skeleton. `probe catalog` prints a first table of five verbs with
-their ratings; nothing runs. The name is a working name. It is not p-rover's
+Status: the dispatcher exists with the table below; of its verbs only
+`sys kit` runs, the others wait for `prover`. The service (`probe serve`)
+does not exist. The name is a working name. It is not p-rover's
 subcommand `probe`, and it is not what `diag-tools` calls a probe (a
 measurement that loads a host); if that stays confusing, the name goes.
 
@@ -152,14 +153,22 @@ them.
 
 - **The name.** `probe` collides in meaning twice. *Proposal:* keep it until
   stage 1 runs, then decide with the thing in hand.
-- **How an agent reaches the service.** *Proposal:* MCP over HTTP on a port
-  the sandbox may reach, the signed call in a header of each tool call.
-- **The rule for rating a call lower by its parameters.** *Proposal:* data
-  in the verb's row; see `doc/approvals.md`, section 10.
-- **The vocabulary shared with p-ledge** (ratings, later the call and the
-  request). Today p-robe depends on p-ledge's library for it. *Proposal:* a
-  small crate of its own once the call and the request are specified, used
-  by p-ledge, p-age and p-robe.
+- **How an agent reaches the service.** Decided: MCP over HTTP on a port
+  the sandbox may reach; the call and its signature in the tool call's
+  `_meta`, the tool's arguments equal to the signed call; an agent learns of
+  a "no" only a coarse class (`doc/approvals.md`, section 10). The details
+  are a proposal of their own.
+- **The rule for rating a call lower by its parameters.** Decided: data in
+  the verb's row. The service rates a call; the dispatcher, which is where
+  the file is opened, rates it again itself and refuses if its rating is
+  above the approved one, which the service passes as `--within`. That flag
+  can only restrict. Nothing is rated lower under a directory that anyone
+  but its owner or root can write to (`doc/approvals.md`, R4). The service's
+  account, through the sudo rule for `probe --within`, can run every verb:
+  taking over that account is taking over the service, which the design
+  trusts anyway.
+- The vocabulary shared with p-ledge and p-age (ratings, the call, the
+  request, their signatures) is the crate `p-act`.
 - **Narrowing by noun.** `diag-tools` could limit an identity to some nouns;
   R10 has no successor for that. *Proposal:* not now; a binding could later
   name groups per noun.
