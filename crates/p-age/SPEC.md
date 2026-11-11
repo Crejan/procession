@@ -69,11 +69,12 @@ answer, a refusal with its reason:
    withdrawn (`src/register.rs`).
 3. The delegation's person is enabled in the site project and not blocked.
 4. That person may have this action carried out on this host
-   (`doc/approvals.md`, R10): they are in one of the delegation's groups
-   (read from the extension `groups@procession` of the agent's certificate,
-   `doc/approval-formats.md`, section 3.1, and from nowhere else),
-   the group is admitted on the host's class, and the group may use this
-   service.
+   (`doc/approvals.md`, R10): one of the delegation's groups (read from the
+   extension `groups@procession` of the agent's certificate,
+   `doc/approval-formats.md`, section 3.1, and from nowhere else) is a
+   group the person is in, and is among the groups that the service's
+   binding names for this host. Where a group may log in (`access`) plays
+   no part.
 Then it passes the request to that person's pledge. If that pledge is not
 connected, the broker keeps the request and passes it on when the pledge
 connects; per agent it keeps as many as the site's setting allows (five by
@@ -99,10 +100,15 @@ withdraws, `page block` blocks a person or one key and lifts a block.
 Blocking a key means: no request is passed to a pledge that signed in with
 it, and no approval by it is given a clearance.
 
-**From the site project**, by the site's roll-out (`page load`): persons
-with `enabled`, their four keys, their groups; the access rules by class;
-which groups may use which service; hosts with their keys and classes. The
-broker holds a copy and nothing else: no rule is made here.
+**From the site**, in one format (`page load`): persons with `enabled` and
+their four keys; which groups may use which service on which host; hosts
+with their keys. These come from the site project when the broker's host is
+converged. Who is in which group comes from where the site keeps it: the
+site project on a local site, the directory on a directory site, read by a
+job beside the broker on a timer (5 minutes proposed) and written in the
+same format. The broker does not know what a directory is. It keeps, for
+each part, where it came from and when. It holds a copy and nothing else: no
+rule is made here.
 
 ## What it keeps
 

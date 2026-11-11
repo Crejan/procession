@@ -66,7 +66,7 @@ What an agent asks for. Signed by the agent.
 | `id` | string | a UUID the agent made for this call and never uses again |
 | `deadline` | string | the time after which the call, and the request made from it, is void |
 | `service.host` | string | the host's name as the site project has it: `[A-Za-z0-9._-]+`, at most 64 characters |
-| `service.name` | string | the service's name on that host: `[a-z][a-z0-9-]*` |
+| `service.name` | string | the service's name: `[a-z][a-z0-9-]*`. It is the name of the service's type in the catalogue (`probe`), not a name a site gave; a host has at most one service of a type |
 | `action` | string | the action, in the service's own words: words `[a-z][a-z0-9-]*` separated by single spaces |
 | `params` | array of strings | the action's parameters, in the order the service defines; at most 64, each at most 512 bytes |
 | `claim` | string, optional | what the agent says about its reasons; at most 200 characters. Shown as the agent's claim and never acted on |
@@ -177,6 +177,21 @@ The broker saying a request passed its checks. Signed by the broker.
 
 A service accepts a clearance for 60 seconds after `at`.
 
+### 6.1 The list of hosts' keys
+
+Not part of an exchange, but signed the same way: what tells a pledge which
+key is a host's, from stage 3. Made and signed by the issuer with the site
+CA's key, in the namespace `hosts-v1@procession`; carried to a pledge by the
+broker, which cannot alter it; verified by pledge against the site CA's
+line. A draft: the member names are not settled.
+
+```json
+{"v":1,"type":"hosts","at":"2026-11-11T15:00:00Z","hosts":[{"name":"a.example","key":"ssh-ed25519 AAAAC3..."}]}
+```
+
+Before there is a site CA (stages 1 and 2) pledge reads hosts and their keys
+from its own configuration.
+
 ## 7. Verifying
 
 Each party needs an allowed-signers file with a few lines, and one
@@ -205,15 +220,21 @@ checks the certificate's validity, which is the delegation's.
 ssh-keygen -Y verify -f allowed -I <service>@<host> -n request-v1@procession -s request.sig < request
 ```
 
-with `<service>` and `<host>` taken from the call inside the request. That
+with `<service>` and `<host>` taken from the call inside the request;
+`<service>` is the type's name (section 3). That
 is the comparison of R6: a request signed by any other service or host does
 not verify under this name.
 
 **The approval and the clearance**, by a service:
 
 ```
-* cert-authority,namespaces="approval-v1@procession,clearance-v1@procession" <the site CA's public key>
+*:confirmed,*:automatic cert-authority,namespaces="approval-v1@procession" <the site CA's public key>
+broker cert-authority,namespaces="clearance-v1@procession" <the site CA's public key>
 ```
+
+Two lines, so that a certificate under any other name verifies nowhere.
+(These two lines are not yet run; the single line `* cert-authority` with
+both namespaces is what was run on 2026-11-11.)
 ```
 ssh-keygen -Y verify -f allowed -I <person>:confirmed -n approval-v1@procession -s approval.sig < request
 ssh-keygen -Y verify -f allowed -I broker -n clearance-v1@procession -s clearance.sig < clearance
@@ -230,8 +251,8 @@ written; an approval does not verify under the name `broker`, nor a
 clearance key under a person's name, nor any signature under another
 namespace.
 
-A verifier may write the site CA's line with only the namespace it is
-verifying; it must never write one with more than the two.
+A verifier may write a line with only the namespace it is verifying; it
+must never write one with more.
 
 **Names that the site CA must never certify for a person:** `broker`, and
 anything without the `:confirmed` or `:automatic` ending. A person's name
@@ -244,7 +265,9 @@ same; only the allowed-signers lines differ:
 
 - the service lists the one person's two approval keys directly, as
   `<person>:confirmed <key>` and `<person>:automatic <key>` with the same
-  namespaces, and checks no clearance;
+  namespaces, and checks no clearance. The two must be different keys: one
+  key under both names would make every automatic approval verify as a
+  confirmed one, so that is refused;
 - pledge lists the one host's key as above.
 
 ## 9. Open
