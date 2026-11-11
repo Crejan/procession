@@ -305,10 +305,23 @@ pub(crate) mod tests {
             parse(&replaced(r#""host":"a.example""#, r#""host":"a.example","host":"b""#)),
             Err(ParseError::DuplicateMember("service.host".into()))
         );
-        assert!(matches!(parse(&replaced(r#""params":["pid=4711"]"#, r#""params":"pid=4711""#)), Err(ParseError::WrongType { .. })));
-        assert!(matches!(parse(&replaced(r#""params":["pid=4711"]"#, r#""params":[4711]"#)), Err(ParseError::WrongType { .. })));
-        assert!(matches!(parse(&replaced(r#""service":{"host":"a.example","name":"probe"}"#, r#""service":"probe""#)), Err(ParseError::WrongType { .. })));
-        assert_eq!(parse(&replaced(r#""claim":"checking why the control loop misses cycles""#, r#""claim":null"#)).unwrap_err(), ParseError::WrongType { member: "claim".into(), expected: "a string" });
+        assert!(matches!(
+            parse(&replaced(r#""params":["pid=4711"]"#, r#""params":"pid=4711""#)),
+            Err(ParseError::WrongType { .. })
+        ));
+        assert!(matches!(
+            parse(&replaced(r#""params":["pid=4711"]"#, r#""params":[4711]"#)),
+            Err(ParseError::WrongType { .. })
+        ));
+        assert!(matches!(
+            parse(&replaced(r#""service":{"host":"a.example","name":"probe"}"#, r#""service":"probe""#)),
+            Err(ParseError::WrongType { .. })
+        ));
+        assert_eq!(
+            parse(&replaced(r#""claim":"checking why the control loop misses cycles""#, r#""claim":null"#))
+                .unwrap_err(),
+            ParseError::WrongType { member: "claim".into(), expected: "a string" }
+        );
     }
 
     #[test]
@@ -339,11 +352,20 @@ pub(crate) mod tests {
     #[test]
     fn refuses_malformed_ids_times_names_and_actions() {
         for bad in [
-            "3F2B6C1E-8A57-4D0E-9B1A-5C2E7D9F0A11", "3f2b6c1e-8a57-1d0e-9b1a-5c2e7d9f0a11", "3f2b6c1e-8a57-4d0e-cb1a-5c2e7d9f0a11",
-            "3f2b6c1e8a574d0e9b1a5c2e7d9f0a11", "3f2b6c1e-8a57-4d0e-9b1a-5c2e7d9f0a1", "3f2b6c1e-8a57-4d0e-9b1a-5c2e7d9f0a1g", "",
+            "3F2B6C1E-8A57-4D0E-9B1A-5C2E7D9F0A11",
+            "3f2b6c1e-8a57-1d0e-9b1a-5c2e7d9f0a11",
+            "3f2b6c1e-8a57-4d0e-cb1a-5c2e7d9f0a11",
+            "3f2b6c1e8a574d0e9b1a5c2e7d9f0a11",
+            "3f2b6c1e-8a57-4d0e-9b1a-5c2e7d9f0a1",
+            "3f2b6c1e-8a57-4d0e-9b1a-5c2e7d9f0a1g",
+            "",
             "{3f2b6c1e-8a57-4d0e-9b1a-5c2e7d9f0a11}",
         ] {
-            assert_eq!(parse(&replaced("3f2b6c1e-8a57-4d0e-9b1a-5c2e7d9f0a11", bad)), Err(ParseError::MalformedUuid(bad.into())), "{bad}");
+            assert_eq!(
+                parse(&replaced("3f2b6c1e-8a57-4d0e-9b1a-5c2e7d9f0a11", bad)),
+                Err(ParseError::MalformedUuid(bad.into())),
+                "{bad}"
+            );
         }
         assert_eq!(
             parse(&replaced("2026-11-11T15:06:05Z", "2026-11-11 15:06:05")),
@@ -363,13 +385,22 @@ pub(crate) mod tests {
     fn enforces_the_limits() {
         let params = |n: usize| format!("[{}]", vec![r#""x""#; n].join(","));
         assert!(parse(&replaced(r#"["pid=4711"]"#, &params(MAX_PARAMS))).is_ok());
-        assert_eq!(parse(&replaced(r#"["pid=4711"]"#, &params(MAX_PARAMS + 1))), Err(ParseError::TooManyParams { limit: 64 }));
+        assert_eq!(
+            parse(&replaced(r#"["pid=4711"]"#, &params(MAX_PARAMS + 1))),
+            Err(ParseError::TooManyParams { limit: 64 })
+        );
 
         let param = |n: usize| format!(r#"["{}"]"#, "p".repeat(n));
         assert!(parse(&replaced(r#"["pid=4711"]"#, &param(512))).is_ok());
-        assert_eq!(parse(&replaced(r#"["pid=4711"]"#, &param(513))), Err(ParseError::ParamTooLong { index: 0, limit: 512 }));
+        assert_eq!(
+            parse(&replaced(r#"["pid=4711"]"#, &param(513))),
+            Err(ParseError::ParamTooLong { index: 0, limit: 512 })
+        );
         // The limit is in bytes: 257 two-byte characters are 514.
-        assert!(matches!(parse(&replaced(r#"["pid=4711"]"#, &format!(r#"["{}"]"#, "ü".repeat(257)))), Err(ParseError::ParamTooLong { .. })));
+        assert!(matches!(
+            parse(&replaced(r#"["pid=4711"]"#, &format!(r#"["{}"]"#, "ü".repeat(257)))),
+            Err(ParseError::ParamTooLong { .. })
+        ));
 
         let claim = |s: String| replaced("checking why the control loop misses cycles", &s);
         assert!(parse(&claim("c".repeat(200))).is_ok());
@@ -378,7 +409,10 @@ pub(crate) mod tests {
 
         // 16 KiB in all, filled with parameters (each has its own limit).
         let with_params = |items: &[String]| {
-            replaced(r#"["pid=4711"]"#, &format!("[{}]", items.iter().map(|p| format!(r#""{p}""#)).collect::<Vec<_>>().join(",")))
+            replaced(
+                r#"["pid=4711"]"#,
+                &format!("[{}]", items.iter().map(|p| format!(r#""{p}""#)).collect::<Vec<_>>().join(",")),
+            )
         };
         let room = MAX_BYTES - with_params(&[]).len();
         let full = (room - 2) / 515;

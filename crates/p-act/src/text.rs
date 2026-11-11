@@ -28,7 +28,8 @@ pub(crate) fn is_name(s: &str) -> bool {
 /// `[a-z][a-z0-9-]*`
 pub(crate) fn is_service_name(s: &str) -> bool {
     let mut bytes = s.bytes();
-    bytes.next().is_some_and(|b| b.is_ascii_lowercase()) && bytes.all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
+    bytes.next().is_some_and(|b| b.is_ascii_lowercase())
+        && bytes.all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
 }
 
 /// Lower-case words separated by single spaces; a word is `[a-z][a-z0-9-]*`.

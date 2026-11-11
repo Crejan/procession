@@ -107,7 +107,8 @@ impl PublicKey {
         let blob = STANDARD.decode(b64).map_err(|_| bad())?;
         let mut r = Reader(&blob);
         let embedded = r.string().ok_or_else(bad)?;
-        let name_ok = kind.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || matches!(b, b'-' | b'@' | b'.'));
+        let name_ok =
+            kind.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || matches!(b, b'-' | b'@' | b'.'));
         if embedded != kind.as_bytes() || !name_ok || kind.contains("-cert-v01@") {
             return Err(bad());
         }
@@ -150,7 +151,17 @@ impl Signer {
     }
 
     fn sign(&self, namespace: Namespace, bytes: &[u8]) -> Result<String, SignError> {
-        let out = run(&[OsStr::new("-Y"), "sign".as_ref(), "-f".as_ref(), self.file.as_os_str(), "-n".as_ref(), namespace.as_str().as_ref()], bytes)?;
+        let out = run(
+            &[
+                OsStr::new("-Y"),
+                "sign".as_ref(),
+                "-f".as_ref(),
+                self.file.as_os_str(),
+                "-n".as_ref(),
+                namespace.as_str().as_ref(),
+            ],
+            bytes,
+        )?;
         let sig = String::from_utf8(out).map_err(|_| SignError::MalformedSignature)?;
         if looks_armoured(&sig) { Ok(sig) } else { Err(SignError::MalformedSignature) }
     }
@@ -165,6 +176,9 @@ impl Signer {
 fn run(args: &[&OsStr], stdin: &[u8]) -> Result<Vec<u8>, SignError> {
     let mut child = Command::new(KEYGEN)
         .args(args)
+        // A key that wants a passphrase must fail, not ask on the terminal: the "askpass program" is `false`.
+        .env("SSH_ASKPASS", "false")
+        .env("SSH_ASKPASS_REQUIRE", "force")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -235,11 +249,12 @@ fn key_line(principal: &str, namespace: Namespace, key: &PublicKey) -> String {
 /// whether it verifies.
 #[must_use]
 pub fn looks_armoured(sig: &str) -> bool {
-    sig.strip_prefix(BEGIN)
-        .and_then(|rest| rest.strip_suffix(END.strip_prefix('\n').unwrap_or(END)))
-        .is_some_and(|body| {
-            !body.is_empty() && body.bytes().all(|b| b.is_ascii_alphanumeric() || matches!(b, b'+' | b'/' | b'=' | b'\n'))
-        })
+    sig.strip_prefix(BEGIN).and_then(|rest| rest.strip_suffix(END.strip_prefix('\n').unwrap_or(END))).is_some_and(
+        |body| {
+            !body.is_empty()
+                && body.bytes().all(|b| b.is_ascii_alphanumeric() || matches!(b, b'+' | b'/' | b'=' | b'\n'))
+        },
+    )
 }
 
 struct Reader<'a>(&'a [u8]);
@@ -403,9 +418,11 @@ pub fn verify_approval(request: &Request, sig: &str, trust: ApprovalTrust<'_>) -
         let principal = format!("{person}:{}", kind.suffix());
         let allowed = match trust {
             ApprovalTrust::SiteCa(ca) => ca_line("*", &[Namespace::Approval], ca),
-            ApprovalTrust::PersonKeys { confirmed, automatic } => {
-                key_line(&principal, Namespace::Approval, if kind == ApprovalKind::Confirmed { confirmed } else { automatic })
-            }
+            ApprovalTrust::PersonKeys { confirmed, automatic } => key_line(
+                &principal,
+                Namespace::Approval,
+                if kind == ApprovalKind::Confirmed { confirmed } else { automatic },
+            ),
         };
         verify(Namespace::Approval, &allowed, &principal, sig, request.as_bytes())
     };

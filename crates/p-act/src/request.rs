@@ -41,9 +41,12 @@ struct WireRating {
 }
 
 /// The three scales by name, in one table so that reading and writing cannot disagree.
-const EXPOSURE: [(&str, Exposure); 3] = [("open", Exposure::Open), ("internal", Exposure::Internal), ("secret", Exposure::Secret)];
-const DAMAGE: [(&str, Damage); 3] = [("none", Damage::None), ("recoverable", Damage::Recoverable), ("lasting", Damage::Lasting)];
-const DISRUPTION: [(&str, Disruption); 3] = [("none", Disruption::None), ("brief", Disruption::Brief), ("outage", Disruption::Outage)];
+const EXPOSURE: [(&str, Exposure); 3] =
+    [("open", Exposure::Open), ("internal", Exposure::Internal), ("secret", Exposure::Secret)];
+const DAMAGE: [(&str, Damage); 3] =
+    [("none", Damage::None), ("recoverable", Damage::Recoverable), ("lasting", Damage::Lasting)];
+const DISRUPTION: [(&str, Disruption); 3] =
+    [("none", Disruption::None), ("brief", Disruption::Brief), ("outage", Disruption::Outage)];
 
 fn name_of<T: PartialEq + Copy>(table: &[(&'static str, T)], value: T) -> &'static str {
     table.iter().find(|(_, v)| *v == value).map_or("", |(n, _)| n)
@@ -169,7 +172,10 @@ pub(crate) mod tests {
             for (_, d) in DAMAGE {
                 for (_, s) in DISRUPTION {
                     let rating = Rating::new(e, d, s);
-                    assert_eq!(Request::parse(Request::compose(&call(), SIG, rating).unwrap().as_bytes()).unwrap().rating(), rating);
+                    assert_eq!(
+                        Request::parse(Request::compose(&call(), SIG, rating).unwrap().as_bytes()).unwrap().rating(),
+                        rating
+                    );
                 }
             }
         }
@@ -183,7 +189,10 @@ pub(crate) mod tests {
             Request::parse(swap(r#""type":"request""#, r#""type":"call""#)),
             Err(ParseError::WrongDocumentType { expected: "request", found: "call".into() })
         );
-        assert_eq!(Request::parse(swap(r#""rating":"#, r#""x":1,"rating":"#)), Err(ParseError::UnknownMember("x".into())));
+        assert_eq!(
+            Request::parse(swap(r#""rating":"#, r#""x":1,"rating":"#)),
+            Err(ParseError::UnknownMember("x".into()))
+        );
         assert_eq!(Request::parse(swap(r#","disruption":"none""#, "")), Err(ParseError::MissingMember("disruption")));
         assert_eq!(
             Request::parse(swap(r#""disruption":"none""#, r#""disruption":"none","extra":0"#)),
@@ -204,9 +213,15 @@ pub(crate) mod tests {
     fn refuses_a_malformed_rating_member() {
         for (member, from) in [("exposure", "internal"), ("damage", "none"), ("disruption", "none")] {
             for value in ["", "Open", "worst", "Secret", "lasting "] {
-                let bytes = edited(|t| t.replacen(&format!(r#""{member}":"{from}""#), &format!(r#""{member}":"{value}""#), 1));
-                let member: &'static str = ["exposure", "damage", "disruption"].into_iter().find(|m| *m == member).unwrap();
-                assert_eq!(Request::parse(bytes), Err(ParseError::MalformedRating { member, value: value.into() }), "{member} {value:?}");
+                let bytes =
+                    edited(|t| t.replacen(&format!(r#""{member}":"{from}""#), &format!(r#""{member}":"{value}""#), 1));
+                let member: &'static str =
+                    ["exposure", "damage", "disruption"].into_iter().find(|m| *m == member).unwrap();
+                assert_eq!(
+                    Request::parse(bytes),
+                    Err(ParseError::MalformedRating { member, value: value.into() }),
+                    "{member} {value:?}"
+                );
             }
         }
         // A value of another scale is not a value of this one.
@@ -233,8 +248,11 @@ pub(crate) mod tests {
         let unpadded = text.replacen(&encoded, encoded.trim_end_matches('='), 1);
         assert_eq!(Request::parse(unpadded), Err(ParseError::MalformedBase64("call")));
         // Valid base64 of something that is not a call, and of a changed call.
-        let not_a_call = |bytes: &[u8]| edited(|t| t.replacen(&STANDARD.encode(call().as_bytes()), &STANDARD.encode(bytes), 1));
-        assert!(matches!(Request::parse(not_a_call(b"hello")), Err(ParseError::InnerCall(e)) if matches!(*e, ParseError::NotJson(_))));
+        let not_a_call =
+            |bytes: &[u8]| edited(|t| t.replacen(&STANDARD.encode(call().as_bytes()), &STANDARD.encode(bytes), 1));
+        assert!(
+            matches!(Request::parse(not_a_call(b"hello")), Err(ParseError::InnerCall(e)) if matches!(*e, ParseError::NotJson(_)))
+        );
         let wrong_version = crate::call::tests::EXAMPLE.replacen(r#""v":1"#, r#""v":2"#, 1);
         assert_eq!(
             Request::parse(not_a_call(wrong_version.as_bytes())),
@@ -249,14 +267,22 @@ pub(crate) mod tests {
 
     #[test]
     fn refuses_a_call_sig_that_is_not_armour_or_has_controls() {
-        for bad in ["", "AAAA", "-----BEGIN SSH SIGNATURE-----\nAAAA\n", "-----BEGIN SSH SIGNATURE-----\nAA\u{0}AA\n-----END SSH SIGNATURE-----\n"] {
+        for bad in [
+            "",
+            "AAAA",
+            "-----BEGIN SSH SIGNATURE-----\nAAAA\n",
+            "-----BEGIN SSH SIGNATURE-----\nAA\u{0}AA\n-----END SSH SIGNATURE-----\n",
+        ] {
             let r = Request::compose(&call(), bad, Rating::HARMLESS);
             assert!(r.is_err(), "{bad:?}");
         }
         let bidi = SIG.replace("U1NI", "U1\u{202e}NI");
         assert_eq!(Request::compose(&call(), &bidi, Rating::HARMLESS), Err(ParseError::BidiMark("call_sig".into())));
         let cr = SIG.replace("U1NI", "U1\rNI");
-        assert_eq!(Request::compose(&call(), &cr, Rating::HARMLESS), Err(ParseError::ControlCharacter("call_sig".into())));
+        assert_eq!(
+            Request::compose(&call(), &cr, Rating::HARMLESS),
+            Err(ParseError::ControlCharacter("call_sig".into()))
+        );
     }
 
     #[test]

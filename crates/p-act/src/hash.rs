@@ -67,8 +67,13 @@ mod tests {
     fn refuses_malformed() {
         let good = DocumentHash::of(b"").to_string();
         for bad in [
-            good.to_uppercase(), good.replace("sha256:", "sha512:"), good[..good.len() - 1].to_owned(),
-            format!("{good}0"), good.replace("sha256:", ""), format!("{} ", good), String::new(),
+            good.to_uppercase(),
+            good.replace("sha256:", "sha512:"),
+            good[..good.len() - 1].to_owned(),
+            format!("{good}0"),
+            good.replace("sha256:", ""),
+            format!("{} ", good),
+            String::new(),
         ] {
             assert!(bad.parse::<DocumentHash>().is_err(), "{bad:?}");
         }

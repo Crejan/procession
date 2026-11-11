@@ -6,8 +6,8 @@
 
 use crate::error::ParseError;
 use crate::text;
-use serde::de::{DeserializeOwned, Deserializer, MapAccess, Visitor};
 use serde::Deserialize;
+use serde::de::{DeserializeOwned, Deserializer, MapAccess, Visitor};
 use serde_json::value::RawValue;
 use std::fmt;
 
@@ -69,7 +69,9 @@ impl Object {
     pub(crate) fn take_object(&mut self, name: &'static str, prefix: &'static str) -> Result<Object, ParseError> {
         let raw = self.take_raw(name)?;
         Object::parse(raw.get(), prefix).map_err(|e| match e {
-            ParseError::NotJson(_) => ParseError::WrongType { member: format!("{}{name}", self.prefix), expected: "an object" },
+            ParseError::NotJson(_) => {
+                ParseError::WrongType { member: format!("{}{name}", self.prefix), expected: "an object" }
+            }
             other => other,
         })
     }
