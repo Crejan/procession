@@ -1,7 +1,10 @@
 # Rating a call lower by its parameters - a proposal
 
-Status: a proposal for the orchestrator and the designer. No verb needs it
-yet: until one does, every call has its verb's worst rating (`SPEC.md`).
+Status: **accepted by the designer, and implemented** in `src/rate.rs` and
+`src/table.rs` (a verb with parameters), `src/dispatch.rs` (`--within`). The
+decisions that changed this text are marked *(decided)*. No production verb has
+parameter rules yet: until one does, every call has its verb's worst rating
+(`SPEC.md`). The test verb `test read` (test builds only) exercises all of it.
 `doc/approvals.md` R4 fixes the principle: where a call may be rated lower than
 its action's worst case, the rule is **data beside the action, not code**; for
 a path, a list of prefixes, matched after the path is resolved, with the file
@@ -86,7 +89,16 @@ and the dispatcher call:
    (`/etc/shadow` inside `/etc/`) and can lower (`/etc/ssl/certs/` inside
    `/etc/`). Entries are unique, so there are no ties (a test). No match:
    `otherwise`.
-7. **The verb reads the descriptor from step 2**, not the path again. In-process
+7. *(decided)* **Nothing is rated lower under a directory that anyone but its
+   owner or root can write.** A group or other write bit on a directory
+   counts. The directories looked at are those the entry vouches for: from the
+   directory a prefix names (for an exact entry: the file's parent) down to the
+   file's parent, and the file itself if it is a directory. If one is writable
+   by others, or cannot be looked at, the call keeps the **row's worst
+   rating**, not just the parameter's `otherwise`. Above the entry nothing is
+   checked: a link planted there changes where the path resolves, and the
+   resolved path is what was matched. Access lists are not looked at.
+8. **The verb reads the descriptor from step 2**, not the path again. In-process
    it reads the `File`; handed to a tool it is handed as `/dev/fd/<n>` with the
    descriptor kept open for the child. What was rated is what is read, because
    it is the same open file.
@@ -105,6 +117,12 @@ Not Linux: `readlink` of `/proc/self/fd` is Linux. On macOS, where p-robe is
 only built and tested, `fcntl(F_GETPATH)` does the same for step 4. The target
 is Linux; the macOS path exists so that the tests run here, and anything the
 tests show of step 4 is shown for `F_GETPATH`, not for `/proc`.
+
+*(Implemented as `Mode::Open` for the dispatcher and `Mode::Name` for the
+service: the service, an unprivileged account, resolves with `realpath` and
+`stat`, which need search permission on directories and not read permission
+on the file, and keeps nothing open. The two modes share steps 1, 3 and 6 to
+8; the cross-check and the descriptor are `Mode::Open` only.)*
 
 ## 3. Where the data lives, and what keeps it honest
 
@@ -147,65 +165,54 @@ Both call `rate`. The catalogue prints the row's `rating` (the worst case) and,
 for each parameter, its entries, so that a person can read what an agent is
 asked about.
 
-## 5. The problem: who opens the file
+## 5. Who opens the file *(decided: `--within`)*
 
-The principle says: open once, use that open file. The service and the
-dispatcher are different programs under different accounts. The service (an
-unprivileged account) rates; the dispatcher (root, through the same sudo rule a
-person's call uses) reads. Two things follow.
-
-- **A descriptor cannot be handed from the service to the dispatcher.** sudo
-  closes every descriptor above 2 before it runs the command (`closefrom`),
-  and the file may not be readable to the service anyway.
-- So the file the service rated and the file the dispatcher reads are opened
-  twice, in two places, and what was rated is not what is read: a path that is
-  rated `/var/log/x` can be a link to `/etc/shadow` by the time root opens it.
-
-**Proposal.** The dispatcher re-does the rating itself, and the approved
-rating becomes a limit on it, never a licence:
+The service (an unprivileged account) rates; the dispatcher (root, through
+sudo) reads. A descriptor cannot be handed over: sudo closes every descriptor
+above 2. So the dispatcher rates again, itself, at the point where it opens
+the file, and the approved rating is a limit on it, never a licence:
 
 ```
 sudo -n probe --within <exposure>,<damage>,<disruption> <noun> <verb> [args]
 ```
 
-The dispatcher opens (section 2), rates with `rate`, and refuses (exit 64,
-audit line `event=refused reason=above-approved`) if its own rating exceeds
-`--within` on any scale. Then it uses the descriptor it holds. `--within` can
-only lower what runs; it cannot make anything run that the table would not
-allow, so a person who passes it, or leaves it out, gains nothing and loses
-nothing (a person has the dispatcher under their own sudo rule and needs no
-approval). The service always passes the rating of the request that was
-approved. The two ratings may differ, in either direction, only because a file
-moved: the dispatcher's wins when it is lower (the person approved more than
-was needed), and a higher one stops the call. Race-free in the direction that
-matters.
+- The dispatcher opens (section 2), rates with `rate` (`Mode::Open`), and
+  refuses (exit 64, audit line `event=refused reason=above-approved: rated
+  ... against approved ...`, nothing runs, no start line) if its rating is above
+  `--within` on any scale. Then it runs with the descriptors it holds.
+- `--within` is read before the noun, in that place only (`dispatch::admit`);
+  anywhere else it is an argument, and an argument may not start with `-`. A
+  malformed rating is refused.
+- It can only restrict. A person at the dispatcher leaves it out and needs no
+  approval; the service always passes the rating of the request that was
+  approved. A call the table refuses (`run command`), or that cannot run here,
+  is not made to run by it.
+- Because the service's account may call `probe --within *`, it can run
+  **every verb** of the table through that sudo rule; what holds it back is the
+  service's own checks, not sudo (`SPEC.md` says so).
+- Order in the dispatcher: the pure checks, then the rating (this is where the
+  files are opened; opening has no effect), then the lock, the start line, the
+  verb. A call refused by `--within` therefore leaves one `refused` line.
 
-What this needs, beyond this crate:
-
-- the dispatcher gets a second form that starts with `--` (the rule "no token
-  starts with `-`" is about arguments; this is not one, and it is parsed
-  before them, only in this position);
-- the site's sudo rule for the service's account names `probe --within *`
-  and the table's rows, which is a wider pattern than a person's rule. The
-  derivation of the sudo rule from the table (`SPEC.md`) must therefore produce
-  both forms, and say that the first is for the service's account only. This
-  is the designer's to accept, because it touches what sudo allows.
-
-If the designer does not want a flag, the alternative is that the **service
-runs as root** for the rated read, which gives up the idea that the service
-needs no access to anything. I advise against it.
+Tested, in `rate.rs` and end to end in `tests/cli.rs` with `test read`: a link
+planted between the service's rating and the dispatcher's opening (the second
+rating sees where it leads and the call is refused); `..` out of a prefix; a
+directory with a group or other write bit under an entry; the entry directory
+itself; a FIFO; a missing file; a relative path.
 
 ## Open
 
-1. The flag above, and the sudo rule it needs.
-2. Whether the cross-check of step 5 is enough, or the verb should be refused
-   altogether where the resolved path of the descriptor is not under a
-   directory that only root can write (the prefixes protect against a link
-   only if nobody unprivileged can put a link into the open places; `/tmp` is
-   such a place and should be `secret` or absent from the lists).
-3. Where the lines between `open`, `internal` and `secret` run for the first
-   real path verbs (`approvals.md` section 10, open). The prefixes in section
-   1 are an illustration of the format, not a proposal for the ratings.
-4. `type pid` (a process: its command line is `internal`, its memory is
+1. Where the lines between `open`, `internal` and `secret` run for the first
+   real path verbs (`approvals.md` section 10, open). The prefixes in section 1
+   are an illustration of the format, not a proposal for the ratings.
+2. `type pid` (a process: its command line is `internal`, its memory is
    `secret`) and others will want to be added when `rt procs` gets parameters.
    They are new `type`s in the table and in `rate`, nothing in the formats.
+3. **Not verified on Linux.** `readlink /proc/self/fd/<n>` (step 4) is
+   Linux-only and written but never run; the tests ran on macOS with
+   `fcntl(F_GETPATH)`. The unit tests of step 5, the cross-check, pass there.
+   Also unrun: the behaviour on a Linux file that was deleted (`readlink`
+   gives a name ending in ` (deleted)`; the cross-check then fails and the call
+   is rated at the row's worst, which is the intended direction).
+4. **Access lists** and mount options (a `noexec`-like or read-only view)
+   are not looked at by the writable-directory rule.

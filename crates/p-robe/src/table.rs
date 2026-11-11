@@ -9,12 +9,17 @@ use p_act::rating::{Damage, Disruption, Exposure, Rating};
 use crate::answer::{Answer, Full};
 use crate::json::{Record, SCHEMA_VERSION};
 use crate::kit;
+use crate::rate::{Param, PathUse};
 #[cfg(feature = "test-verbs")]
 use crate::testverbs;
 
 /// What a verb knows about the call it runs in.
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub struct Env {
+    /// The paths the call named, as the dispatcher opened them: the verb reads
+    /// these files, never the names again.
+    #[allow(dead_code, reason = "read by verbs with a path parameter; only a test verb has one so far")]
+    pub paths: Vec<PathUse>,
     /// The login that called through sudo.
     pub identity: String,
     /// The effective uid the dispatcher runs as.
@@ -39,12 +44,26 @@ pub enum Availability {
     ServiceOnly,
 }
 
-/// Whether a verb takes arguments. It decides what a site's sudo rule may
-/// name: a verb without arguments is pinned to exactly its two words.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// The arguments a verb accepts, and how they rate.
+#[derive(Debug, Clone, Copy)]
 pub enum Args {
+    /// None: the site's sudo rule pins the verb to exactly its two words.
     None,
+    /// Words of the argument class, not looked at: every call is rated at the
+    /// row's worst. For rows whose tool is not built yet.
     Some,
+    /// Parameters with their rules (`rate.rs`): the rating of a call is the
+    /// worst of `floor` and what each parameter contributes.
+    #[allow(dead_code, reason = "no production row has parameter rules yet")]
+    Params { floor: Rating, params: &'static [Param] },
+}
+
+impl Args {
+    /// Whether any argument is accepted.
+    #[must_use]
+    pub fn takes_any(&self) -> bool {
+        !matches!(self, Args::None)
+    }
 }
 
 /// One row of the table.
@@ -164,6 +183,23 @@ pub fn has_noun(noun: &str) -> bool {
     verbs().any(|row| row.noun == noun)
 }
 
+/// `exposure,damage,disruption` in words, as `--within` takes it.
+#[must_use]
+pub fn format_rating(rating: Rating) -> String {
+    format!("{},{},{}", exposure(rating.exposure), damage(rating.damage), disruption(rating.disruption))
+}
+
+/// The inverse of [`format_rating`].
+#[must_use]
+pub fn parse_rating(text: &str) -> Option<Rating> {
+    let [e, d, i] = text.split(',').collect::<Vec<_>>()[..] else { return None };
+    let exposure = [Exposure::Open, Exposure::Internal, Exposure::Secret].into_iter().find(|v| exposure(*v) == e)?;
+    let damage = [Damage::None, Damage::Recoverable, Damage::Lasting].into_iter().find(|v| damage(*v) == d)?;
+    let disruption =
+        [Disruption::None, Disruption::Brief, Disruption::Outage].into_iter().find(|v| disruption(*v) == i)?;
+    Some(Rating::new(exposure, damage, disruption))
+}
+
 #[must_use]
 pub fn exposure(value: Exposure) -> &'static str {
     match value {
@@ -216,6 +252,19 @@ pub fn catalog_records(only: Option<&str>) -> Vec<Record> {
     let mut records =
         vec![Record::new("header").num("schema_version", u64::from(SCHEMA_VERSION)).str("subject", "catalog")];
     for row in verbs().filter(|row| only.is_none_or(|noun| row.noun == noun)) {
+        if let Args::Params { floor, params } = row.args {
+            for param in params {
+                records.push(
+                    Record::new("param")
+                        .str("noun", row.noun)
+                        .str("verb", row.verb)
+                        .str("name", param.name)
+                        .bool("required", param.required)
+                        .str("floor", &format_rating(floor))
+                        .strs("rules", &param.describe()),
+                );
+            }
+        }
         records.push(
             Record::new("verb")
                 .str("noun", row.noun)
@@ -225,7 +274,7 @@ pub fn catalog_records(only: Option<&str>) -> Vec<Record> {
                 .str("damage", damage(row.rating.damage))
                 .str("disruption", disruption(row.rating.disruption))
                 .bool("needs_confirmation", row.rating.needs_confirmation())
-                .bool("takes_arguments", row.args == Args::Some)
+                .bool("takes_arguments", row.args.takes_any())
                 .str("status", row.status())
                 .opt_str("reason", row.reason())
                 .str("summary", row.summary),
@@ -265,6 +314,23 @@ mod tests {
     }
 
     #[test]
+    fn a_rating_in_words_round_trips() {
+        for exposure in [Exposure::Open, Exposure::Internal, Exposure::Secret] {
+            for damage in [Damage::None, Damage::Recoverable, Damage::Lasting] {
+                for disruption in [Disruption::None, Disruption::Brief, Disruption::Outage] {
+                    let rating = Rating::new(exposure, damage, disruption);
+                    assert_eq!(parse_rating(&format_rating(rating)), Some(rating));
+                }
+            }
+        }
+        for bad in
+            ["", "open", "open,none", "open,none,none,none", "Open,none,none", "open, none,none", "open,none,huge"]
+        {
+            assert_eq!(parse_rating(bad), None, "{bad:?}");
+        }
+    }
+
+    #[test]
     fn no_verb_appears_twice() {
         let all: Vec<_> = verbs().collect();
         for (index, row) in all.iter().enumerate() {
@@ -287,7 +353,9 @@ mod tests {
     fn the_catalog_has_a_header_and_one_record_per_verb() {
         let records = catalog_records(None);
         assert!(records[0].line().starts_with("{\"type\":\"header\",\"schema_version\":1"));
-        assert_eq!(records.len(), 1 + verbs().count());
+        let params: usize =
+            verbs().map(|row| if let Args::Params { params, .. } = row.args { params.len() } else { 0 }).sum();
+        assert_eq!(records.len(), 1 + verbs().count() + params);
         assert_eq!(catalog_records(Some("rt")).len(), 1 + 3);
         assert_eq!(catalog_text(Some("sys")).lines().count(), 2);
     }

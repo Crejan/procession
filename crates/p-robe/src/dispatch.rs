@@ -18,8 +18,10 @@ use crate::answer::{ANSWER_CAP, Answer};
 use crate::audit::{self, Audit, CLIP};
 use crate::json::Record;
 use crate::lock::{self, Fault, Taken};
+use crate::rate::{self, Mode};
 use crate::rules::{ARG_MAX, IDENTITY_LEN_MAX, check_argument, is_token};
 use crate::table::{self, Availability, Env, Verb};
+use p_act::rating::Rating;
 
 pub const RC_UNAVAILABLE: u8 = 3;
 pub const RC_REFUSED: u8 = 64;
@@ -41,6 +43,8 @@ pub struct Caller {
 #[derive(Debug)]
 pub struct Admitted {
     pub identity: String,
+    /// The rating the call was approved at (`--within`), if one was given.
+    pub within: Option<Rating>,
     pub verb: &'static Verb,
     pub args: Vec<String>,
 }
@@ -85,6 +89,18 @@ pub fn admit(caller: &Caller, argv: &[OsString]) -> Result<Admitted, Refusal> {
             None => return Err(refuse("argument is not UTF-8", who)),
         }
     }
+    // `--within <exposure>,<damage>,<disruption>` before the noun: the rating the
+    // call was approved at. It can only restrict: the call is refused if the
+    // dispatcher's own rating is above it. It is not an argument, which may not
+    // start with `-`; it is read here, in this place only.
+    let (within, words) = match words.as_slice() {
+        [flag, rating, rest @ ..] if flag == "--within" => match table::parse_rating(rating) {
+            Some(rating) => (Some(rating), rest.to_vec()),
+            None => return Err(refuse("bad --within: expected exposure,damage,disruption", who)),
+        },
+        [flag] if flag == "--within" => return Err(refuse("bad --within: expected exposure,damage,disruption", who)),
+        _ => (None, words),
+    };
     let [noun, verb, args @ ..] = words.as_slice() else {
         return Err(refuse("a noun and a verb are needed", who));
     };
@@ -108,13 +124,13 @@ pub fn admit(caller: &Caller, argv: &[OsString]) -> Result<Admitted, Refusal> {
             return Err(refuse(format!("{why} {}", audit::quote(&audit::clip(arg, CLIP))), who));
         }
     }
-    if row.args == table::Args::None && !args.is_empty() {
+    if !row.args.takes_any() && !args.is_empty() {
         return Err(refuse(format!("{} takes no arguments", row.label()), who));
     }
     if matches!(row.availability, Availability::ServiceOnly) {
         return Err(refuse(format!("{} is offered by the service only", row.label()), who));
     }
-    Ok(Admitted { identity, verb: row, args: args.to_vec() })
+    Ok(Admitted { identity, within, verb: row, args: args.to_vec() })
 }
 
 /// What the dispatcher is wired to.
@@ -202,6 +218,19 @@ impl<'a> Dispatcher<'a> {
             Availability::NotBuilt(reason) => return Err(Stop::Unavailable(format!("{label}: {reason}"))),
             Availability::ServiceOnly => unreachable!("admit refuses a verb that only the service offers"),
         };
+        // The rating is made here, where the files are opened, and the call is
+        // refused if it is above the one approved. The files stay open: the
+        // verb reads these, not the names again.
+        let rated = rate::rate(call.verb, &call.args, Mode::Open)
+            .map_err(|why| Stop::Refused(refuse(why.0, Some(&call.identity))))?;
+        if let Some(approved) = call.within.filter(|approved| !rated.rating.within(*approved)) {
+            let reason = format!(
+                "above-approved: rated {} against approved {}",
+                table::format_rating(rated.rating),
+                table::format_rating(approved)
+            );
+            return Err(Stop::Refused(refuse(reason, Some(&call.identity))));
+        }
         let identity = call.identity.as_str();
         let args = call.args.join(" ");
         let fields = [
@@ -223,6 +252,7 @@ impl<'a> Dispatcher<'a> {
         self.log("start", &fields)?;
         let started = Instant::now();
         let env = Env {
+            paths: rated.paths,
             identity: call.identity.clone(),
             euid: caller.euid,
             lock_dir: self.lock_dir.clone(),
@@ -525,6 +555,41 @@ mod tests {
         assert!(text.len() <= 600, "{}", text.len());
         assert!(text.lines().last().unwrap().starts_with("{\"type\":\"truncated\""), "{text}");
         assert!(sink.lines.borrow().last().unwrap().contains("truncated=true"));
+    }
+
+    // -- --within ---------------------------------------------------------
+
+    #[test]
+    fn within_is_read_before_the_noun_and_only_there() {
+        let call = admit(&sudo("jan"), &words(&["--within", "internal,none,brief", "sys", "kit"])).unwrap();
+        assert_eq!(call.within, table::parse_rating("internal,none,brief"));
+        assert_eq!(call.verb.label(), "sys kit");
+        assert!(admit(&sudo("jan"), &words(&["sys", "kit"])).unwrap().within.is_none());
+        for bad in [
+            &["--within"][..],
+            &["--within", "sys", "kit"],
+            &["--within", "open,none", "sys", "kit"],
+            &["--within", "open,none,none"],
+            &["sys", "--within", "open,none,none"],
+            &["rt", "irq", "--within", "open,none,none"],
+        ] {
+            assert!(admit(&sudo("jan"), &words(bad)).is_err(), "{bad:?}");
+        }
+    }
+
+    #[test]
+    fn within_can_only_restrict_a_call_is_never_let_through_by_it() {
+        // A call that rates at or below what is approved runs, with the flag or without it.
+        for argv in [
+            &["sys", "kit"][..],
+            &["--within", "open,none,none", "sys", "kit"],
+            &["--within", "secret,lasting,outage", "sys", "kit"],
+        ] {
+            assert_eq!(call(&sudo("jan"), argv).rc, 0, "{argv:?}");
+        }
+        // The flag does not make a refused call run.
+        assert_eq!(call(&sudo("jan"), &["--within", "secret,lasting,outage", "run", "command"]).rc, RC_REFUSED);
+        assert_eq!(call(&sudo("jan"), &["--within", "secret,lasting,outage", "rt", "irq"]).rc, RC_UNAVAILABLE);
     }
 
     #[cfg(feature = "test-verbs")]

@@ -1,15 +1,38 @@
 //! Two verbs for trying the service end to end, in a build with the
 //! `test-verbs` feature only. Neither does anything to the host.
 
+use std::io::Read as _;
+
 use p_act::rating::{Damage, Disruption, Exposure, Rating};
 
 use crate::answer::{Answer, Full, header};
 use crate::json::Record;
+use crate::rate::{Entries, Form, Param, ParamType, PathRule};
 use crate::table::{Args, Availability, Env, Verb};
 use crate::{clock, kit};
 
-/// `test echo` and `test peak`.
+const READ_PARAMS: &[Param] = &[Param {
+    name: "path",
+    form: Form::Position(0),
+    required: true,
+    // `<sandbox>/open/` is harmless; anything else this verb reads is secret.
+    ty: ParamType::Path(PathRule {
+        entries: Entries::Sandbox,
+        otherwise: Rating::new(Exposure::Secret, Damage::None, Disruption::None),
+    }),
+}];
+
+/// `test echo`, `test peak` and `test read`.
 pub const VERBS: &[Verb] = &[
+    Verb {
+        noun: "test",
+        verb: "read",
+        runs: "probe",
+        rating: Rating::new(Exposure::Secret, Damage::None, Disruption::None),
+        args: Args::Params { floor: Rating::HARMLESS, params: READ_PARAMS },
+        summary: "TEST BUILD: reads the first bytes of one file; rated by where the file is",
+        availability: Availability::Ready(read),
+    },
     Verb {
         noun: "test",
         verb: "echo",
@@ -44,4 +67,32 @@ fn answer_with(verb: &str, env: &Env, args: &[String], answer: &mut Answer<'_>) 
     answer.record(&header("test", verb, &kit::hostname(), &clock::now()))?;
     answer.record(&Record::new("echo").str("identity", &env.identity).strs("args", args))?;
     Ok(0)
+}
+
+/// Reads from the descriptor the dispatcher opened, never from the name.
+fn read(env: &Env, _args: &[String], answer: &mut Answer<'_>) -> Result<u8, Full> {
+    answer.record(&header("test", "read", &kit::hostname(), &clock::now()))?;
+    let Some(used) = env.paths.first() else { return Ok(1) };
+    let mut text = String::new();
+    let mut failed = None;
+    if let Some(mut file) = used.file.as_ref() {
+        if !used.is_dir {
+            let mut bytes = Vec::new();
+            match (&mut file).take(4096).read_to_end(&mut bytes) {
+                Ok(_) => text = String::from_utf8_lossy(&bytes).into_owned(),
+                Err(error) => failed = Some(error.to_string()),
+            }
+        }
+    } else {
+        failed = Some("the file could not be opened".into());
+    }
+    let resolved = used.resolved.as_ref().map(|path| path.display().to_string());
+    answer.record(
+        &Record::new("file")
+            .opt_str("resolved", resolved.as_deref())
+            .bool("is_dir", used.is_dir)
+            .str("text", &text)
+            .opt_str("error", failed.as_deref()),
+    )?;
+    Ok(u8::from(failed.is_some()))
 }

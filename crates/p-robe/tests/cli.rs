@@ -42,6 +42,22 @@ fn the_catalogue_needs_no_sudo_and_lists_every_verb_with_its_status() {
 }
 
 #[test]
+fn serve_says_what_is_wrong_with_its_settings_and_that_its_transport_is_not_built() {
+    let missing = probe(&["serve", "--config", "/nonexistent/probe.toml"], None);
+    assert_eq!(missing.status.code(), Some(64));
+    assert!(text(&missing.stderr).contains("/nonexistent/probe.toml"), "{}", text(&missing.stderr));
+    assert_eq!(probe(&["serve", "--bogus"], None).status.code(), Some(64));
+    assert_eq!(probe(&["setup"], None).status.code(), Some(64));
+    let dir = std::env::temp_dir().join(format!("probe-cli-serve-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let file = dir.join("probe.toml");
+    std::fs::write(&file, "person = \"jan\"\n").unwrap();
+    let out = probe(&["serve", "--config", file.to_str().unwrap()], None);
+    assert_eq!(out.status.code(), Some(64));
+    assert!(text(&out.stderr).contains("confirmed_key is needed"), "{}", text(&out.stderr));
+}
+
+#[test]
 fn a_production_build_does_not_know_the_test_hook() {
     if cfg!(feature = "test-verbs") {
         return;
@@ -148,5 +164,127 @@ mod with_test_verbs {
         let dir = sandbox("ident");
         let out = probe(&["test", "echo", "identity=eva"], Some(&dir));
         assert!(text(&out.stdout).contains("\"identity\":\"jan\""));
+    }
+
+    // -- rating by path, end to end ------------------------------------------
+
+    use std::os::unix::fs::{PermissionsExt, symlink};
+
+    /// A sandbox with `open/` (rated harmless by the test verb) and `private/`.
+    fn place(name: &str) -> PathBuf {
+        let dir = sandbox(name);
+        for sub in ["open", "private"] {
+            std::fs::create_dir(dir.join(sub)).unwrap();
+            std::fs::set_permissions(dir.join(sub), std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        std::fs::write(dir.join("open/a"), "hello").unwrap();
+        std::fs::write(dir.join("private/s"), "secret").unwrap();
+        dir
+    }
+
+    fn read(dir: &Path, within: Option<&str>, path: &Path) -> Output {
+        let path = path.display().to_string();
+        match within {
+            Some(rating) => probe(&["--within", rating, "test", "read", &path], Some(dir)),
+            None => probe(&["test", "read", &path], Some(dir)),
+        }
+    }
+
+    fn refused_above(out: &Output) {
+        assert_eq!(out.status.code(), Some(64), "{}", text(&out.stderr));
+        assert!(out.stdout.is_empty(), "nothing ran");
+        assert!(text(&out.stderr).contains("above-approved"), "{}", text(&out.stderr));
+    }
+
+    #[test]
+    fn a_file_in_the_open_place_runs_at_the_harmless_rating_and_is_read_from_the_open_file() {
+        let dir = place("read");
+        let out = read(&dir, Some("open,none,none"), &dir.join("open/a"));
+        assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
+        assert!(text(&out.stdout).contains("\"text\":\"hello\""), "{}", text(&out.stdout));
+    }
+
+    #[test]
+    fn a_file_elsewhere_is_rated_secret_and_runs_only_if_the_approved_rating_allows() {
+        let dir = place("elsewhere");
+        let secret = dir.join("private/s");
+        refused_above(&read(&dir, Some("open,none,none"), &secret));
+        refused_above(&read(&dir, Some("internal,none,none"), &secret));
+        assert_eq!(read(&dir, Some("secret,none,none"), &secret).status.code(), Some(0));
+        // A person at the dispatcher passes no flag and needs no approval.
+        assert_eq!(read(&dir, None, &secret).status.code(), Some(0));
+        let log = audit(&dir);
+        assert!(log[0].starts_with("event=refused ") && log[0].contains("above-approved"), "{log:?}");
+    }
+
+    #[test]
+    fn a_link_planted_between_the_approval_and_the_opening_is_refused() {
+        let dir = place("planted");
+        let link = dir.join("open/link");
+        symlink(dir.join("open/a"), &link).unwrap();
+        // The service rates the name (harmless) and passes that as --within.
+        assert_eq!(read(&dir, Some("open,none,none"), &link).status.code(), Some(0));
+        // Before the same call reaches the dispatcher, the link is replaced.
+        std::fs::remove_file(&link).unwrap();
+        symlink(dir.join("private/s"), &link).unwrap();
+        let before = audit(&dir).len();
+        refused_above(&read(&dir, Some("open,none,none"), &link));
+        let log = audit(&dir);
+        assert_eq!(log.len(), before + 1);
+        assert!(log.last().unwrap().starts_with("event=refused "));
+        assert!(!log.last().unwrap().contains("event=start"));
+    }
+
+    #[test]
+    fn a_directory_that_others_can_write_keeps_the_worst_rating() {
+        let dir = place("loose");
+        let loose = dir.join("open/loose");
+        std::fs::create_dir(&loose).unwrap();
+        std::fs::write(loose.join("f"), "x").unwrap();
+        std::fs::set_permissions(&loose, std::fs::Permissions::from_mode(0o777)).unwrap();
+        refused_above(&read(&dir, Some("open,none,none"), &loose.join("f")));
+        std::fs::set_permissions(&loose, std::fs::Permissions::from_mode(0o755)).unwrap();
+        assert_eq!(read(&dir, Some("open,none,none"), &loose.join("f")).status.code(), Some(0));
+        std::fs::set_permissions(&loose, std::fs::Permissions::from_mode(0o775)).unwrap();
+        refused_above(&read(&dir, Some("open,none,none"), &loose.join("f")));
+    }
+
+    #[test]
+    fn dot_dot_does_not_get_out_of_the_open_place_unrated() {
+        let dir = place("dotdot");
+        refused_above(&read(&dir, Some("open,none,none"), &dir.join("open/../private/s")));
+    }
+
+    #[test]
+    fn a_fifo_a_missing_file_and_a_relative_path() {
+        let dir = place("odd");
+        let fifo = dir.join("open/fifo");
+        let c = std::ffi::CString::new(fifo.to_str().unwrap()).unwrap();
+        // SAFETY: a valid NUL-terminated path.
+        assert_eq!(unsafe { libc::mkfifo(c.as_ptr(), 0o600) }, 0);
+        let out = read(&dir, Some("secret,none,none"), &fifo);
+        assert_eq!(out.status.code(), Some(64));
+        assert!(text(&out.stderr).contains("not a regular file"));
+        // A file that is not there cannot be rated: the worst, and then the verb fails.
+        refused_above(&read(&dir, Some("open,none,none"), &dir.join("open/absent")));
+        assert_eq!(read(&dir, Some("secret,none,none"), &dir.join("open/absent")).status.code(), Some(1));
+        let out = probe(&["--within", "secret,none,none", "test", "read", "open/a"], Some(&dir));
+        assert_eq!(out.status.code(), Some(64));
+    }
+
+    #[test]
+    fn a_malformed_within_is_refused_and_the_catalogue_shows_the_rule() {
+        let dir = place("flag");
+        for bad in ["open,none", "OPEN,none,none", "open,none,huge", ""] {
+            let out = probe(&["--within", bad, "test", "echo"], Some(&dir));
+            assert_eq!(out.status.code(), Some(64), "{bad:?}");
+        }
+        let out = probe(&["test", "echo", "--within", "open,none,none"], Some(&dir));
+        assert_eq!(out.status.code(), Some(64), "an argument may not start with -");
+        let catalogue = text(&probe(&["catalog", "--format", "json"], Some(&dir)).stdout);
+        assert!(
+            catalogue.contains("\"type\":\"param\",\"noun\":\"test\",\"verb\":\"read\",\"name\":\"path\""),
+            "{catalogue}"
+        );
     }
 }
