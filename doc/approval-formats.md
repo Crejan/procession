@@ -26,6 +26,9 @@ yet.
   certificates are never sent separately.
 - **One namespace per document type.** A signature for one type can never
   verify as another.
+- **Every SSHSIG namespace ending in `@procession` is reserved for this
+  system.** pledge's SSH agent socket refuses a signature in any of them,
+  for every key.
 
 | Document | Signed by | Namespace |
 |---|---|---|
@@ -33,6 +36,13 @@ yet.
 | request | the service's key, certified by its host's key | `request-v1@procession` |
 | approval | the person's confirmed or automatic approval key, certified by the site CA | `approval-v1@procession` |
 | clearance | the broker's key, certified by the site CA | `clearance-v1@procession` |
+
+Two more namespaces belong to the connections
+(`approval-connections.md`): `connection-v1@procession`, pledge's sign-in to
+the broker with the person's connection key, and `broker-v1@procession`,
+what the broker says to a pledge in its own name. A service's
+allowed-signers lines never list either. `hosts-v1@procession` is section
+6.1.
 
 A change that an old reader would misread gets a new number in `v` and in
 the namespace. A reader refuses a `v` it does not know.
@@ -102,6 +112,9 @@ contains.
   carries none of the login extensions.
 - **The key ID** is a free label for the person's dialogs and the record. No
   decision is ever made on it.
+- **A delegation's identifier** is the SHA-256 fingerprint of the agent's
+  public key, as `ssh-keygen -l` prints it (`SHA256:...`). The record and
+  the broker's register know a delegation by it.
 - **Key types**: Ed25519 and ECDSA P-256, for the certified key and for the
   issuing key. Any other type is refused, with an error that names it. The
   same holds for every key in this document; a person's keys are P-256
@@ -180,10 +193,22 @@ A service accepts a clearance for 60 seconds after `at`.
 ### 6.1 The list of hosts' keys
 
 Not part of an exchange, but signed the same way: what tells a pledge which
-key is a host's, from stage 3. Made and signed by the issuer with the site
-CA's key, in the namespace `hosts-v1@procession`; carried to a pledge by the
-broker, which cannot alter it; verified by pledge against the site CA's
-line. A draft: the member names are not settled.
+key is a host's, from stage 3. Made by the issuer and signed with the site
+CA's key itself, not with a certified key, in the namespace
+`hosts-v1@procession`; carried to a pledge by the broker, which cannot alter
+it; verified by pledge with a plain line, not a `cert-authority` one:
+
+```
+hosts namespaces="hosts-v1@procession" <the site CA's public key>
+```
+
+A pledge accepts a list only if its `at` is later than that of the list it
+holds, and keeps the newest. A list does not expire. A host that left the
+site stays in a pledge's list until the next one, which is harmless: the
+broker passes on nothing from a host it does not know. A draft: the member
+names are not settled, and the whole list stands under an open decision
+(approvals.md, section 10: certifying a service's key by the site CA would
+remove it).
 
 ```json
 {"v":1,"type":"hosts","at":"2026-11-11T15:00:00Z","hosts":[{"name":"a.example","key":"ssh-ed25519 AAAAC3..."}]}
@@ -259,8 +284,8 @@ namespace.
 A verifier may write a line with only the namespace it is verifying; it
 must never write one with more.
 
-**Names that the site CA must never certify for a person:** `broker`, and
-anything without the `:confirmed` or `:automatic` ending. A person's name
+**Names that the site CA must never certify for a person:** `broker`,
+`hosts`, and anything without the `:confirmed` or `:automatic` ending. A person's name
 never contains `:` (section 3.1), which these endings rely on.
 
 ## 8. In the first stage
@@ -277,11 +302,11 @@ same; only the allowed-signers lines differ:
 
 ## 9. Open
 
-- How the call rides on an MCP tool call: which header carries the call's
-  bytes and which its signature. With the connections.
+- How the call rides on an MCP tool call: decided, in the tool call's
+  `_meta` (approvals.md, section 10); the member names are with the
+  connections.
 - Whether `params` should be named values rather than a list. A list is what
   the dispatcher of p-robe takes today (`key=value` tokens), and what a
   dialog can show without knowing the action.
-- A crate for these formats, used by p-ledge, p-age and p-robe, so that
-  three programs do not each write a parser: `p-act`, binary none. It would
-  also take `rating` out of p-ledge.
+Done since the first draft: the crate for these formats, `p-act`, used by
+p-ledge, p-age and p-robe; it holds `rating` as well.
