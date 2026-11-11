@@ -21,7 +21,7 @@ The signer is not part of p-robe. It needs an owner (see "What I need").
 The signer, not the model, sets `id` (fresh UUID per tool call, never reused,
 also not after "expired"), `deadline` (default: now + 2 minutes; the model may
 ask for another through the argument `wait_seconds`, at most 600), `service`
-(from the URL it was configured with) and `claim` (the model's own words,
+(`host` from its configuration, `name` always `probe`: the name of the service's type in the catalogue, one service of a type per host, `approval-formats.md` section 3) and `claim` (the model's own words,
 passed through).
 
 ## 2. One endpoint, no state
@@ -47,11 +47,13 @@ passed through).
 | `Procession-Call` | the call's bytes, base64 (standard alphabet, padded) |
 | `Procession-Call-Signature` | the call's signature, **as armoured text, base64-encoded again** |
 
-The armoured SSHSIG has line breaks, which a header cannot carry, and
-`approval-formats.md` section 1 says nobody re-creates signed bytes: the
-armoured text is encoded whole and decoded whole, then goes unchanged into the
-request's `call_sig`. (Stripping the armour and re-adding it would be a
-re-creation, however deterministic.)
+The armoured SSHSIG has line breaks, which a header cannot carry. Since
+`approval-formats.md` section 1 (a signature inside another document is the
+base64 of its armoured bytes), the header value **is** the value of the
+request's `call_sig`, and `Procession-Call` is the request's `call`: the
+service copies both into the request without decoding or re-encoding them
+(it decodes a copy to read the call). The signer's keys must be Ed25519 or
+ECDSA P-256 (`approval-formats.md` section 3.1); `p-act` refuses others.
 
 Rules at the service, all before the call is looked at:
 
@@ -132,12 +134,37 @@ as further text content (or none).
 | `expired` | the deadline passed without an approval | `no-approval` | may ask again as a new call (new identifier), and should say so to the person first |
 | `unavailable` | the service could not reach pledge or the broker, so nothing was asked; at once, not at the deadline | `no-route` | the same as `expired`: nothing was done |
 
-Reasons for `refused` are coarse on purpose: `invalid-call` (names another
+Reasons for `refused`: `review-service-sock.md`, section 3, replaces the
+list that stood here. The service passes on, unchanged, the `reason` pledge
+(stage 2: the broker) sent when it is in the closed list below, and uses these
+names for what it decides itself, so an agent meets one vocabulary. A `reason`
+outside the list becomes `unknown`; the service never copies a string it
+received into what an agent reads. The list:
+
+- from the service: `invalid-call` (names another host or service, unknown
+  verb, arguments not accepted, a string that cannot be shown), `mismatch`,
+  `approval-invalid` (what came back did not verify, or was the automatic key
+  for a request rated at the top; nothing ran), `call-used`;
+- from pledge (`service-sock.md` section 4): `malformed`, `unknown-delegation`,
+  `delegation-ended`, `delegation-withdrawn`, `deadline-past`,
+  `deadline-too-far`, `call-used`, `service-mismatch` (a fault of this
+  service's installation, its key or certificate: an operator must act, and
+  the service logs it), `not-showable`, `limit`, `muted`, `ceiling`;
+- from the broker (stage 2, its own document): `not-permitted` (the person may
+  not, or the person's groups are not among the binding's `groups`) and what
+  that document adds.
+
+Pledge's `refused`/`unavailable` (it could not ask or record) and a service
+that cannot reach pledge are both the outcome `unavailable`, with the reasons
+`pledge-unavailable` and `no-route`. The deadline checks of step 3 in section 8
+use `deadline-past` and `deadline-too-far`, not `invalid-call`.
+
+(The earlier, coarser list, kept for the thinking behind it: `invalid-call` (names another
 host or service, ended, unknown verb, arguments not accepted),
 `mismatch`, `over-ceiling` (rating above what the delegation allows),
 `not-permitted` (the site's rules), `delegation-ended`, `muted` (declined too
 often), `limit` (too many waiting), `used` (the identifier was used before),
-`approval-invalid` (what came back did not verify; nothing ran). The detail
+`approval-invalid` (what came back did not verify; nothing ran).) The detail
 stays in the service's audit line and in pledge's record. An agent that is told
 `not-permitted` can stop wasting calls; it does not learn the site's rules.
 This list needs the answer format of the next documents (service to broker,
@@ -152,8 +179,9 @@ a call may need your person's approval and waits for it until its deadline;
 
 - The service holds the request open until the call is decided or its deadline
   passes. If the client sent a `progressToken`, the response is an SSE stream
-  with `notifications/progress` at the steps that matter ("asked", "approved,
-  running"), and a comment line every 15 seconds so that nothing in between
+  with `notifications/progress` at the steps that matter ("handed to your
+  person's machine", "approved, running"; pledge sends nothing between ask and
+  answer, so the service cannot say that a dialog is on screen), and a comment line every 15 seconds so that nothing in between
   closes an idle connection. Without a token the response is plain JSON, sent
   once.
 - **A cancelled or dropped call is not run.** `notifications/cancelled`, or the
@@ -166,8 +194,10 @@ a call may need your person's approval and waits for it until its deadline;
 - A connection lost **after** the verb started: the verb finishes, the answer is
   lost. The identifier is used, so the agent must make a new call, which asks
   again. Accepted: a verb is not made repeatable to save a dialog.
-- At most 64 calls wait in the service at once (a configurable bound on
-  memory and descriptors, not a rule about who may what); beyond that, `503`
+- At most 16 calls wait in the service at once in stage 1: the protocol's
+  limit of open asks on one connection (`service-sock.md` section 4), which the
+  service keeps itself rather than provoke `too-many-asks`. It is a bound on
+  the connection, not a rule about who may what; beyond that, `503`
   with `Retry-After`, as a transport decision, no outcome.
 
 ## 8. What the service does with a tool call, in order
@@ -189,7 +219,7 @@ front:
 **The service does not verify the agent's certificate** (it cannot,
 `approvals.md` section 5; pledge and the broker do). So a stranger can make the
 service do steps 1 to 5 up to the signing of a request, which pledge or the
-broker then refuse. This is the reason for the bound of 64 waiting calls, and
+broker then refuse. This is the reason for the bound on waiting calls, and
 for the service signing nothing until step 5 has passed.
 
 ## What I need
