@@ -75,3 +75,9 @@ Verified: `cargo test -p p-act --offline` 38 unit + 27 integration passed; `carg
 **Decisions of mine inside the rules**
 - Group names: refused if empty, containing whitespace, a control or a bidirectional character; sorted means strictly increasing bytewise (so `B,a` is valid, `a,B` is not). A present but empty `groups@procession` value is refused (empty name). The extension twice is refused.
 - Test certificates for agents, services, approvals and the broker are now issued with `-O clear` (as pledge does); the refusal tests use a default-extension certificate and `-O force-command` / `source-address`.
+
+## 2026-11-11: site CA lines and PersonKeys (integration 47bb806 merged)
+Verified: `cargo test -p p-act --offline` 38 unit + 30 integration passed; clippy and `cargo fmt --check` clean.
+- `ApprovalTrust::SiteCa` now uses the line `*:confirmed,*:automatic cert-authority,namespaces="approval-v1@procession" <CA>`; `verify_clearance` uses `broker cert-authority,namespaces="clearance-v1@procession" <CA>`. The pattern list behaves as hoped with OpenSSH 10.2 (tested directly with `ssh-keygen -Y verify` on both lines verbatim, and through the API, for an Ed25519 and a P-256 CA): `<person>:confirmed`, `<person>:automatic` and `broker` verify, each only for its own document type; `<person>`, `<person>:other`, `<person>:`, `:confirmed`, `<person>:confirmed:automatic`, `broker:confirmed`, a non-ASCII name, `broker` for an approval and a person's name for a clearance verify nowhere. Nothing was widened.
+- `ApprovalTrust::PersonKeys` with the same key as confirmed and automatic gives the new `SignError::SameApprovalKey` (tested with Ed25519 and P-256).
+- Not implemented, as instructed: the hosts list (formats 6.1, `hosts-v1@procession`). `service.name` grammar unchanged.

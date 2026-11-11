@@ -86,6 +86,8 @@ pub enum SignError {
     UnknownExtension(String),
     #[error("the agent's certificate has a bad `groups@procession`: {0}")]
     BadGroups(&'static str),
+    #[error("the confirmed and the automatic approval key are the same key")]
+    SameApprovalKey,
     #[error("an automatic approval is not accepted for a request rated at the top of a scale")]
     AutomaticNotAcceptable,
     #[error("cannot run ssh-keygen: {0}")]
@@ -547,11 +549,17 @@ pub fn sign_approval(signer: &Signer, request: &Request) -> Result<String, SignE
 /// always accepted; an automatic one only for a request rated below the top
 /// of every scale. Returns which key signed.
 pub fn verify_approval(request: &Request, sig: &str, trust: ApprovalTrust<'_>) -> Result<ApprovalKind, SignError> {
+    if let ApprovalTrust::PersonKeys { confirmed, automatic } = trust {
+        // One key under both names would make every automatic approval verify as confirmed.
+        if confirmed == automatic {
+            return Err(SignError::SameApprovalKey);
+        }
+    }
     let person = request_person(request)?;
     let attempt = |kind: ApprovalKind| {
         let principal = format!("{person}:{}", kind.suffix());
         let allowed = match trust {
-            ApprovalTrust::SiteCa(ca) => ca_line("*", &[Namespace::Approval], ca),
+            ApprovalTrust::SiteCa(ca) => ca_line("*:confirmed,*:automatic", &[Namespace::Approval], ca),
             ApprovalTrust::PersonKeys { confirmed, automatic } => key_line(
                 &principal,
                 Namespace::Approval,
@@ -579,6 +587,6 @@ pub fn sign_clearance(signer: &Signer, clearance: &Clearance) -> Result<String, 
 /// is fresh, and whether it covers the request at hand ([`Clearance::covers`]),
 /// is the caller's to check.
 pub fn verify_clearance(clearance: &Clearance, sig: &str, site_ca: &PublicKey) -> Result<(), SignError> {
-    let allowed = ca_line("*", &[Namespace::Clearance], site_ca);
+    let allowed = ca_line("broker", &[Namespace::Clearance], site_ca);
     verify(Namespace::Clearance, &allowed, "broker", sig, clearance.as_bytes())
 }

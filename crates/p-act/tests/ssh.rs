@@ -834,3 +834,133 @@ fn signatures_travel_as_base64_of_their_armour() {
     assert_eq!(parsed.call_sig(), d.sig);
     verify_call(parsed.call(), parsed.call_sig(), &d.keys.public(&d.key)).unwrap();
 }
+
+// ---------------------------------------------------------------------------
+// The site CA's two lines (formats section 7)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn the_site_ca_lines_accept_exactly_the_three_names() {
+    let d = delegation("alice");
+    let keys = Keys::new();
+    let request = request(&d, INTERNAL);
+    let clearance = Clearance::compose(request.hash(), Timestamp::from_unix(1_794_409_481).unwrap()).unwrap();
+    for (label, ca) in [("ed25519", keys.key("ca")), ("p256", keys.ecdsa_key("ca-p256"))] {
+        let ca_pub = keys.public(&ca);
+        let trust = ApprovalTrust::SiteCa(&ca_pub);
+        let count = std::cell::Cell::new(0);
+        let named = |name: &str| {
+            count.set(count.get() + 1);
+            keys.certified(&format!("{label}-{}", count.get()), &ca, name, VALID)
+        };
+
+        // The three names that verify, each only where it belongs.
+        assert_eq!(
+            verify_approval(&request, &sign_approval(&named("alice:confirmed"), &request).unwrap(), trust).unwrap(),
+            ApprovalKind::Confirmed
+        );
+        assert_eq!(
+            verify_approval(&request, &sign_approval(&named("alice:automatic"), &request).unwrap(), trust).unwrap(),
+            ApprovalKind::Automatic
+        );
+        let broker = named("broker");
+        verify_clearance(&clearance, &sign_clearance(&broker, &clearance).unwrap(), &ca_pub).unwrap();
+
+        // Any other name verifies nowhere.
+        for other in [
+            "alice",
+            "alice:other",
+            "alice:",
+            ":confirmed",
+            "alice:confirmed:automatic",
+            "broker:confirmed",
+            "alicé:confirmed",
+            "bob:confirmed",
+        ] {
+            let signer = named(other);
+            assert!(
+                is_rejected(verify_approval(&request, &sign_approval(&signer, &request).unwrap(), trust)),
+                "{label} approval {other}"
+            );
+            assert!(
+                is_rejected(verify_clearance(&clearance, &sign_clearance(&signer, &clearance).unwrap(), &ca_pub)),
+                "{label} clearance {other}"
+            );
+        }
+        // `broker` is not a person, and a person is not the broker.
+        assert!(is_rejected(verify_approval(&request, &sign_approval(&broker, &request).unwrap(), trust)));
+        for person in ["alice:confirmed", "alice:automatic"] {
+            let signer = named(person);
+            assert!(
+                is_rejected(verify_clearance(&clearance, &sign_clearance(&signer, &clearance).unwrap(), &ca_pub)),
+                "{person}"
+            );
+        }
+    }
+}
+
+#[test]
+fn the_site_ca_lines_as_written_are_accepted_by_ssh_keygen_itself() {
+    // The two lines of the formats document, verbatim, in one file, checked with ssh-keygen directly.
+    let keys = Keys::new();
+    let ca = keys.key("ca");
+    let ca_pub = keys.public(&ca);
+    let allowed = keys.path("allowed");
+    std::fs::write(
+        &allowed,
+        format!(
+            "*:confirmed,*:automatic cert-authority,namespaces=\"approval-v1@procession\" {ca_pub}\nbroker cert-authority,namespaces=\"clearance-v1@procession\" {ca_pub}\n"
+        ),
+    )
+    .unwrap();
+    keys.certified("c", &ca, "bob:confirmed", VALID);
+    keys.certified("a", &ca, "bob:automatic", VALID);
+    keys.certified("b", &ca, "broker", VALID);
+    let data = b"data";
+    for (key, namespace, id, ok) in [
+        ("c", "approval-v1@procession", "bob:confirmed", true),
+        ("a", "approval-v1@procession", "bob:automatic", true),
+        ("b", "clearance-v1@procession", "broker", true),
+        ("c", "approval-v1@procession", "bob:automatic", false),
+        ("a", "approval-v1@procession", "bob:confirmed", false),
+        ("c", "approval-v1@procession", "bob", false),
+        ("b", "approval-v1@procession", "broker", false),
+        ("c", "clearance-v1@procession", "bob:confirmed", false),
+        ("c", "clearance-v1@procession", "broker", false),
+        ("b", "approval-v1@procession", "bob:confirmed", false),
+    ] {
+        let sig = raw_sign(&keys.path(&format!("{key}-cert.pub")), namespace, data);
+        let sig_file = keys.path("sig");
+        std::fs::write(&sig_file, sig).unwrap();
+        let mut child = Command::new("ssh-keygen")
+            .args(["-Y", "verify", "-f"])
+            .arg(&allowed)
+            .args(["-I", id, "-n", namespace, "-s"])
+            .arg(&sig_file)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap();
+        std::io::Write::write_all(&mut child.stdin.take().unwrap(), data).unwrap();
+        assert_eq!(child.wait().unwrap().success(), ok, "{key} {namespace} {id}");
+    }
+}
+
+#[test]
+fn the_same_key_under_both_names_is_refused() {
+    let d = delegation("alice");
+    let keys = Keys::new();
+    let key = keys.key("only");
+    let key_pub = keys.public(&key);
+    let trust = ApprovalTrust::PersonKeys { confirmed: &key_pub, automatic: &key_pub };
+    let request = request(&d, INTERNAL);
+    let sig = sign_approval(&Signer::plain(&key), &request).unwrap();
+    assert!(matches!(verify_approval(&request, &sig, trust), Err(SignError::SameApprovalKey)));
+    // Also for a request that would otherwise be accepted automatically, and for the P-256 key.
+    let p256 = keys.ecdsa_key("p256");
+    let p256_pub = keys.public(&p256);
+    let trust = ApprovalTrust::PersonKeys { confirmed: &p256_pub, automatic: &p256_pub };
+    let sig = sign_approval(&Signer::plain(&p256), &request).unwrap();
+    assert!(matches!(verify_approval(&request, &sig, trust), Err(SignError::SameApprovalKey)));
+}
