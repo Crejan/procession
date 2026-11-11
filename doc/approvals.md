@@ -112,6 +112,14 @@ p-robe by sudo, for one) is not reachable from the sandbox. Without this
 rule R1 means nothing: an agent that runs as its person needs nobody's
 approval.
 
+A sandbox should run the signer (`pact`, section 10) as a user that nothing
+the model starts runs as, so that the agent's key cannot be read and carried
+out. Where a sandbox does not, the key protects against the model's text and
+against accident, not against code the model runs. The design holds either
+way: every use of the key still passes the person's machine and is recorded
+there. What the separation buys is that the key cannot be handed to someone
+who then acts from elsewhere until the delegation ends or is withdrawn.
+
 **R3. An agent may have carried out at most what its person may.** A
 delegation names some of the person's groups and can only narrow. Nobody but
 the person can issue one, and it cannot be passed on.
@@ -265,7 +273,7 @@ request in front of a person that is not from that person's agent.
 | Threat | Goal | What stops it | What remains |
 |---|---|---|---|
 | An agent asks for something harmful (a bug, an injected instruction) | G1 | R2: it can only ask. R3: only inside its delegation. R4: anything at the top of a scale needs the person; by default so does everything but a harmless query. Limits on how much it may ask (section 7) | A harmful action under a ceiling the person raised. A person who approves a plausible request. A service that rated too low |
-| An agent's key is copied (the sandbox's host, a leak) | G2 | The key is short-lived and narrow. R1: every use passes the person's machine and is recorded there. The person withdraws the delegation in pledge, which stops signing for it at once | Until someone notices: whatever lies under the automatic ceiling. By default harmless queries |
+| An agent's key is copied (the sandbox's host, a leak) | G2 | The key is short-lived and narrow. R1: every use passes the person's machine and is recorded there. The person withdraws the delegation in pledge, which stops signing for it at once | Until someone notices: whatever lies under the automatic ceiling. By default harmless queries. Where the sandbox does not keep the signer apart from what the model runs (R2), the model's own code can be the one that copies it |
 | A call is captured and sent again | G1, G6 | R5: one request per call, enforced by pledge | Nothing known |
 | A request says something else than the call | G1 | R6 | Nothing known; the service is trusted anyway |
 | The sandbox leaks: the agent gets its person's account | G1 | Nothing in this design (trusted, above) | Everything the person can do on that host. R1 does not apply any more |
@@ -284,7 +292,9 @@ request in front of a person that is not from that person's agent.
 
 **Signatures.** SSHSIG, one namespace per use (call, request, approval,
 clearance, connection), verified with `ssh-keygen -Y verify`. A service
-needs no library.
+needs no library. An agent's call is the one signature not made by
+`ssh-keygen`: the signer in the sandbox writes it itself, so that the key is
+never a file there, and is tested against `ssh-keygen` byte for byte.
 
 **A person's keys**, made in the machine's key hardware. pledge prints their
 public parts as one block; an administrator enters it in the site project.
@@ -534,6 +544,14 @@ specifications:
   that talks to services. The model never sees the key. That program sets
   the deadline from its own setting; the model may ask for a shorter wait,
   never a longer one.
+- What a model can be told of a call's outcome is a closed list: `done`,
+  `declined`, `expired`, `refused` (with its class), `unavailable` (nothing
+  was done) and `unknown` (the call was sent; whether it ran is not known;
+  only the signer makes this one, and its text tells the model to find out
+  by a query before repeating anything that changes something). While the
+  signer waits for an answer it tells the model's client so at a fixed
+  interval with one fixed text; nothing a service says reaches the model
+  that way.
 - What an agent learns of a "no" is coarse: declined, expired, refused as one
   of a few classes, unavailable. pledge and the broker give a service their
   exact reasons, and the exact reason is in the person's record; an agent is
@@ -583,5 +601,9 @@ Open:
 - **Not checked** (section 5): keys in a Secure Enclave in every role this
   design gives them.
 - **The interfaces.** The formats of call, request, approval and clearance
-  are in [`approval-formats.md`](approval-formats.md). Next: the connections
-  (agent to service, service to broker, pledge to broker).
+  are in [`approval-formats.md`](approval-formats.md); the exchange of a
+  request and its answer, and the broker's two connections, are in
+  [`approval-connections.md`](approval-connections.md), a draft. Still
+  proposals of the crates: agent to service (p-robe), the stage-1 socket,
+  the record and the control socket (p-ledge), the agent-side signer
+  (p-act).
