@@ -253,3 +253,16 @@ case-insensitive).
    fingerprint instead of a name?
 3. Is "refused / blocked" (the person blocked it in the dialog) right for the
    record, or should it be `declined` with the block as an event?
+
+## Review of the pact bundle (option B)
+
+`proposals/review-pact-bundle.md`. Short: pledge can write exactly the bundle
+(Ed25519 OpenSSH key block built by hand, certificate built by pledge and
+signed by the key holder, `-O clear` plus `groups@procession`); it lacks the
+services list (stage 1: the person's file or options; stage 2: the broker's
+list narrowed by the person's own url configuration, TLS root from its own
+broker setting). The leak risks are in delivery: I propose `agents.delivered`
+(a delegation is pending and signs nothing until the command line reports
+the bundle written; a closed connection withdraws it), no bundle to a terminal
+by default, a redacting key type. Changes to `control-sock.md` are listed in
+section 5 of the review; not yet applied to that file.
