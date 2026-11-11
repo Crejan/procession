@@ -583,5 +583,9 @@ Open:
 - **Not checked** (section 5): keys in a Secure Enclave in every role this
   design gives them.
 - **The interfaces.** The formats of call, request, approval and clearance
-  are in [`approval-formats.md`](approval-formats.md). Next: the connections
-  (agent to service, service to broker, pledge to broker).
+  are in [`approval-formats.md`](approval-formats.md); the exchange of a
+  request and its answer, and the broker's two connections, are in
+  [`approval-connections.md`](approval-connections.md), a draft. Still
+  proposals of the crates: agent to service (p-robe), the stage-1 socket,
+  the record and the control socket (p-ledge), the agent-side signer
+  (p-act).
