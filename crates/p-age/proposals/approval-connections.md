@@ -142,8 +142,8 @@ pledge's `answer` is the same bytes toward a service on `service.sock` and
 toward the broker. The broker never forwards pledge's answer: it **builds** its
 own from the parsed values, so that nothing it received is passed on unparsed
 (an unknown reason of pledge's becomes `unknown`), and adds the clearance to an
-`approved`. `declined` and `refused` with `by` `pledge` are passed on in that
-sense.
+`approved`. A `declined`, and a `refused` with `by` `pledge`, are built the same way: from
+the parsed `result`, `by` and `reason`, with an unknown `reason` as `unknown`.
 
 ### 3.4 `cancel`
 
@@ -153,10 +153,12 @@ sense.
 
 From whoever submitted, for a request still open: the sender no longer wants an
 answer, and no `answer` follows. pledge closes its dialog and records the
-request as cancelled (p-ledge's open question). Toward the broker, `cancel`
+request as cancelled. Toward the broker, `cancel`
 removes the request from the broker's holdings and is **passed on** to the
 pledge it was put to (or removed from its queue if it was not delivered).
-Whether the end of a connection also cancels is the transport's (section 2).
+A cancelled request is over: the same bytes submitted again are a new request
+(and pledge's store of answers, 3.7, holds nothing for it). Whether the end of
+a connection also cancels is the transport's (section 2).
 
 ### 3.5 `error`
 
@@ -182,23 +184,30 @@ own, on its transports: `signin`, `blocked`, `superseded`, `busy`, `timeout`
   those and acts on none. A service that never gets an answer answers its agent
   "expired" at the call's deadline by itself (R7).
 - **The deadline is the call's.** Whoever holds a request (service, broker,
-  pledge) watches it itself and forgets the request at it. The broker sends
-  `expired` (`by` `broker`) to the service at the deadline if it has nothing
-  else to say. An approval that reaches the broker later is dropped, and the
+  pledge) watches it itself and forgets the request at it. The tolerated clock
+  difference (60 s) never extends a deadline: a call whose deadline has passed
+  is past. It is applied only where a bound is set on how far ahead a deadline
+  may be. The broker sends `expired` (`by` `broker`) to the service at the
+  deadline if it has nothing else to say. An approval that reaches the broker later is dropped, and the
   answer is `expired`.
-- **A request is answered once.** After its answer, or its `cancel`, the
-  hash is forgotten and a later `submit` of the same bytes is new. (pledge's
-  stored answer, 3.7, is for the time until the answer has arrived.)
+- **A request is answered once** by each party that answers. The broker forgets
+  a request after its answer (apart from the wait for an `ack`, section 4) or
+  its `cancel`; pledge keeps its answer under the rule of 3.7.
 
 ### 3.7 Reasons
 
 Every reason is a code of a closed list; a reader maps an unknown one to
 `unknown`.
 
-**pledge's reasons** are p-ledge's list (its proposal, section 4, from the
-checks of its `SPEC.md` section 4). They are not repeated here. One is missing
-from that list and needed by the standing (section 5): a person or a key
-blocked at the broker. *Proposal:* `blocked`.
+**pledge's reasons** are the list in pledge's specification (one code for each
+of its checks). They are not repeated here, except for what matters to the
+exchange (below). `blocked` (the person or a key is
+blocked at the broker, learned from the standing) joins that list, as a
+passing condition.
+
+**A service gets the exact code**, of pledge or of the broker. What a service
+tells its agent is coarser; that is p-robe's document, not this one. The
+exchange has no notice that a request was shown to the person.
 
 **The broker's reasons** (`by` is `broker`; the first failing check of
 `SPEC.md` is the answer):
@@ -206,17 +215,29 @@ blocked at the broker. *Proposal:* `blocked`.
 | `reason` | Check |
 |---|---|
 | `bad-request` | the request does not parse, or is not signed by a service key that a host of the site certified, or host and service are not the ones the call names (check 1) |
-| `deadline` | the call's deadline is past, or further away than 10 minutes plus the tolerated difference. Not in `SPEC.md`'s list; G4 |
+| `deadline` | check 0 of `SPEC.md`: the call's deadline is past, or more than 10 minutes ahead (the tolerated difference applies to the second only). A limit that bounds what the broker holds, not a trust |
 | `delegation` | the call is not signed under a delegation that is registered and not ended or withdrawn (check 2). One code for the three: the agent is not told which |
 | `person` | the person is not enabled in the site project, or is blocked (check 3). One code |
 | `not-entitled` | R10 (check 4): none of the delegation's groups (the extension of its certificate and nowhere else) is a group the person is in and that the service's binding names for this host |
 | `too-many-waiting` | the agent already has as many requests waiting as the site allows |
 | `busy` | the broker's own limits (section 4) |
 
-**A repeat is answered with what is known.** If pledge has already answered a
-request it receives again, it sends that answer again, byte for byte: a
-signature made with a key in hardware cannot be made again, and R5 must not turn
-a lost answer into a refusal (G2).
+**pledge's answer is final until the call's deadline.** pledge keeps its answers
+on disk, and the same bytes submitted again get **the same answer again** from
+that store, not a new decision:
+
+| Stored, and answered again | Not stored; the same bytes may be submitted again |
+|---|---|
+| `approved` (the same approval bytes: a signature made in hardware cannot be made again), `declined`, and `refused` for a **verdict**: `unknown-delegation`, `delegation-ended`, `delegation-withdrawn`, `service-mismatch`, `not-showable`, `ceiling`, `malformed`, `deadline-too-far` | `refused` for a **passing condition**: `limit`, `muted`, `unavailable`, `blocked`. It says nothing about the request, only about now |
+
+- The store lives to the call's deadline, not past it.
+- A **cancelled** request is over; the same bytes again are a new request.
+- The call's identifier is **used** once pledge approved or the person
+  declined. A *different* request under it is refused `call-used`. A declined
+  call is **not put to the person again**: the same bytes get `declined` again.
+- The broker holds no such store (its only memory of an answer is the wait
+  for an `ack`, section 4): a repeated `submit` reaches pledge again whenever the
+  broker delivers it again, and pledge answers it from the store.
 
 ## 4. Service to broker
 
@@ -238,7 +259,7 @@ it verifies.
    its `answer`, once.
 3. The connection stays open until the answer or the deadline (about 10 minutes at
    most). After the answer the service sends `{"schema_version":1,"type":"ack","request":"..."}`
-   if the broker's `answer` is to be kept until then (G3); the broker closes.
+   so that the broker may drop the answer it held; the broker closes.
    A service that wants to give up sends `cancel` and closes.
 
 **A broken connection does not cancel.** The request's bytes are the service's to
@@ -258,9 +279,10 @@ is on disk.
 service's connection was gone has nowhere to go. The broker keeps the answer **in
 memory** until the service's `ack` or the deadline, whichever is first, so that
 the resubmission receives it; then it forgets it. This is the one place where
-the broker holds an approval, and it is a question for the designer (`SPEC.md`
-says "no approval at all"); without it a lost connection costs the person a
-second dialog that pledge cannot ask for (R5). G3.
+the broker holds an approval; the designer accepted it and `SPEC.md` says so
+("What it keeps"). It is memory only, never on disk, never past the deadline.
+An approval is not a secret and is of use only to the service whose request it
+signs. Without it a lost connection costs the person a second dialog.
 
 **Limits** (the port is open to anyone who can reach it): a bounded number of
 connections per source address and in total; the signature is checked after the
@@ -280,7 +302,7 @@ mechanism (a client certificate would need a second form of key and a second
 CA).
 
 ```json
-{"schema_version":1,"type":"challenge","nonce":"q3V0w9h1...","at":"2026-11-11T15:04:05Z"}
+{"schema_version":1,"type":"challenge","nonce":"q3V0w9h1..."}
 ```
 
 The nonce is 32 random bytes, base64. pledge answers with a message that
@@ -293,7 +315,7 @@ carries a **connection document**, a signed document of the system:
 where `doc` is the bytes of
 
 ```json
-{"v":1,"type":"connection","person":"jan","nonce":"q3V0w9h1...","tls":"Zk0r...","at":"2026-11-11T15:04:06Z"}
+{"v":1,"type":"connection","person":"jan","nonce":"q3V0w9h1...","tls":"Zk0r..."}
 ```
 
 | Member | Meaning |
@@ -301,14 +323,15 @@ where `doc` is the bytes of
 | `person` | who signs in: a name as the site project has it |
 | `nonce` | the one the broker sent on this connection |
 | `tls` | 32 bytes exported from this TLS connection (RFC 5705, label `EXPORTER-procession-connection-v1`, no context), base64. It ties the signature to this connection, so that it cannot be carried to another |
-| `at` | pledge's time; the broker refuses a difference of more than 60 s |
 
 Namespace `connection-v1@procession`; the key is the person's connection key, a
 plain key, not certified (`approvals.md` section 5 certifies the two approval
 keys only). Key types are Ed25519 and ECDSA P-256, as for every key
 (`approval-formats.md` section 3.1); the broker refuses a sign-in with another.
 The broker verifies against the connection key the site project has for
-`person` and checks nonce, `tls` and `at`. On success:
+`person` and checks nonce and `tls`. There is no time in the document:
+freshness is the nonce, which the broker made for this connection and accepts
+once, for 30 s by its own timer. On success:
 
 ```json
 {"schema_version":1,"type":"ready"}
@@ -317,18 +340,18 @@ The broker verifies against the connection key the site project has for
 then, in this order: the **standing** (below), a carried document if it holds
 one, then every request that waited (below). On failure: `error` with `signin`
 (or `blocked` for a person or a key that is blocked, after the signature
-verified), and close. The nonce is good once, for 30 s.
+verified), and close.
 
 A person has one live connection per connection key. A second sign-in with the
 same key closes the first with `superseded`.
 
 **What the sign-in is for**: it decides who is sent the requests of a person (so a
-stranger cannot read them, G6 of `approvals.md`) and whose withdrawals the broker takes from
+stranger cannot read them) and whose withdrawals the broker takes from
 this connection. It is not proof that an approval is the person's: that is the
 approval's own certificate, checked by the service. A thief with the connection
 key (no presence check) can read requests and withdraw delegations; it cannot
-approve, and cannot register a delegation, which needs the person's delegation
-key (below).
+approve, and cannot make a delegation: a certificate that registers must have
+been signed by the person's delegation key (below).
 
 ### What goes from the broker to pledge
 
@@ -350,28 +373,34 @@ sending it again.
 with `doc` the bytes of
 
 ```json
-{"v":1,"type":"standing","to":"jan","at":"2026-11-11T15:04:07Z","serial":12,"blocked":false,"blocked_keys":[],"withdrawn":["SHA256:Qm3..."],"certificates":["ssh-ed25519-cert-v01@openssh.com AAAAIHNzaC1lZDI1NTE5LWNlcnQtdjAxQG9wZW5zc2guY29t... jan:confirmed"],"groups":["ops","rt"]}
+{"v":1,"type":"standing","to":"jan","nonce":"q3V0w9h1...","n":0,"blocked":false,"blocked_keys":[],"withdrawn":["SHA256:Qm3..."],"certificates":["ssh-ed25519-cert-v01@openssh.com AAAAIHNzaC1lZDI1NTE5LWNlcnQtdjAxQG9wZW5zc2guY29t... jan:confirmed"],"groups":["ops","rt"]}
 ```
 
 | Member | Meaning |
 |---|---|
 | `to` | the person |
-| `at`, `serial` | when, and a counter that rises with each standing the broker makes for this person. pledge accepts a standing only if `(at, serial)` is greater than that of the last one it accepted, so an old one that is sent again changes nothing |
+| `nonce` | the nonce of the sign-in this connection began with: the standing is for this connection and no other |
+| `n` | a counter: `0` in the first standing after the sign-in, rising by one with each later one on the same connection. pledge accepts a standing only on the connection it was made for (its `nonce` is that connection's) and only if `n` is greater than the last one it accepted, so a repeated or older one changes nothing |
 | `blocked` | an administrator blocked the person |
-| `blocked_keys` | fingerprints of this person's keys an administrator blocked |
-| `withdrawn` | fingerprints of delegations an administrator withdrew and that have not ended. The broker forgets an ended one |
+| `blocked_keys` | fingerprints of this person's keys an administrator blocked, `SHA256:...` as `ssh-keygen -l` prints them |
+| `withdrawn` | identifiers of delegations an administrator withdrew and that have not ended. The broker forgets an ended one |
 | `certificates` | the person's current certificates for the approval keys, as the issuer (whoever holds the site CA's key) made them and the site's data gave them to the broker (optional, may be empty) |
 | `groups` | the names of the person's groups, from the part of the broker's data that is refreshed separately (optional, may be empty) |
 
 Namespace `broker-v1@procession`, signed with the broker's key. It is a new
 namespace on purpose: the broker's key also signs clearances, and a signature of
 the one must never verify as the other. pledge accepts a standing only if it
-verifies as `broker`, `to` is its own person and the order is right; otherwise
-it ignores it and records that.
+verifies as `broker`, `to` is its own person, `nonce` is this connection's and
+`n` is higher; otherwise it ignores it and records that. **No clock is
+involved.** A standing carried off a connection and shown on another carries
+the wrong nonce.
 
 How pledge uses it:
 
-- `blocked`, `blocked_keys`, `withdrawn`: it stops asking and signing for the
+- `blocked`, `blocked_keys`, `withdrawn` (delegations are known by their
+  identifier, the SHA-256 fingerprint of the agent's public key as
+  `ssh-keygen -l` prints it, `SHA256:...`, here, in the register and in
+  `withdraw`): it stops asking and signing for the
   person, for that key, for those delegations, at once, and refuses what is
   waiting (`blocked`, `delegation-withdrawn`). These only restrict. The absence of
   one, in a *newer* standing, lifts it.
@@ -396,7 +425,7 @@ it before its first request.
 **Signed documents the broker did not sign.** The connection must be able to
 carry a document that someone else signed and the broker cannot alter. The one
 that exists is the list of hosts' keys (`approval-formats.md` section 6.1, a
-draft, stage 3), signed by the issuer with the site CA's key.
+draft, stage 3), signed by the issuer with the site CA's key itself (not a certified key).
 
 ```json
 {"schema_version":1,"type":"carried","namespace":"hosts-v1@procession","doc":"eyJ2IjoxLCJ0eXBlIjoiaG9zdHMi...","doc_sig":"LS0tLS1CRUdJTiBTU0ggU0lHTkFUVVJFLS0tLS0K..."}
@@ -405,10 +434,11 @@ draft, stage 3), signed by the issuer with the site CA's key.
 The broker holds the latest one it was given, byte for byte, and sends it after
 the standing at every sign-in and whenever it gets a new one. It parses nothing
 of it beyond what it needs to store it, and the broker's signature is not on it.
-pledge verifies it against the site CA's line for that namespace, under the
-issuer's name (which the formats leave open for the list), and ignores one that
-does not verify, one with a `namespace` its own code does not know, and one
-older (`at`) than the one it has. In stage 2 pledge reads hosts from its own
+pledge verifies it with a plain line, `hosts namespaces="hosts-v1@procession"
+<the site CA's public key>`, under the name `hosts`, and ignores one that does
+not verify, one with a `namespace` its own code does not know, and one whose
+`at` is not later than that of the list it holds. The newest wins; a list does
+not expire (`approval-formats.md` section 6.1). In stage 2 pledge reads hosts from its own
 configuration and the broker carries no such document; the message exists so
 that stage 3 changes no protocol. **Tempting:** a pledge that treats a host key as
 good because the broker sent it. It is good only if the CA's signature verifies.
@@ -416,9 +446,9 @@ good because the broker sent it. It is good only if the CA's signature verifies.
 ### What goes from pledge to the broker
 
 pledge's `answer` (3.3) for each request, and `cancel` (3.4) for one it no
-longer wants (the broker sends `cancel` to pledge, never the reverse). The other messages are bound to the connection, and none is signed except
-what is a signature by nature (the approval inside an `answer`, the delegation's
-proof).
+longer wants (the broker sends `cancel` to pledge, never the reverse). The other messages
+are bound to the connection, and none is signed except what is a signature by
+nature (the approval inside an `answer`).
 
 - **`answer`.** For `approved` the broker builds the service's `answer` with its
   clearance: `{"v":1,"type":"clearance","request":"<hash>","at":"<now>"}`
@@ -428,7 +458,8 @@ proof).
   corresponding `answer` with `by` `pledge`.
 - The request must be one the broker put to **this connection's person** and
   still holds; others are ignored and logged (3.6). After the answer the broker
-  forgets the request and, apart from G3's wait for an `ack`, the approval.
+  forgets the request and, apart from the wait for an `ack` (section 4), the
+  approval.
 - **What the broker checks of an approval**: that `approval` decodes to an
   armoured SSHSIG (`p-act`: `looks_armoured`) and that the key that signed is
   not one of the person's blocked keys, read from the certificate inside the
@@ -442,28 +473,28 @@ proof).
 **Delegations.**
 
 ```json
-{"schema_version":1,"type":"delegation","cert":"ssh-ed25519-cert-v01@openssh.com AAAA... jan","proof":"LS0tLS1CRUdJTiBTU0ggU0lHTkFUVVJFLS0tLS0K..."}
+{"schema_version":1,"type":"delegation","cert":"ssh-ed25519-cert-v01@openssh.com AAAA... jan"}
 ```
 
-`proof` is a signature by the agent's own (certified) key over the bytes of
-`cert`, namespace `delegation-v1@procession`, base64 of its armoured bytes, made
-by pledge when it created the key, before it handed it over. The broker verifies
-it with `ssh-keygen -Y verify` against the person's delegation key from the site
-project, the way it verifies a call: that checks the certificate without the
-broker having a certificate parser, and shows that the certificate belongs to a
-key somebody holds. It then reads the delegation's fingerprint, end, the person
-(the certificate's only principal) and the groups (the extension
-`groups@procession`) from the certificate, and registers them
-(`src/register.rs`). A certificate that breaks `approval-formats.md` section 3.1
-(more than one principal, another extension, a critical option, a key type other
-than Ed25519 or ECDSA P-256) is not registered. There is no `groups` member in
-the message: what pledge says about groups is never used. A validity longer than
-24 hours is refused. The answer is
+`cert` is the agent's certificate, the text of the public certificate. What
+authorises a delegation is the certificate itself: it is signed by the person's
+delegation key, with a presence check at the issuing. The broker reads and checks
+it with `p-act`, against the **person's delegation key from the site project**:
+the issuer is that key and no other, the rules are those of
+`approval-formats.md` section 3.1 (the person as the only principal, the groups
+only in `groups@procession`, no other extension, no critical option, Ed25519 or
+ECDSA P-256), and the validity is at most 24 hours. It registers the delegation
+under its identifier, the SHA-256 fingerprint of the agent's public key, with the
+person, the end and the groups read from the certificate (`src/register.rs`).
+What pledge says about groups is never used; there is no such member.
+Registering a certificate that is known **changes nothing**: a withdrawn
+delegation stays withdrawn, an ended one stays ended.
+
+The registration is authenticated by the sign-in and by nothing else; there is no
+second signature. The answer is
 `{"schema_version":1,"type":"registered","delegation":"SHA256:..."}` or
 `{"schema_version":1,"type":"not-registered","delegation":"SHA256:...","reason":"..."}`
-(reasons, a closed list: `bad-proof`, `bad-certificate`, `too-long`, `not-yours`,
-`blocked`). Registration does not rely on the sign-in, so the connection key alone
-cannot register one.
+(reasons, a closed list: `bad-certificate`, `too-long`, `not-yours`, `blocked`).
 
 **Withdrawals.**
 
@@ -492,10 +523,11 @@ silent for 90 s (`error` `timeout`).
   and then **all** waiting requests as `submit`, in the order they arrived,
   **again**, including those it had written to the old connection. A request
   whose deadline has passed is not sent and not kept.
-- **pledge's side is idempotent** (3.7, G2): a request it already knows by hash is
-  not shown again and not refused as a replay; if it already answered, it sends
-  that answer again; if it is asking the person, it does nothing. R5's refusal is
-  for a *different* request under a call's identifier that it already signed for.
+- **pledge's side is idempotent** (3.7): a request it already knows by hash is
+  not shown again; if it holds a stored answer, it sends that answer again; if it
+  is asking the person, it does nothing. A request it refused for a passing
+  condition is decided anew. The refusal `call-used` is for a *different* request
+  under a call's identifier that was approved or declined.
 - pledge reconnects with a delay of 1 s, doubled up to 60 s, with jitter, and at
   once when the network or the sleep state changes. Nothing carries over: every
   connection signs in anew.
@@ -514,10 +546,10 @@ In the manner of `approval-formats.md` section 7. `<person>`, `<service>`,
 | `signin` (`doc`, `doc_sig`: the connection document) | the person's connection key | `connection-v1@procession` | the broker | `<person>` | the person's connection key, site project |
 | `answer`'s `approval` | the person's confirmed or automatic approval key, certified by the site CA | `approval-v1@procession` | **the service** (the broker only reads it) | `<person>:confirmed` or `<person>:automatic` | the site CA's key |
 | `answer`'s `clearance`, `clearance_sig` | the broker's key, certified by the site CA | `clearance-v1@procession` | the service | `broker` | the site CA's key |
-| `carried` (the list of hosts' keys, stage 3) | the issuer, with the site CA's key | `hosts-v1@procession` | pledge | the issuer's name (open) | the site CA's key |
+| `carried` (the list of hosts' keys, stage 3) | the issuer, with the site CA's key itself | `hosts-v1@procession` | pledge | `hosts` (a plain line, not `cert-authority`) | the site CA's key |
 | `notice` (`doc`, `doc_sig`: the standing) | the broker's key, certified by the site CA | `broker-v1@procession` | pledge | `broker` | the site CA's key |
 | a certificate in the standing | the site CA | (a certificate) | pledge | its own key and `<person>:confirmed` / `:automatic` | the site CA's key |
-| `delegation`'s `proof` | the agent's key, certified by the person's delegation key | `delegation-v1@procession` | the broker | `<person>` | the person's delegation key, site project |
+| `delegation`'s `cert` (a certificate, not a signature) | the person's delegation key | (a certificate) | the broker, with `p-act` | the person, as its only principal | the person's delegation key, site project |
 | the messages themselves, and `answer` without approval (`declined`, `refused`, `expired`), `cancel`, `withdraw`, `ping`, `ack`, `registered`, `not-registered`, `challenge`, `ready`, `error` | nobody | none | nobody | none | TLS and, on pledge's connection, the sign-in |
 
 Allowed-signers lines (`namespaces` are what keeps one document from
@@ -531,14 +563,16 @@ verifying as another):
 broker cert-authority,namespaces="clearance-v1@procession" <the site CA's public key>
 # pledge, for what the broker says in its own name
 broker cert-authority,namespaces="broker-v1@procession" <the site CA's public key>
-# the broker, for a delegation's proof (as for a call)
-<person> cert-authority,namespaces="call-v1@procession,delegation-v1@procession" <the person's delegation public key>
+# the broker, for a call (as pledge does)
+<person> cert-authority,namespaces="call-v1@procession" <the person's delegation public key>
+# pledge, for the list of hosts' keys (stage 3): plain, the CA's key itself
+hosts namespaces="hosts-v1@procession" <the site CA's public key>
 ```
 ```
 # each signature is base64-decoded to its armoured bytes first
 ssh-keygen -Y verify -f allowed -I <person> -n connection-v1@procession -s signin.sig < connection
 ssh-keygen -Y verify -f allowed -I broker -n broker-v1@procession -s notice.sig < standing
-ssh-keygen -Y verify -f allowed -I <person> -n delegation-v1@procession -s proof.sig < cert
+ssh-keygen -Y verify -f allowed -I hosts -n hosts-v1@procession -s hosts.sig < hosts
 ```
 
 The services' lines for the site CA (formats section 7) list
@@ -550,7 +584,8 @@ cannot be made to say anything to a service that it did not say as a
 clearance.
 
 Names that the site CA must never certify for a person, in addition to those
-of the formats: anything that would verify as `broker`.
+of the formats: `broker` and `hosts`. `broker-v1@procession` and
+`connection-v1@procession` are on no service's line.
 
 ## 7. Checked against the specification
 
@@ -596,8 +631,8 @@ implementation to believe it.
 | Check of the table | Where it is in this proposal |
 |---|---|
 | delegation registered, not ended, not withdrawn (broker, pledge) | broker: refusal `delegation`; pledge: `unknown-delegation`, `delegation-ended`, `delegation-withdrawn`; withdrawals by `withdraw` and `standing.withdrawn`, which add to pledge's own record |
-| call names this service, deadline (service, pledge) | not the broker's. The broker's `deadline` check only bounds what it holds (section 9, G4) |
-| identifier not used (pledge) | pledge only; section 5 asks that a re-delivery not be a replay |
+| call names this service, deadline (service, pledge) | not the broker's. The broker's check 0 only bounds what it holds |
+| identifier not used (pledge) | pledge only; its stored answers (3.7) make a re-delivery harmless |
 | request signed by a certified service, names agree (broker, pledge) | `bad-request`; both verify the same bytes under the same name |
 | person enabled, not blocked, R10 (broker) | `person`, `not-entitled`; no other message gives pledge a way to decide these |
 | limits on asking (pledge) | pledge's; the broker's per-agent count is the site's setting |
@@ -646,80 +681,47 @@ resolved the versions; it did **not** build them. `ring` compiles C and
 assembly through `cc`, which was not tried. Anything beyond that list
 (`tokio-util`, `rustls-pemfile`, `aws-lc-rs`) was not needed.
 
-**TLS trust.** The broker's certificate comes from the site's TLS root, an
-X.509 root. `approvals.md` section 5 says pledge and services hold "one trust
-anchor for persons and broker, the site CA's key"; an SSH CA key cannot verify
-an X.509 server certificate. Proposal: pledge and service hold two things,
-the site CA's SSH public key (signatures) and the site's TLS root (the
-server certificate, by name), both small files that the provisioning writes.
-Section 9, G5.
+**Two anchors, each for one purpose** (`approvals.md` section 5). The site CA's
+key says **who signed what**: persons, the broker, the list of hosts' keys. The
+TLS root, or on a site without a certificate authority a pinned certificate of
+the broker, is only for **reaching the broker**: it keeps a stranger from
+standing in the broker's place on the network, and decides nothing that is
+signed. An SSH CA key cannot verify an X.509 server certificate, so they are two
+small files that the provisioning writes.
 
-## 9. Open, and where this proposal does not fit the specifications
+## 9. Open, decided, and for p-act
 
-Each with a proposal; none is settled here.
+**Decided by the designer, followed here:**
 
-- **G1. A new document and three new namespaces.** `connection-v1`,
-  `broker-v1` and `delegation-v1`, besides the four of the formats; the
-  connection document's type is the "connection" the formats' list of
-  namespaces in `approvals.md` section 5 already names. `broker-v1` has several
-  uses inside it (`type: standing`), against the rule of one namespace per
-  document type; one document that carries everything the broker says to a
-  pledge, signed once, is what makes the reconnect trivial. Proposal: keep it,
-  and let the `type` be inside the signed bytes. `p-act` needs the new
-  namespaces and parsers for `connection`, `standing` and the `answer`
-  messages (pledge, broker and service parse them all).
-- **G2. R5 against a re-delivery** (`approvals.md` R5, `p-ledge/SPEC.md`
-  section 4, step 7). pledge "signs for an identifier once"; a request that
-  the broker delivers again after a lost connection would be refused as a
-  replay, and the approval that was lost with the connection cannot be made
-  again. Proposal: pledge keeps, for each request it answered, the answer
-  (approval signature, or the decline or refusal) until the deadline, and
-  sends it again on a re-delivery; R5 applies to a *different* request under
-  the same call identifier.
-- **G3. "No approval at all" against delivery** (`SPEC.md`, "What it
-  keeps"). The broker holds the answer in memory until the service's
-  `ack` or the deadline. Proposal: accept this as the only exception and say so
-  in `SPEC.md`, because the alternative is that a broken connection in the
-  last second costs a second dialog that R5 forbids. Not on disk, ever.
-- **G4. The deadline is not in `SPEC.md`'s list of checks.** The broker
-  keeps requests until their deadline, so it needs one and a bound
-  (`approvals.md` section 7: more than 10 minutes is refused). Proposal: a
-  check 0, `deadline`, beside parsing; it is a limit and not a trust.
-- **G5. One trust anchor** (`approvals.md` section 5), see section 8: an SSH CA
-  key and a TLS root are two things. Proposal: two files.
-- **G6. Decided, followed here.** The agent's certificate has the person as
-  its only principal and the groups in `groups@procession`
-  (`approval-formats.md` section 3.1). The broker reads both from the
-  certificate and from nowhere else; `delegation` has no group list.
-- **G6a. Open with the designer, not decided here:** how group memberships
-  reach the broker on a site with a directory (the proposal assumes only that
-  they are a separately refreshed part of its data); the issuer's name for
-  the list of hosts' keys; how hosts' public keys reach a pledge before
-  stage 3 (pledge's configuration).
-- **G7. The key behind a signature.** Blocking a key (SPEC) needs the
-  fingerprint of the key that signed an approval or an agent's call, read
-  from its certificate; `p-act`'s `Certificate` does not give it. Proposal:
-  add it, and the fingerprint as `SHA256:...` as `ssh-keygen -l` prints it.
-- **G8. Ordering of the standing** by `(at, serial)` depends on the broker's
-  clock not going back across a restart. Proposal: accept; after a restart
-  the broker starts `serial` at 0 and `at` is later. If its clock were wrong, pledge
-  would ignore standings until the time is past: it fails toward the last
-  restriction it knew, which is the safe side for a block and the unsafe one for
-  a lifted block. Say so, or add a challenge-bound standing at sign-in.
-- **G9. Several devices per person** (approvals.md section 9). The sign-in
-  names the person and a key; requests go to the one live connection of the
-  person. A second device needs a rule (all? the first to answer?) and a
-  connection key per device. Not designed, not closed off: `person` and the
-  key are separate in the sign-in.
-- **G10. Closed by the orchestrator:** `cancel` is part of the shared exchange
-  (3.4).
-- **G11. Closed by the orchestrator:** `schema_version` on every unsigned
-  message, `v` on signed documents (section 1).
-- **G12. Limits** on the service port (section 4) and a total per person on
-  what the broker holds are settings whose values are not set here.
+- G1: `connection-v1@procession` with the TLS binding, and `broker-v1@procession`
+  with one always-complete standing, are in. `delegation-v1` and a proof by the
+  agent's key are not: the certificate authorises a delegation (section 5).
+- G2: pledge's answer is final to the deadline, from a store on disk (3.7).
+- G3: the broker holds an answer in memory until `ack` or the deadline (section 4).
+- G4: the deadline is check 0 (`deadline`, 3.7). G5: two anchors (section 8).
+- G6: the certificate's person and groups (`approval-formats.md` section 3.1).
+- G8: no clock; the standing is tied to the connection by nonce and counter.
+- G10, G11: `cancel` in the exchange; `schema_version` and `v` (section 1).
 
-The shared exchange is section 3 (`submit`, `answer`, `cancel`, `error`, the
-reasons, the rules for every receiver); the transports are section 2's table,
-section 4 and section 5. Where the stage-1 transport and these differ is the
-table of section 2: open requests per connection, and whether the end of a
-connection cancels.
+**Open:**
+
+- **How group memberships reach the broker on a site with a directory.** Here
+  only that they are a separately refreshed part of its data.
+- **G9. Several devices per person** (`approvals.md` section 9). The sign-in names
+  the person and a key; requests go to the one live connection of the person. A
+  second device needs a rule (all? the first to answer?) and a connection key per
+  device. Not designed, not closed off.
+- **G12. Settings** on the service port (section 4) and a total per person on
+  what the broker holds: their values are not set here.
+- **The dependency choice** (section 8) is with the owner.
+
+**What `p-act` needs for this** (the codec for section 3 lives there): the types
+and the bounded line reader for `submit`, `answer`, `cancel`, `error`, the
+closed code lists with `unknown`; the clearance members as configuration;
+parsers for the connection document and the standing; reading and checking an
+agent's certificate (issuer, section 3.1 rules, validity, its identifier as
+`SHA256:...`); the fingerprint of the key behind a signature, for blocks (G7).
+
+**Section 3 is the shared exchange** and is written to be lifted as it stands:
+`submit`, `answer`, `cancel`, `error`, the reasons, the rules for every receiver.
+The transports are the table of section 2, section 4 and section 5.
