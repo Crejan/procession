@@ -69,7 +69,9 @@ answer, a refusal with its reason:
    withdrawn (`src/register.rs`).
 3. The delegation's person is enabled in the site project and not blocked.
 4. That person may have this action carried out on this host
-   (`doc/approvals.md`, R10): they are in one of the delegation's groups,
+   (`doc/approvals.md`, R10): they are in one of the delegation's groups
+   (read from the extension `groups@procession` of the agent's certificate,
+   `doc/approval-formats.md`, section 3.1, and from nowhere else),
    the group is admitted on the host's class, and the group may use this
    service.
 Then it passes the request to that person's pledge. If that pledge is not
