@@ -18,7 +18,7 @@ Dependencies: `ring`, `base64` (both already in Cargo.lock). Fixtures in
 Choices of mine: R9 refusal instead of Atticus's cleaning (login user and
 SSHSIG namespace with control/bidi characters or over 200 characters are
 not understood; empty namespace and non-empty SSHSIG `reserved` too);
-any namespace containing `@procession` (ASCII case-insensitive) is
+any namespace ending in `@procession` (ASCII case-insensitive) is
 reserved for every key; messages with trailing bytes are malformed.
 
 ## Verified

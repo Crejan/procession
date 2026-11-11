@@ -88,8 +88,7 @@ has a check of its own (R3).
 - **`groups`** are names; in stage 1 pledge does not check them (one person,
   no site). With the broker it takes them from the names it received
   (`doc/approvals.md`, section 6).
-- **`delegation`** is the delegation's identifier (`record.md`, open
-  question 2).
+- **`delegation`** is the delegation's identifier (`record.md`, section 8).
 
 ## 5. The presence check in the development form
 
@@ -109,7 +108,7 @@ was muted, that a delegation ended. *Proposal:* a command `subscribe`, after
 which `pledge serve` sends `event` lines on that connection (same envelope).
 Not specified now; nothing in sections 1 to 5 stands in its way.
 
-## 7. Open questions for the designer
+## 7. Decided (all three as proposed)
 
 1. **Does the command line prompt, or does `pledge serve`?** Section 5 puts
    the presence check on `serve`'s terminal so that the command line holds
