@@ -115,9 +115,11 @@ contains.
 - **A delegation's identifier** is the SHA-256 fingerprint of the agent's
   public key, as `ssh-keygen -l` prints it (`SHA256:...`). The record and
   the broker's register know a delegation by it.
-- **Key types**: Ed25519 and ECDSA P-256, for the certified key and for the
-  issuing key. Any other type is refused, with an error that names it. The
-  same holds for every key in this document; a person's keys are P-256
+- **Key types**: the certified key of an agent's certificate is Ed25519,
+  always (pledge creates it; the signer in the sandbox refuses any other);
+  the issuing key, a person's delegation key, is P-256 or Ed25519. Every
+  other key in this document is Ed25519 or ECDSA P-256. Any other type is
+  refused, with an error that names it; a person's keys are P-256
   because the Secure Enclave makes nothing else, and a host needs an Ed25519
   or P-256 host key to run a service.
 
