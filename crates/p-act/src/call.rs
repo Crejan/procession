@@ -371,6 +371,8 @@ pub(crate) mod tests {
             parse(&replaced("2026-11-11T15:06:05Z", "2026-11-11 15:06:05")),
             Err(ParseError::MalformedTime("2026-11-11 15:06:05".into()))
         );
+        assert!(parse(&replaced("a.example", &"h".repeat(64))).is_ok());
+        assert!(matches!(parse(&replaced("a.example", &"h".repeat(65))), Err(ParseError::MalformedHost(_))));
         assert!(matches!(parse(&replaced("a.example", "a example")), Err(ParseError::MalformedHost(_))));
         assert!(matches!(parse(&replaced("a.example", "")), Err(ParseError::MalformedHost(_))));
         assert!(matches!(parse(&replaced("a.example", "a@b")), Err(ParseError::MalformedHost(_))));

@@ -5,8 +5,8 @@
 use p_act::rating::{Damage, Disruption, Exposure, Rating};
 use p_act::sign::{
     ApprovalKind, ApprovalTrust, PublicKey, SignError, Signer, request_person, sign_approval, sign_call,
-    sign_clearance, sign_request, signature_certificate, signature_person, verify_approval, verify_call,
-    verify_clearance, verify_request,
+    sign_clearance, sign_request, signature_agent, signature_certificate, signature_from_base64, signature_person,
+    signature_to_base64, verify_approval, verify_call, verify_call_agent, verify_clearance, verify_request,
 };
 use p_act::{Call, CallContent, CallId, Clearance, Document, Request, ServiceId, Timestamp};
 use std::path::{Path, PathBuf};
@@ -52,9 +52,20 @@ impl Keys {
 
     /// A key certified by `ca` for `principals` (comma-separated), valid as `validity`.
     fn certified(&self, name: &str, ca: &Path, principals: &str, validity: &str) -> Signer {
+        self.certified_with(name, ca, principals, validity, &[])
+    }
+
+    /// As `certified`, issued like pledge does: `-O clear`, then `options`.
+    fn certified_with(&self, name: &str, ca: &Path, principals: &str, validity: &str, options: &[&str]) -> Signer {
         let key = self.key(name);
         let pub_file = format!("{}.pub", key.display());
-        self.keygen(&["-q", "-s", ca.to_str().unwrap(), "-I", name, "-n", principals, "-V", validity, &pub_file]);
+        let mut args =
+            vec!["-q", "-s", ca.to_str().unwrap(), "-I", name, "-n", principals, "-V", validity, "-O", "clear"];
+        for o in options {
+            args.extend(["-O", o]);
+        }
+        args.push(&pub_file);
+        self.keygen(&args);
         Signer::certified(key).unwrap()
     }
 
@@ -537,7 +548,20 @@ fn ssh_keygen_is_not_asked_anything() {
 impl Keys {
     fn certify(&self, key: &Path, ca: &Path, id: &str, principals: &str) -> Signer {
         let pub_file = format!("{}.pub", key.display());
-        self.keygen(&["-q", "-s", ca.to_str().unwrap(), "-I", id, "-n", principals, "-V", VALID, &pub_file]);
+        self.keygen(&[
+            "-q",
+            "-s",
+            ca.to_str().unwrap(),
+            "-I",
+            id,
+            "-n",
+            principals,
+            "-V",
+            VALID,
+            "-O",
+            "clear",
+            &pub_file,
+        ]);
         Signer::certified(key).unwrap()
     }
 }
@@ -650,4 +674,163 @@ fn other_key_types_are_refused_with_their_own_error() {
     assert!(
         matches!(signature_person(&sig), Err(SignError::UnsupportedKeyType(t)) if t == "ssh-rsa-cert-v01@openssh.com")
     );
+}
+
+// ---------------------------------------------------------------------------
+// The agent's certificate (formats section 3.1)
+// ---------------------------------------------------------------------------
+
+fn agent_sig(keys: &Keys, ca: &Path, principals: &str, options: &[&str]) -> (String, Call) {
+    static COUNTER: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+    let n = COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let agent = keys.certified_with(&format!("agent-{n}"), ca, principals, VALID, options);
+    let call = Call::compose(&call_content("probe", "a.example")).unwrap();
+    (sign_call(&agent, &call).unwrap(), call)
+}
+
+#[test]
+fn the_groups_are_read_beside_the_person() {
+    let keys = Keys::new();
+    for (label, ca) in [("ed25519", keys.key("ca")), ("p256", keys.ecdsa_key("ca-p256"))] {
+        let (sig, call) = agent_sig(&keys, &ca, "alice", &["extension:groups@procession=admins,diag-readers"]);
+        let agent = signature_agent(&sig).unwrap();
+        assert_eq!(agent.person, "alice", "{label}");
+        assert_eq!(agent.groups, ["admins", "diag-readers"], "{label}");
+        assert!(agent.key_id.starts_with("agent-"));
+        let verified = verify_call_agent(&call, &sig, &keys.public(&ca)).unwrap();
+        assert_eq!(verified, agent);
+        // The service's function gives the person only.
+        assert_eq!(verify_call(&call, &sig, &keys.public(&ca)).unwrap(), "alice");
+        assert_eq!(signature_person(&sig).unwrap(), "alice");
+        // One group is a list of one.
+        let (sig, _) = agent_sig(&keys, &ca, "alice", &["extension:groups@procession=admins"]);
+        assert_eq!(signature_agent(&sig).unwrap().groups, ["admins"]);
+    }
+}
+
+#[test]
+fn no_extension_means_no_groups() {
+    let keys = Keys::new();
+    let ca = keys.key("ca");
+    let (sig, call) = agent_sig(&keys, &ca, "alice", &[]);
+    let agent = verify_call_agent(&call, &sig, &keys.public(&ca)).unwrap();
+    assert!(agent.groups.is_empty());
+    let cert = signature_certificate(&sig).unwrap();
+    assert!(cert.extensions.is_empty() && cert.critical_options.is_empty());
+}
+
+#[test]
+fn bad_groups_are_refused() {
+    let keys = Keys::new();
+    let ca = keys.key("ca");
+    for (value, why) in [
+        ("b,a", "not sorted"),
+        ("a,a", "a duplicate"),
+        ("a,,b", "an empty name"),
+        (",a", "an empty name"),
+        ("a,", "an empty name"),
+        ("", "an empty name"),
+        ("a, b", "a space in a name"),
+        ("a,B", "not sorted"),
+    ] {
+        let (sig, call) = agent_sig(&keys, &ca, "alice", &[&format!("extension:groups@procession={value}")]);
+        assert!(
+            matches!(signature_agent(&sig), Err(SignError::BadGroups(w)) if w == why),
+            "{value:?}: {:?}",
+            signature_agent(&sig)
+        );
+        assert!(matches!(verify_call(&call, &sig, &keys.public(&ca)), Err(SignError::BadGroups(_))), "{value:?}");
+        assert!(signature_person(&sig).is_err(), "{value:?}");
+    }
+}
+
+#[test]
+fn other_extensions_and_critical_options_are_refused() {
+    let keys = Keys::new();
+    let ca = keys.key("ca");
+    // Issued without `-O clear`: ssh-keygen's default login extensions are in it.
+    let agent = {
+        let key = keys.key("login-agent");
+        keys.keygen(&[
+            "-q",
+            "-s",
+            ca.to_str().unwrap(),
+            "-I",
+            "x",
+            "-n",
+            "alice",
+            "-V",
+            VALID,
+            &format!("{}.pub", key.display()),
+        ]);
+        Signer::certified(key).unwrap()
+    };
+    let call = Call::compose(&call_content("probe", "a.example")).unwrap();
+    let sig = sign_call(&agent, &call).unwrap();
+    assert!(matches!(signature_agent(&sig), Err(SignError::UnknownExtension(e)) if e.starts_with("permit-")));
+    assert!(matches!(verify_call(&call, &sig, &keys.public(&ca)), Err(SignError::UnknownExtension(_))));
+    // The raw reading still shows them.
+    assert!(signature_certificate(&sig).unwrap().extensions.iter().any(|(n, _)| n == "permit-pty"));
+
+    // An unknown extension of our own namespace, next to the groups.
+    let (sig, _) = agent_sig(&keys, &ca, "alice", &["extension:groups@procession=a", "extension:other@procession=1"]);
+    assert!(matches!(signature_agent(&sig), Err(SignError::UnknownExtension(e)) if e == "other@procession"));
+
+    // A critical option.
+    for option in ["force-command=/bin/true", "source-address=10.0.0.0/8"] {
+        let (sig, call) = agent_sig(&keys, &ca, "alice", &["extension:groups@procession=a", option]);
+        let name = option.split('=').next().unwrap();
+        assert!(matches!(signature_agent(&sig), Err(SignError::CriticalOption(n)) if n == name), "{option}");
+        assert!(matches!(verify_call(&call, &sig, &keys.public(&ca)), Err(SignError::CriticalOption(_))), "{option}");
+    }
+}
+
+#[test]
+fn a_person_is_at_most_64_characters() {
+    let keys = Keys::new();
+    let ca = keys.key("ca");
+    let (sig, _) = agent_sig(&keys, &ca, &"a".repeat(64), &[]);
+    assert_eq!(signature_person(&sig).unwrap(), "a".repeat(64));
+    let (sig, _) = agent_sig(&keys, &ca, &"a".repeat(65), &[]);
+    assert!(matches!(signature_person(&sig), Err(SignError::BadPrincipal(_))));
+}
+
+#[test]
+fn an_rsa_issuer_or_host_key_is_refused_with_its_type_named() {
+    let keys = Keys::new();
+    let rsa = keys.path("rsa");
+    keys.keygen(&["-q", "-t", "rsa", "-b", "2048", "-N", "", "-C", "", "-f", rsa.to_str().unwrap()]);
+
+    // An RSA issuer of an Ed25519 key: the certificate says so, and is refused.
+    let (sig, _) = agent_sig(&keys, &rsa, "alice", &[]);
+    assert!(matches!(signature_agent(&sig), Err(SignError::UnsupportedKeyType(t)) if t == "ssh-rsa"));
+    assert!(matches!(signature_certificate(&sig), Err(SignError::UnsupportedKeyType(t)) if t == "ssh-rsa"));
+
+    // An RSA host key: not a `PublicKey`, so no request verifies under it.
+    let line = std::fs::read_to_string(format!("{}.pub", rsa.display())).unwrap();
+    assert!(matches!(PublicKey::parse(&line), Err(SignError::UnsupportedKeyType(t)) if t == "ssh-rsa"));
+    let d = delegation("alice");
+    let service = keys.certified("service", &rsa, "probe@a.example", VALID);
+    let request = request(&d, INTERNAL);
+    let sig = sign_request(&service, &request).unwrap();
+    assert!(matches!(signature_certificate(&sig), Err(SignError::UnsupportedKeyType(t)) if t == "ssh-rsa"));
+}
+
+#[test]
+fn signatures_travel_as_base64_of_their_armour() {
+    let d = delegation("alice");
+    let encoded = signature_to_base64(&d.sig);
+    assert!(!encoded.contains('\n') && encoded.starts_with("LS0tLS1CRUdJTiBTU0ggU0lHTkFUVVJFLS0tLS0K"));
+    assert_eq!(signature_from_base64(&encoded).unwrap(), d.sig);
+    for bad in ["", "!!!!", encoded.trim_end_matches('='), &signature_to_base64("not armour")] {
+        if bad == encoded.trim_end_matches('=') && !encoded.ends_with('=') {
+            continue;
+        }
+        assert!(matches!(signature_from_base64(bad), Err(SignError::MalformedSignature)), "{bad:?}");
+    }
+    // A request carries it so, and gives the armoured text back, which still verifies.
+    let request = request(&d, INTERNAL);
+    let parsed = Request::parse(request.as_bytes()).unwrap();
+    assert_eq!(parsed.call_sig(), d.sig);
+    verify_call(parsed.call(), parsed.call_sig(), &d.keys.public(&d.key)).unwrap();
 }

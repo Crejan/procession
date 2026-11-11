@@ -55,3 +55,23 @@ Branch `agent/p-act`; nothing pushed, `main` untouched.
 - New tests (5, in `tests/ssh.rs`, real `ssh-keygen -t ecdsa -b 256` file keys): Ed25519 agent under a P-256 delegation key; P-256 agent certificate; approvals by P-256 keys under an Ed25519 and a P-256 site CA (confirmed, automatic, top-of-scale refusal, wrong CA, other request); P-256 broker clearance and stage-1 plain P-256 approval keys; RSA and P-384 refused with their own error.
 - Verified: `cargo test -p p-act --offline` 37 unit + 20 integration passed; `cargo clippy --all-targets -p p-act --offline` clean; `cargo fmt -p p-act` applied. `ring` kept.
 - Not verified: Secure Enclave keys themselves (file keys only). The six design questions above are unchanged and behaviour is as before.
+
+## 2026-11-11: designer decisions implemented (merged `integration` 4c8c58b)
+Verified: `cargo test -p p-act --offline` 38 unit + 27 integration passed; `cargo clippy --all-targets -p p-act --offline` clean; `cargo fmt --check` clean.
+
+**Incompatible changes**
+- A request's wire form: `call_sig` is now the base64 of the armoured signature. `Request::compose(&Call, &str /*armoured*/, Rating)` and `Request::call_sig() -> &str` (armoured text) keep their signatures; the bytes differ from before. `compose` returns `ParseError::MalformedSignature` for text that does not look armoured (it was control/bidi errors before). Parsing gives `MalformedBase64("call_sig")` or `MalformedSignature`.
+- `signature_person`/`verify_call`/`request_person` now apply the section 3.1 rules (no critical option, no extension but a valid `groups@procession`), so they refuse a certificate issued without `-O clear`. `signature_certificate` (raw) does not judge, but refuses an unsupported subject or issuer key type.
+- `Certificate` gained `critical_options` and `extensions` fields.
+- Host and person names are at most 64 characters (host was 253).
+- The `\n` exception for `call_sig` is gone.
+
+**New API**
+- `signature_agent(sig) -> Result<Agent { person, groups, key_id }, SignError>`; `verify_call_agent(&Call, sig, &PublicKey) -> Result<Agent, SignError>` (for the broker). `verify_call` and `signature_person` still give only the person (for a service).
+- `GROUPS_EXTENSION`; `SignError::{CriticalOption, UnknownExtension, BadGroups}`.
+- `signature_to_base64(&str) -> String` and `signature_from_base64(&str) -> Result<String, SignError>` (padded standard base64; checks that the text looks armoured).
+- The issuer key of every certificate read is checked: Ed25519 and P-256 only, else `UnsupportedKeyType(<type>)` (tested with an RSA CA, an RSA host key and an RSA certified key).
+
+**Decisions of mine inside the rules**
+- Group names: refused if empty, containing whitespace, a control or a bidirectional character; sorted means strictly increasing bytewise (so `B,a` is valid, `a,B` is not). A present but empty `groups@procession` value is refused (empty name). The extension twice is refused.
+- Test certificates for agents, services, approvals and the broker are now issued with `-O clear` (as pledge does); the refusal tests use a default-extension certificate and `-O force-command` / `source-address`.

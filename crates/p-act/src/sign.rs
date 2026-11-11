@@ -80,6 +80,12 @@ pub enum SignError {
     PrincipalCount { found: usize },
     #[error("`{0}` is not a usable name for a person")]
     BadPrincipal(String),
+    #[error("the agent's certificate has the critical option `{0}`")]
+    CriticalOption(String),
+    #[error("the agent's certificate has the extension `{0}`, only `groups@procession` is allowed")]
+    UnknownExtension(String),
+    #[error("the agent's certificate has a bad `groups@procession`: {0}")]
+    BadGroups(&'static str),
     #[error("an automatic approval is not accepted for a request rated at the top of a scale")]
     AutomaticNotAcceptable,
     #[error("cannot run ssh-keygen: {0}")]
@@ -287,7 +293,8 @@ impl<'a> Reader<'a> {
     }
 }
 
-/// What a certificate inside a signature says about itself. Unverified.
+/// What a certificate inside a signature says about itself. Unverified, and
+/// not judged: [`signature_agent`] applies the rules for an agent's certificate.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Certificate {
     pub key_id: String,
@@ -296,9 +303,45 @@ pub struct Certificate {
     pub valid_after: u64,
     /// Seconds since the Unix epoch.
     pub valid_before: u64,
+    /// Critical options: name and raw data.
+    pub critical_options: Vec<(String, Vec<u8>)>,
+    /// Extensions: name and data. The data of an extension with a value is that value, unwrapped.
+    pub extensions: Vec<(String, Vec<u8>)>,
 }
 
-/// The certificate inside an armoured SSHSIG, read, not verified.
+/// The name of the extension that carries a delegation's groups.
+pub const GROUPS_EXTENSION: &str = "groups@procession";
+
+/// Name/data pairs of a certificate's option or extension list. The data is a
+/// string, which for a value is itself a string; an empty one has no value.
+fn name_data_list(list: &[u8], unwrap_value: bool) -> Option<Vec<(String, Vec<u8>)>> {
+    let mut r = Reader(list);
+    let mut out = Vec::new();
+    while !r.0.is_empty() {
+        let name = String::from_utf8(r.string()?.to_vec()).ok()?;
+        let data = r.string()?;
+        let data = if unwrap_value && !data.is_empty() {
+            let mut inner = Reader(data);
+            let value = inner.string()?;
+            if !inner.0.is_empty() {
+                return None;
+            }
+            value
+        } else {
+            data
+        };
+        out.push((name, data.to_vec()));
+    }
+    Some(out)
+}
+
+/// The type name of a public key blob.
+fn key_type(blob: &[u8]) -> Option<String> {
+    String::from_utf8(Reader(blob).string()?.to_vec()).ok()
+}
+
+/// The certificate inside an armoured SSHSIG, read, not verified. The key it
+/// certifies and the key that issued it must both be of a supported type.
 pub fn signature_certificate(sig: &str) -> Result<Certificate, SignError> {
     let bad = || SignError::MalformedSignature;
     if !looks_armoured(sig) {
@@ -321,7 +364,7 @@ pub fn signature_certificate(sig: &str) -> Result<Certificate, SignError> {
         "ecdsa-sha2-nistp256-cert-v01@openssh.com" => 2,
         _ => return Err(SignError::UnsupportedKeyType(kind)),
     };
-    // nonce, public key, serial, type, key id, principals, validity.
+    // nonce, public key, serial, type, key id, principals, validity, options, extensions, reserved, issuer key.
     let _nonce = key.string().ok_or_else(bad)?;
     for _ in 0..key_fields {
         key.string().ok_or_else(bad)?;
@@ -336,18 +379,91 @@ pub fn signature_certificate(sig: &str) -> Result<Certificate, SignError> {
     }
     let valid_after = key.u64().ok_or_else(bad)?;
     let valid_before = key.u64().ok_or_else(bad)?;
-    Ok(Certificate { key_id, principals, valid_after, valid_before })
+    let critical_options = name_data_list(key.string().ok_or_else(bad)?, false).ok_or_else(bad)?;
+    let extensions = name_data_list(key.string().ok_or_else(bad)?, true).ok_or_else(bad)?;
+    let _reserved = key.string().ok_or_else(bad)?;
+    let issuer = key_type(key.string().ok_or_else(bad)?).ok_or_else(bad)?;
+    if !SUPPORTED_KEYS.contains(&issuer.as_str()) {
+        return Err(SignError::UnsupportedKeyType(issuer));
+    }
+    Ok(Certificate { key_id, principals, valid_after, valid_before, critical_options, extensions })
 }
 
-/// The person an agent's signature names: the one principal of its
-/// certificate. A claim until a verification under that name succeeds.
-pub fn signature_person(sig: &str) -> Result<String, SignError> {
-    let principals = signature_certificate(sig)?.principals;
-    match <[String; 1]>::try_from(principals) {
-        Ok([person]) if text::is_name(&person) => Ok(person),
-        Ok([other]) => Err(SignError::BadPrincipal(other)),
-        Err(many) => Err(SignError::PrincipalCount { found: many.len() }),
+/// What an agent's certificate says (formats section 3.1): the person it acts
+/// for and the groups of its delegation.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Agent {
+    /// The one principal: for a service, the only thing it needs.
+    pub person: String,
+    /// From the extension `groups@procession`; sorted, without duplicates; empty if there is none.
+    pub groups: Vec<String>,
+    /// The certificate's free label, for dialogs and the record; never to decide on.
+    pub key_id: String,
+}
+
+/// The person and groups of the agent's certificate inside `sig`, if it keeps
+/// to section 3.1: exactly one principal, a person's name; no critical
+/// option; no extension but a well-formed `groups@procession`. A claim until a
+/// verification succeeds ([`verify_call_agent`]).
+pub fn signature_agent(sig: &str) -> Result<Agent, SignError> {
+    let cert = signature_certificate(sig)?;
+    if let Some((name, _)) = cert.critical_options.first() {
+        return Err(SignError::CriticalOption(name.clone()));
     }
+    let mut groups = None;
+    for (name, data) in &cert.extensions {
+        if name != GROUPS_EXTENSION {
+            return Err(SignError::UnknownExtension(name.clone()));
+        }
+        if groups.replace(parse_groups(data)?).is_some() {
+            return Err(SignError::BadGroups("the extension appears twice"));
+        }
+    }
+    let person = match <[String; 1]>::try_from(cert.principals) {
+        Ok([person]) if text::is_name(&person) => person,
+        Ok([other]) => return Err(SignError::BadPrincipal(other)),
+        Err(many) => return Err(SignError::PrincipalCount { found: many.len() }),
+    };
+    Ok(Agent { person, groups: groups.unwrap_or_default(), key_id: cert.key_id })
+}
+
+fn parse_groups(value: &[u8]) -> Result<Vec<String>, SignError> {
+    let value = std::str::from_utf8(value).map_err(|_| SignError::BadGroups("not UTF-8"))?;
+    let groups: Vec<String> = value.split(',').map(str::to_owned).collect();
+    for g in &groups {
+        if g.is_empty() {
+            return Err(SignError::BadGroups("an empty name"));
+        }
+        text::check("groups", g).map_err(|_| SignError::BadGroups("a control or bidirectional character"))?;
+        if g.contains(char::is_whitespace) {
+            return Err(SignError::BadGroups("a space in a name"));
+        }
+    }
+    // Strictly increasing is sorted and without duplicates at once.
+    if let Some(pair) = groups.windows(2).find(|w| w[0] >= w[1]) {
+        return Err(SignError::BadGroups(if pair[0] == pair[1] { "a duplicate" } else { "not sorted" }));
+    }
+    Ok(groups)
+}
+
+/// The person an agent's signature names: [`signature_agent`] without the groups.
+pub fn signature_person(sig: &str) -> Result<String, SignError> {
+    signature_agent(sig).map(|a| a.person)
+}
+
+/// A signature as it is carried inside another document: the base64
+/// (standard alphabet, padded) of its armoured bytes.
+#[must_use]
+pub fn signature_to_base64(armoured: &str) -> String {
+    STANDARD.encode(armoured)
+}
+
+/// The armoured signature in `encoded`, which must be padded standard base64
+/// of text that looks armoured.
+pub fn signature_from_base64(encoded: &str) -> Result<String, SignError> {
+    let bytes = STANDARD.decode(encoded).map_err(|_| SignError::MalformedSignature)?;
+    let sig = String::from_utf8(bytes).map_err(|_| SignError::MalformedSignature)?;
+    if looks_armoured(&sig) { Ok(sig) } else { Err(SignError::MalformedSignature) }
 }
 
 /// The person the request's call was signed for, read from `call_sig`: a
@@ -369,10 +485,16 @@ pub fn sign_call(signer: &Signer, call: &Call) -> Result<String, SignError> {
 /// principal in the agent's certificate. Returns that person. Checks the
 /// certificate's validity as `ssh-keygen` does.
 pub fn verify_call(call: &Call, sig: &str, delegation_key: &PublicKey) -> Result<String, SignError> {
-    let person = signature_person(sig)?;
-    let allowed = ca_line(&person, &[Namespace::Call], delegation_key);
-    verify(Namespace::Call, &allowed, &person, sig, call.as_bytes())?;
-    Ok(person)
+    verify_call_agent(call, sig, delegation_key).map(|a| a.person)
+}
+
+/// As [`verify_call`], and the groups of the delegation too, for the broker.
+/// The certificate must keep to formats section 3.1.
+pub fn verify_call_agent(call: &Call, sig: &str, delegation_key: &PublicKey) -> Result<Agent, SignError> {
+    let agent = signature_agent(sig)?;
+    let allowed = ca_line(&agent.person, &[Namespace::Call], delegation_key);
+    verify(Namespace::Call, &allowed, &agent.person, sig, call.as_bytes())?;
+    Ok(agent)
 }
 
 /// Sign a request with the service's key, certified by its host's key.

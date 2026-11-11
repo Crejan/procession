@@ -6,6 +6,7 @@ use crate::error::ParseError;
 use crate::hash::Document;
 use crate::object::{Object, check_bytes};
 use crate::rating::{Damage, Disruption, Exposure, Rating};
+use crate::sign::{looks_armoured, signature_to_base64};
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD;
 use serde::Serialize;
@@ -29,7 +30,7 @@ struct Wire<'a> {
     #[serde(rename = "type")]
     kind: &'a str,
     call: String,
-    call_sig: &'a str,
+    call_sig: String,
     rating: WireRating,
 }
 
@@ -67,10 +68,10 @@ impl Request {
         let encoded = o.take_string("call")?;
         let call_bytes = STANDARD.decode(&encoded).map_err(|_| ParseError::MalformedBase64("call"))?;
         let call = Call::parse(call_bytes).map_err(|e| ParseError::InnerCall(Box::new(e)))?;
-        let call_sig = o.take_armour("call_sig")?;
-        if !crate::sign::looks_armoured(&call_sig) {
-            return Err(ParseError::MalformedSignature);
-        }
+        let encoded_sig = o.take_string("call_sig")?;
+        let call_sig = STANDARD.decode(&encoded_sig).map_err(|_| ParseError::MalformedBase64("call_sig"))?;
+        let call_sig =
+            String::from_utf8(call_sig).ok().filter(|s| looks_armoured(s)).ok_or(ParseError::MalformedSignature)?;
         let mut r = o.take_object("rating", "rating.")?;
         let exposure = value_of(&EXPOSURE, "exposure", r.take_string("exposure")?)?;
         let damage = value_of(&DAMAGE, "damage", r.take_string("damage")?)?;
@@ -84,11 +85,14 @@ impl Request {
     /// was parsed from or written to. The bytes are produced here, once, and
     /// checked by the same parser that reads every other request.
     pub fn compose(call: &Call, call_sig: &str, rating: Rating) -> Result<Request, ParseError> {
+        if !looks_armoured(call_sig) {
+            return Err(ParseError::MalformedSignature);
+        }
         let wire = Wire {
             v: 1,
             kind: "request",
             call: STANDARD.encode(call.as_bytes()),
-            call_sig,
+            call_sig: signature_to_base64(call_sig),
             rating: WireRating {
                 exposure: name_of(&EXPOSURE, rating.exposure),
                 damage: name_of(&DAMAGE, rating.damage),
@@ -148,7 +152,9 @@ pub(crate) mod tests {
         let text = std::str::from_utf8(request.as_bytes()).unwrap();
         assert!(text.starts_with(r#"{"v":1,"type":"request","call":"eyJ2IjoxLCJ0eXBlIjoiY2FsbCIs"#), "{text}");
         assert!(text.ends_with(r#""rating":{"exposure":"internal","damage":"none","disruption":"none"}}"#), "{text}");
-        assert!(text.contains(r"\n-----END SSH SIGNATURE-----\n"));
+        // The signature is carried as base64 of its armoured bytes: `-----BEGIN SSH SIGNATURE-----\n...`.
+        assert!(text.contains(r#""call_sig":"LS0tLS1CRUdJTiBTU0ggU0lHTkFUVVJFLS0tLS0K"#), "{text}");
+        assert!(!text.contains("BEGIN"));
         assert!(!text.contains('\n'));
         let parsed = Request::parse(request.as_bytes()).unwrap();
         assert_eq!(parsed, request);
@@ -266,23 +272,42 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn refuses_a_call_sig_that_is_not_armour_or_has_controls() {
+    fn refuses_a_call_sig_that_is_not_armour() {
         for bad in [
             "",
             "AAAA",
             "-----BEGIN SSH SIGNATURE-----\nAAAA\n",
             "-----BEGIN SSH SIGNATURE-----\nAA\u{0}AA\n-----END SSH SIGNATURE-----\n",
         ] {
-            let r = Request::compose(&call(), bad, Rating::HARMLESS);
-            assert!(r.is_err(), "{bad:?}");
+            assert_eq!(
+                Request::compose(&call(), bad, Rating::HARMLESS),
+                Err(ParseError::MalformedSignature),
+                "{bad:?}"
+            );
         }
-        let bidi = SIG.replace("U1NI", "U1\u{202e}NI");
-        assert_eq!(Request::compose(&call(), &bidi, Rating::HARMLESS), Err(ParseError::BidiMark("call_sig".into())));
-        let cr = SIG.replace("U1NI", "U1\rNI");
-        assert_eq!(
-            Request::compose(&call(), &cr, Rating::HARMLESS),
-            Err(ParseError::ControlCharacter("call_sig".into()))
-        );
+    }
+
+    #[test]
+    fn refuses_a_call_sig_member_that_is_not_base64_of_armour() {
+        let text = String::from_utf8(request().as_bytes().to_vec()).unwrap();
+        let encoded = signature_to_base64(SIG);
+        let with = |value: &str| text.replacen(&encoded, value, 1).into_bytes();
+        // The plain armour, as the earlier draft carried it, is not base64.
+        assert_eq!(Request::parse(with("-----BEGIN SSH SIGNATURE-----")), Err(ParseError::MalformedBase64("call_sig")));
+        // With its line breaks it is also a string with control characters.
+        assert_eq!(Request::parse(with(r"-----BEGIN\n")), Err(ParseError::ControlCharacter("call_sig".into())));
+        assert_eq!(Request::parse(with(encoded.trim_end_matches('='))), Err(ParseError::MalformedBase64("call_sig")));
+        // Valid base64 of something else.
+        for other in ["hello", "-----BEGIN SSH SIGNATURE-----\nAAAA\n"] {
+            assert_eq!(
+                Request::parse(with(&signature_to_base64(other))),
+                Err(ParseError::MalformedSignature),
+                "{other}"
+            );
+        }
+        assert_eq!(Request::parse(with(&STANDARD.encode([0xff, 0xfe]))), Err(ParseError::MalformedSignature));
+        assert_eq!(Request::parse(with("")), Err(ParseError::MalformedSignature));
+        assert_eq!(Request::parse(with(r"\u202e")), Err(ParseError::BidiMark("call_sig".into())));
     }
 
     #[test]

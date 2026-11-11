@@ -78,18 +78,9 @@ impl Object {
 
     /// A string without control characters or bidirectional marks.
     pub(crate) fn take_string(&mut self, name: &'static str) -> Result<String, ParseError> {
-        self.take_text(name, false)
-    }
-
-    /// As [`Object::take_string`], but `\n` is allowed: for an armoured signature.
-    pub(crate) fn take_armour(&mut self, name: &'static str) -> Result<String, ParseError> {
-        self.take_text(name, true)
-    }
-
-    fn take_text(&mut self, name: &'static str, allow_newline: bool) -> Result<String, ParseError> {
         let raw = self.take_raw(name)?;
         let s: String = self.typed(name, &raw, "a string")?;
-        text::check(&format!("{}{name}", self.prefix), &s, allow_newline)?;
+        text::check(&format!("{}{name}", self.prefix), &s)?;
         Ok(s)
     }
 
@@ -97,7 +88,7 @@ impl Object {
         let raw = self.take_raw(name)?;
         let all: Vec<String> = self.typed(name, &raw, "an array of strings")?;
         for s in &all {
-            text::check(&format!("{}{name}", self.prefix), s, false)?;
+            text::check(&format!("{}{name}", self.prefix), s)?;
         }
         Ok(all)
     }
