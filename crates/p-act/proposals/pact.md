@@ -7,9 +7,30 @@ and against the service's side as updated (`crates/p-robe/proposals/agent-to-ser
 `doc/approval-connections.md`. Terms as approvals.md section 1: "agent" is the
 AI agent; the other thing is the "SSH agent".
 
-What is **decided** (by the designer, or by the orchestrator between the two
-parts) is written as such. What goes to the designer or the owner is in the
-last part, "Not decided", with both sides and no choice made.
+**Third version (2026-11-11), after the designer's decisions**, which this
+document now follows:
+
+- **a.** Signing is in process, with `ring`, with three limits: an agent's key
+  is Ed25519, always (`pact` refuses any other; the library's
+  `verify_call`, `signature_agent` and the others refuse an agent
+  certificate that certifies another type); the in-process writer exists only
+  in `pact`, behind its feature, and writes only `call-v1@procession`
+  (everything else in `p-act` keeps signing through `ssh-keygen`); and its
+  specification is a test: for the same key, certificate and message its
+  armoured output is byte for byte what `ssh-keygen -Y sign` writes, and
+  `ssh-keygen -Y verify` accepts it.
+- **b.** Separation of key and model is a SHOULD (approvals.md R2). `pact`
+  does its own part regardless and logs a warning when a client connects as
+  `pact`'s own user. The seven conditions below are what "apart" means, a
+  description of a good sandbox and not something `pact` checks.
+- **c.** `no-answer` is an outcome of its own, `unknown`: the call was sent
+  and whether it ran is not known.
+- **d.** The bundle is option B.
+- **e.** Progress is `pact`'s own, never relayed: every 15 seconds while a call
+  waits, one fixed text.
+
+Still with the owner: the HTTP client (section "Not decided"). This version of
+the code builds everything that does not depend on it: see "What exists".
 
 ## 0. What changed from the first version
 
@@ -27,13 +48,13 @@ The review made nine points. For each, whether this version adopts it:
 | 5.2 | take only `maxItems`, `maxLength`, `pattern` from the service's schema | **Changed**, as decided: the service's schema passes through unless it breaks a stated rule; section 5 says what `pact` adds and why |
 | 6 | outcome words: `unknown` becomes `refused`/`not-allowed`; no `invalid-call` of its own; no `no-route`; `rc` in `done`; `reason` only with `refused`; JSON-RPC errors are `unavailable` | **Adopted** (section 8) |
 | 6 | `503` with `Retry-After` is `refused`/`try-later`, without it `unavailable` | **Adopted** (section 8) |
-| 6 | `no-answer` is `pact`'s alone and the designer must add it | **Agreed that it is needed; the choice is the designer's**, so it is presented in "Not decided" (c). Until then the text below uses it as proposed |
+| 6 | `no-answer` is `pact`'s alone and the designer must add it | **Decided**: an outcome of its own, `unknown` (section 8) |
 | 6 | the same call arriving twice is the service's `invalid`; a lost answer is repaired only by a new call | **Adopted** (section 6.3) |
 | 7 | HTTP details: `Accept`, no `Origin`, `MCP-Protocol-Version`, `Content-Type`; no `initialize` needed | **Adopted** (section 7) |
 | 7 | limit of 16 | **Adopted**; compatible with the service's 16 per service |
 | 7 | `http+unix` not needed | **Adopted**: services are `http`/`https` URLs only (section 2) |
-| 7 | progress not relayed | **Adopted for now**, with a risk written down in section 7 and in "Not decided" (f) |
-| 7 | instructions say `no-answer` may have run | **Adopted** (section 4) |
+| 7 | progress not relayed | **Adopted, and decided further**: never relayed from a service; `pact` sends its own, every 15 seconds, one fixed text (section 7) |
+| 7 | instructions say what `unknown` means | **Adopted** (section 4) |
 | 8 | which document changes what | this document changes in all the places above |
 | 9 | what the end-to-end test needs | **Adopted**: section 10 |
 
@@ -55,9 +76,9 @@ Three commands from one binary:
 
 | Command | Does | Holds the key |
 |---|---|---|
-| `pact serve` | started by the person's SSH connection that starts the sandbox; reads one bundle from standard input (section 2), closes it, and stays. Listens on a Unix socket. Speaks MCP on that socket, and HTTP to the services | yes, in memory |
+| `pact serve` | started by the person's SSH connection that starts the sandbox; reads one bundle from standard input (section 2), closes it, and stays. `--socket-mode` sets the socket's mode (default `0600`). Listens on a Unix socket. Speaks MCP on that socket, and HTTP to the services | yes, in memory |
 | `pact stdio` | started by the model's MCP client as its "server"; copies bytes between its standard input/output and the socket. Reads no file and holds nothing | no |
-| `pact call <tool> '<arguments json>'` | one call, no server and no socket: reads the bundle from standard input, composes, signs, sends and prints the normalised tool result as one JSON object on standard output. The same code path as `tools/call` (section 6). For a person trying a service by hand, and for tests (section 10). `pact tools` likewise prints the tool list | for its one run |
+| `pact call <tool> '<arguments json>'` | one call, no server and no socket: reads the bundle from standard input, composes, signs, sends and prints the normalised tool result as one JSON object on standard output. The same code path as `tools/call` (section 6). For a person trying a service by hand, and for tests (section 10). `--min-wait SECONDS` (a test option, here and in `serve`) sets the floor. `pact tools` likewise prints the tool list | for its one run |
 
 Why two processes for the model: the model's MCP client starts `pact stdio`
 itself and may start it many times; the key must not be on a command line, in
@@ -67,45 +88,71 @@ namespace could reach a port; a socket has a mode. (A client that only speaks
 HTTP can be given a loopback port as an option later.)
 
 How far the model is kept from the key depends on the sandbox, not on `pact`
-(approvals.md section 4 trusts the sandbox for "no way out except services"
-and not for keeping the key secret). The exact requirement is in "Not
-decided" (b).
+(approvals.md R2: a SHOULD). What "apart" means is in "What 'apart' means"
+below.
 
-## 2. What arrives on standard input
+## 2. What arrives on standard input (decided: option B)
 
-One JSON object on one line, then end of input. This is the shape proposed;
-whether it is the right one is "Not decided" (d).
+At most 64 KiB, in three parts, so that the configuration can be logged and
+checked without ever holding the key:
+
+1. **one line**: the configuration as one JSON object with `v`;
+2. **the key**, an unmodified unencrypted OpenSSH private key block
+   (`-----BEGIN OPENSSH PRIVATE KEY-----` ...), which a person can produce
+   with `cat`;
+3. **the certificate**, one `-cert.pub` line, and nothing after it.
 
 ```json
-{"v":1,"key":"-----BEGIN OPENSSH PRIVATE KEY-----\n...","certificate":"ssh-ed25519-cert-v01@openssh.com AAAA...","services":[{"host":"a.example","name":"probe","url":"http://127.0.0.1:8443/mcp"}],"deadline_seconds":120,"min_wait_seconds":10,"tls_root":"-----BEGIN CERTIFICATE-----\n..."}
+{"v":1,"services":[{"host":"a.example","name":"probe","url":"http://127.0.0.1:8443/mcp"}],"deadline_seconds":120,"tls_root":"-----BEGIN CERTIFICATE-----\n..."}
 ```
 
-- `key`: an unencrypted OpenSSH private key, Ed25519 or ECDSA P-256 (another
-  type is refused, naming it). `certificate`: its `-cert.pub` line, which must
-  pass formats section 3.1 (the `signature_agent` rules), be the key's own,
-  and not be expired. Checked at start, so a wrong pair fails at once.
-- `services`: the **only** services `pact` will talk to. `host` and `name` are
-  what goes in `service` of each call; `url` is where to send it, `http` or
-  `https`, no credentials in it. Nothing in this list comes from the model.
-  Stage 1 may use `http` on loopback with no `tls_root`; anything else needs
-  `https` and a root (the site's own, approvals.md section 5).
-- `deadline_seconds`: the setting of section 6, default 120, at most 600.
-  `min_wait_seconds`: the floor, default 10 or `deadline_seconds` if smaller;
-  settable lower for tests.
-- Unknown members, a `v` that is not 1, a bundle over 64 KiB: refused.
-- The bundle is put together by pledge when the person starts the agent
-  (approvals.md flow A); p-ledge's specification owns its definition.
+- `services`: the **only** services `pact` will talk to (1 to 16). `host` and
+  `name` are what goes in `service` of each call; `url` is where to send it:
+  `https`, or `http` on loopback (`localhost`, `127.x.x.x`, `::1`) only; no
+  credentials, no fragment, no control or non-ASCII character. Nothing in
+  this list comes from the model.
+- `deadline_seconds`: the setting, 1 to 600, default 120.
+- `tls_root`: a PEM certificate; required if any service is `https`.
+- **The floor for the wait is not in the bundle**: it is the option
+  `--min-wait SECONDS` of the command line (default 10, or the setting if
+  smaller), for tests.
+- Unknown members, a `v` that is not 1, a bundle over 64 KiB, a duplicate
+  service: refused. pledge writes the bundle when the person starts the agent
+  (approvals.md flow A); the p-ledge agent reviews the shape.
+- The key must be Ed25519, unencrypted, and its certificate must be its own
+  (fingerprint compared), a user certificate, valid now, and keep to formats
+  section 3.1: one principal, no critical option, no extension but a
+  well-formed `groups@procession`. Each failure has its own error, and no error
+  holds any of the key.
 
 `pact serve` refuses to start on any problem, with one line on standard
 error that never contains key material.
 
-## 3. Signing
+## 3. Signing (decided: in process)
 
-The signature is an SSHSIG over the call, namespace `call-v1@procession`,
-by the agent's certified key. Two ways to make it, and the choice is the
-designer's ("Not decided" (a)). Both produce the same bytes of meaning, and
-both are checked in the tests by `ssh-keygen -Y verify`; the rest of this
-document does not depend on which.
+The signature is an SSHSIG over the call, namespace `call-v1@procession`, by
+the agent's Ed25519 key and its certificate, written by `pact` itself with
+`ring`: the `SSHSIG` blob (the certificate as public key, namespace, empty
+reserved, `sha512`, the signature over the signed-data structure), armoured at
+70 columns. Three limits, decided:
+
+1. **The agent's key is Ed25519, always.** `pact` refuses any other type, naming
+   it; the library's `verify_call`, `signature_agent`, `signature_person` and
+   `request_person` refuse an agent certificate that certifies another type, with
+   `SignError::AgentKeyNotEd25519`.
+2. **The writer exists only in `pact`**, behind the feature, and writes only
+   `call-v1@procession`: its public function takes a `Call`, not bytes.
+   Everything else in `p-act` signs through `ssh-keygen`.
+3. **The test is equality, and it is the writer's specification.** For the same
+   key, certificate and message, `pact`'s armoured output is byte for byte what
+   `ssh-keygen -Y sign` writes (Ed25519 is deterministic), over every namespace
+   of the system and others, with and without a certificate, for messages from 0
+   to 200,000 bytes; and `ssh-keygen -Y verify` accepts it, and refuses it for
+   another namespace, changed bytes and an expired certificate.
+
+The key lives in `pact`'s memory only: no key file, nothing in the environment
+or the arguments. The process is made not dumpable and without core files; the
+buffers that held the bundle are wiped on a best-effort basis.
 
 ## 4. How the model's client talks to `pact`
 
@@ -117,8 +164,8 @@ sampling or roots, and answers any other method `method not found`. Its
 `instructions` say what the service's say: a call may wait for the person's
 approval until its deadline; `declined` and `refused` are decisions, do not
 repeat them unchanged; `expired` and `unavailable` mean nothing happened,
-**except `unavailable` with reason `no-answer`: the action may have run, do
-not repeat it unchanged, ask the person if it is safe to repeat.**
+**except `unknown`: the call was sent and whether it ran is not known; before
+repeating anything that changes something, find out by a query.**
 
 ## 5. Which services exist, and the tool list
 
@@ -259,14 +306,15 @@ application/json`, `Accept: application/json, text/event-stream`,
   and wrapped in JSON-RPC every `"` is doubled, so a legal answer can reach
   about 2 MiB; 4 MiB leaves room and bounds `pact`. Notifications and comments
   together at most 64 KiB. Content-Length and chunked encodings. A larger
-  message is `unavailable`/`no-answer` (the verb may have run). What `pact`
+  message is `unknown` (the verb may have run). What `pact`
   hands on to the model stays at 1 MiB of text content, as the service caps it;
   a final message that has more is a protocol violation and is treated the same.
-- Progress is **not relayed** to the model's client in this version. Risk: an
-  MCP client has a timeout of its own on a request, commonly reset by progress
-  notifications; one that does not see progress may give up on a call whose
-  person has not yet answered, though `pact` is still waiting. See "Not
-  decided" (f).
+- **Progress is `pact`'s own, never a service's** (decided). While a call
+  waits, `pact` sends the model's client a `notifications/progress` every 15
+  seconds, with the client's own `progressToken` (if the client sent one), an
+  increasing `progress`, and the one text "waiting for an answer". Nothing a
+  service sends is relayed. This keeps a client that resets its request
+  timeout on progress waiting for a person's answer.
 
 ## 8. What the model gets back
 
@@ -277,10 +325,13 @@ object `{"type":"outcome","outcome":...,"id":...,"reason":...}`
 
 - parses it, and passes it on only if `outcome` is one of `done`, `declined`,
   `expired`, `refused` or `unavailable` and, for `refused`, `reason` is one of
-  `not-allowed`, `invalid`, `try-later`. **Anything else becomes `refused` with
-  `not-allowed`**, with a line on standard error: the closed list has no
-  `unknown`, and "do not repeat" is the safe reading. It never passes on a
-  string it received and did not parse into those words;
+  `not-allowed`, `invalid`, `try-later`. **A `refused` with another reason
+  becomes `refused`/`not-allowed`** ("do not repeat" is the safe reading). **A
+  response that is not an outcome for this call at all (no outcome line, another
+  identifier, an outcome outside the list, `done` without `rc`, an answer over
+  the limit) is `unknown`**, because the call was sent and may have run. It never
+  passes on a string it received and did not parse into the closed list: `done`,
+  `declined`, `expired`, `refused` with its class, `unavailable`, `unknown`;
 - passes the answer of a verb (`done`) on as the further text contents,
   unchanged, up to 1 MiB: that is the data the model asked for;
 - makes its own outcomes for what happens on its side, with the same shape:
@@ -291,12 +342,11 @@ object `{"type":"outcome","outcome":...,"id":...,"reason":...}`
     error). Nothing was done;
   - `refused`/`try-later`: the service answered `503` with `Retry-After`, or
     more than 16 calls were waiting in `pact`;
-  - **`unavailable`/`no-answer`**: the call was sent and no answer came (the
-    connection was lost, or the idle timeout, or an answer over the limits).
-    **A verb may have run** (agent-to-service.md section 7). The text says so:
-    "it may have run; do not repeat it unchanged; ask your person if it is safe
-    to repeat". `no-answer` is not in the service's closed list and only
-    `pact` can make it: "Not decided" (c);
+  - **`unknown`** (decided; only `pact` makes it): the call was sent and no
+    answer came (the connection was lost, or the idle timeout, or an answer over
+    the limits). **A verb may have run** (agent-to-service.md section 7). The
+    text content after the outcome line tells the model to find out by a query
+    before it repeats anything that changes something;
   - a model's mistake is an MCP error (section 6), never an outcome, and
     `invalid` comes only from a service;
 - on `notifications/cancelled` from the model, closes the connection to the
@@ -340,14 +390,13 @@ pledge.
    ssh-keygen -q -t ed25519 -N '' -C '' -f delegation
    ssh-keygen -q -t ed25519 -N '' -C '' -f agent
    ssh-keygen -q -s delegation -I agent -n alice -V +8h -O clear agent.pub
-   jq -nc --rawfile key agent --rawfile cert agent-cert.pub \
-     '{v:1, key:$key, certificate:($cert|rtrimstr("\n")), deadline_seconds:5, min_wait_seconds:1,
-       services:[{host:"localhost", name:"probe", url:"http://127.0.0.1:8443/mcp"}]}' > bundle.json
+   echo '{"v":1,"deadline_seconds":5,"services":[{"host":"localhost","name":"probe","url":"http://127.0.0.1:8443/mcp"}]}' > bundle
+   cat agent agent-cert.pub >> bundle
    ```
 
-   and a function `p_act::pact::Bundle` (feature `pact`: builds, serialises and
-   checks the same JSON), so that tests of p-robe and p-ledge do not each
-   write it.
+   (the configuration line, the key, the certificate line: section 2). The
+   test helper of `p-act` builds the same thing from real keys, so that tests of
+   p-robe and p-ledge do not each write it.
 2. **Driving `pact` without an MCP client:** `pact call <tool> '<json>' <
    bundle.json` and `pact tools < bundle.json`, as in section 1; the result is
    the normalised tool result on one line, exit status 0 whenever `pact` itself
@@ -355,8 +404,8 @@ pledge.
 3. **The identifier and the call's hash on standard error** of every call, so
    that a test can find it in the service's audit line and in the fake
    pledge's log.
-4. **A short `deadline_seconds` and a settable floor** in the bundle (above:
-   5 and 1), so that a test of `expired` takes 5 seconds and not 120.
+4. **A short `deadline_seconds` in the bundle and the floor as the option
+   `--min-wait`** (above: 5 and 1), so that a test of `expired` takes 5 seconds and not 120.
 5. **A fake pledge** from `p-act`. Everything it needs exists now:
    `exchange` (`LineReader`, `Message`, `write_message`), `verify_request` and
    `verify_call_agent` for the checks, `sign_approval` with a confirmed and an
@@ -368,8 +417,8 @@ pledge.
    agent may equally write it from the public API.
 6. **What `pact` tests itself**, with a fake service on loopback (a
    `TcpListener`), without `probe`: each outcome of section 8 including
-   `no-answer` and an unknown reason; a verb that runs for 60 seconds with
-   keep-alive comments, which must not become `no-answer`; an answer of 3 MiB
+   `unknown` and an unknown reason; a verb that runs for 60 seconds with
+   keep-alive comments, which must not become `unknown`; an answer of 3 MiB
    of JSON; the refusals of section 6 sign nothing (the fake sees no
    connection); a key not matching its certificate, an expired certificate, a
    certificate with a critical option, an RSA key: `pact serve` refuses to
@@ -387,45 +436,12 @@ lost connection after the verb started, a replayed call, a body that differs,
 cancel, the 17th waiting call, `tools/list` as `pact` presents it, `test read`
 through `--within`) are p-robe's tests and use items 1 to 5.
 
-## Not decided
+## What "apart" means (decided as a SHOULD)
 
-These go to the designer, and (e) to the owner. Each has both sides and no
-choice.
-
-### (a) Signing in process, or by `ssh-keygen`
-
-| | In process (`ring`) | `ssh-keygen -Y sign` |
-|---|---|---|
-| What the sandbox must contain | `pact` and nothing else of OpenSSH | `pact`, and OpenSSH's `ssh-keygen` (a package, with its own updates), on `PATH` or at a configured path; a writable directory on memory-backed storage for the key file |
-| Where the key lives | in `pact serve`'s memory only; never in a file | in memory of `pact serve`, **and** in a file (mode `0600`, in a `0700` directory of `pact`'s user on a `tmpfs`) for as long as `ssh-keygen` may need it: from start to exit, or written and deleted around each signature. A crash leaves it until the tmpfs is gone; a child `ssh-keygen` opens it and could be observed or replaced if the path is writable by another |
-| Code `p-act` must have | a **second SSHSIG writer** (the framing: `SSHSIG` magic, version, the certificate as public key, namespace, reserved, hash algorithm, the signature over the signed-data structure of magic, namespace, reserved, hash algorithm and the hash of the message) and an OpenSSH private-key reader (`openssh-key-v1`, unencrypted, one key; about 80 lines) | nothing new: `Signer` already does exactly this |
-| What can go wrong | a signature that `ssh-keygen -Y verify` does not accept is loud: it fails every call. What is quiet is a difference in a rarely used case (hash algorithm, a certificate form), and any later change of OpenSSH's format | `ssh-keygen` missing, or another version, in the sandbox; a passphrase prompt (already prevented in `p-act`); the key on a file |
-| Dependency | `ring` (already) | none new |
-
-How the in-process writer would be kept honest against `ssh-keygen -Y verify`,
-in `p-act`'s own tests, with real keys in a temporary directory as today:
-(1) **Ed25519 signatures are deterministic**, so for the same key, certificate
-and message the in-process armoured output can be compared **byte for byte**
-with what `ssh-keygen -Y sign` writes; that is the strongest check there is,
-and it runs for each namespace; (2) for ECDSA P-256 (not deterministic) every
-signature is verified by `ssh-keygen -Y verify` and read back by
-`signature_certificate`; (3) the same matrix as the existing tests, with and
-without a certificate, many messages of different lengths including empty and
-over 64 KiB, and the refusals (wrong namespace, changed bytes, expired
-certificate) against the in-process signatures. A **third way** exists and I
-did not test it: `pact` speaks the SSH agent protocol on a private socket
-with the key in memory and runs `ssh-keygen -Y sign -U` against it. The key
-then is in memory only and the framing is `ssh-keygen`'s, so there is no
-second writer; it needs `ssh-keygen` in the sandbox, an SSH agent server of
-about 150 lines in `pact` (identities, sign request), and I have not checked
-that `-Y sign -U` signs with a certificate this way.
-
-### (b) What the sandbox must give for the key to stay secret
-
-`pact` lowers the exposure (no key file in the in-process case, nothing in the
+`pact` does its own part regardless of the sandbox: it lowers the exposure (no key file in the in-process case, nothing in the
 model's context, nothing in its environment or arguments, `PR_SET_DUMPABLE` 0,
 no core dumps). That is **not** secrecy from a model that can run code as the
-same user. The requirement on the sandbox, precisely: `pact serve` runs as a
+same user. What "apart" means, precisely: a description of a good sandbox, not a precondition that `pact` checks: `pact serve` runs as a
 **user that no process the model can start runs as**, and:
 
 1. no capability that reads another user's process or files is granted to the
@@ -448,54 +464,17 @@ same user. The requirement on the sandbox, precisely: `pact serve` runs as a
 6. swap, if any, is encrypted or off, and core dumps are off for `pact`'s user;
 7. the model's user cannot reach a service except through `pact`. This one is not about the key (an unsigned call is refused anyway), but without it `pact` is not "the only thing" that talks to services, which approvals.md section 10 says it is.
 
-Who guarantees it: the sandbox (a user per role and the capabilities above) or
-a written instruction to the person. If it is not given, the honest statement
-is that the key protects against accident and against the model's text, not
-against code the model runs as `pact`'s user. The threat table already says it
-(approvals.md section 4: the sandbox is not trusted for the key's secrecy);
-what is open is whether `pact` may rely on the sandbox for it.
+`pact serve` logs a warning when a client connects under `pact`'s own user
+(on Linux, from the peer's credentials on the socket). Where the sandbox does
+not keep them apart, the key protects against the model's text and against
+accident, not against code the model runs; the design holds either way, since
+every use of the key still passes the person's machine and is recorded there
+(approvals.md R2).
 
-### (c) `no-answer`
 
-Only `pact` can say "I sent it and heard nothing"; a service cannot. The
-service's closed list has `unavailable` with no reason, whose meaning is
-"nobody could be asked, or nothing was done". The case: a verb started and the
-answer was lost (agent-to-service.md section 7). Options:
+## Not decided
 
-1. **Add `unavailable`/`no-answer` to the closed list** as a reason that only
-   `pact` makes. The model has one more word to understand, the list says it
-   plainly, and the instructions can state the exception in one sentence. The
-   list is no longer "what a service can say" but "what the model can be told".
-2. **Report it as plain `unavailable`.** The list stays as it is. The model is
-   then told "nothing was done", which is false here, and acts on it: it asks
-   again and the verb runs twice. The warning could ride in the text content
-   only; the outcome word is what a model acts on.
-3. **A new outcome of its own** (for example `lost`), outside both: more
-   distinct, a wider list.
-Without a decision this document uses (1).
-
-### (d) The bundle on standard input
-
-The shape of section 2: one JSON object, one line. Alternatives for the
-designer, with p-ledge:
-
-- **A**, as proposed: key, certificate, services, settings and the TLS root in
-  one object. One read, one version number, one parser. The key and the
-  configuration are in one value, so a line that logs the bundle logs the key.
-- **B**: the first line is the configuration (services, settings, root), the
-  rest are the key and the certificate as they are in files (an OpenSSH private
-  key block, then the `-cert.pub` line). The configuration can be logged and
-  checked without ever holding the key; the key is the OpenSSH format
-  unmodified, so a person can produce the second part with `cat`. Two parts to
-  parse.
-- Whatever the shape: a version number (`v`), unknown members refused, a size
-  limit (64 KiB proposed), where it is specified (p-ledge) and who writes it
-  (pledge, when the person starts the agent), and what happens to a bundle with
-  a settable floor in production (the floor is for tests; a person should not
-  be able to set the wait to 1 second by accident: perhaps the floor is a
-  command-line option of `pact call`, not a bundle member).
-
-### (e) For the owner: the HTTP client
+### The HTTP client, for the owner
 
 The hand-written client over `httparse` was proposed in the first version only
 because crates.io cannot be reached from this sandbox; that is not a reason to
@@ -528,17 +507,16 @@ responses, a redirect, a wrong host name and a stalled stream. The choice is
 between a vetted general client with defaults to disarm, and a small special
 one that is ours to get right.
 
-### (f) Progress notifications
 
-Whether `pact` should relay progress to the model's client, so that clients
-that reset a request timeout on progress keep waiting. For: a person's answer
-can take minutes and a client's default timeout is often shorter (commonly 60
-seconds). Against: the service's progress text would be text from a service
-into the model's context unless `pact` maps it to a fixed set of words ("handed
-to your person's machine", "approved, running"), and a relayed message that
-differs per client version is more to keep honest. Without it, a client that
-gives up closes `pact stdio`, which is a cancel; the person's dialog is closed,
-nothing ran.
+Checked on 2026-11-11 with `cargo generate-lockfile --offline` in a scratch
+directory: **`ureq` is not in the local registry** (`no matching package named
+`ureq` found`), so the choice cannot be built here either way. `http`,
+`httparse`, `rustls` 0.23, `rustls-pki-types`, `rustls-webpki` and `webpki-roots`
+are.
+
+## What exists
+
+Behind the feature `pact` (`p_act::pact`, and the binary): the bundle parser with every refusal; the in-process Ed25519 SSHSIG writer and its equality test; composing a call from a tool call; the outcome mapping to the closed list; the progress text and interval; the MCP server on a byte stream, and `serve`, `stdio`, `call` and `tools`; the catalogue with the service's schema checked; and the `Transport` trait with an in-memory implementation. What the HTTP client adds is one `Transport` implementation.
 
 ## Dependencies, in short
 
@@ -547,4 +525,4 @@ For the library: unchanged (`serde`, `serde_json`, `base64`, `ring`,
 `rustls` with its provider and `rustls-pki-types` for `https`; `libc` for the
 one `prctl` call, in the binary only; the command line by hand (three
 subcommands); threads and `std` sockets, no async runtime (at most 16 waiting
-calls). In (a), the in-process option adds no dependency.
+calls). The in-process signing adds no dependency.

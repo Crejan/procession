@@ -10,7 +10,17 @@ categories = ["authentication"]
 include = ["src/**"]
 publish = false
 
+[features]
+# The agent-side signer `pact` (proposals/pact.md): the library the binary is made of, and the binary.
+pact = ["dep:libc"]
+
+[[bin]]
+name = "pact"
+path = "src/bin/pact.rs"
+required-features = ["pact"]
+
 [dependencies]
+libc = { version = "0.2", optional = true }
 base64 = "0.23"
 serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["raw_value"] }

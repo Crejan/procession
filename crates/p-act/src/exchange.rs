@@ -586,11 +586,17 @@ pub struct LineReader<R> {
     inner: R,
     buf: Vec<u8>,
     start: usize,
+    limit: usize,
 }
 
 impl<R: Read> LineReader<R> {
     pub fn new(inner: R) -> LineReader<R> {
-        LineReader { inner, buf: Vec::new(), start: 0 }
+        LineReader::with_limit(inner, MAX_LINE)
+    }
+
+    /// As [`LineReader::new`] with another limit, for a line-based protocol that is not this exchange.
+    pub fn with_limit(inner: R, limit: usize) -> LineReader<R> {
+        LineReader { inner, buf: Vec::new(), start: 0, limit }
     }
 
     /// The next line without its `\n`; `None` at the end of the input between lines.
@@ -600,7 +606,7 @@ impl<R: Read> LineReader<R> {
         loop {
             if let Some(offset) = self.buf[scanned..].iter().position(|&b| b == b'\n') {
                 let end = scanned + offset;
-                if end - self.start > MAX_LINE {
+                if end - self.start > self.limit {
                     return Err(ExchangeError::LineTooLong);
                 }
                 let line = self.buf[self.start..end].to_vec();
@@ -612,7 +618,7 @@ impl<R: Read> LineReader<R> {
                 return Ok(Some(line));
             }
             scanned = self.buf.len();
-            if self.buf.len() - self.start > MAX_LINE {
+            if self.buf.len() - self.start > self.limit {
                 return Err(ExchangeError::LineTooLong);
             }
             self.buf.drain(..self.start);

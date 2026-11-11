@@ -23,6 +23,8 @@ mod time;
 pub mod call;
 pub mod clearance;
 pub mod exchange;
+#[cfg(feature = "pact")]
+pub mod pact;
 pub mod rating;
 pub mod sign;
 

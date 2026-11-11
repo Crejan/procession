@@ -192,7 +192,7 @@ impl fmt::Display for PublicKey {
 pub struct Fingerprint(String);
 
 impl Fingerprint {
-    fn of_blob(blob: &[u8]) -> Fingerprint {
+    pub(crate) fn of_blob(blob: &[u8]) -> Fingerprint {
         Fingerprint(format!("SHA256:{}", STANDARD_NO_PAD.encode(digest(&SHA256, blob))))
     }
 
@@ -358,24 +358,24 @@ pub fn looks_armoured(sig: &str) -> bool {
     )
 }
 
-struct Reader<'a>(&'a [u8]);
+pub(crate) struct Reader<'a>(pub(crate) &'a [u8]);
 
 impl<'a> Reader<'a> {
-    fn take(&mut self, n: usize) -> Option<&'a [u8]> {
+    pub(crate) fn take(&mut self, n: usize) -> Option<&'a [u8]> {
         let (head, tail) = (self.0.get(..n)?, self.0.get(n..)?);
         self.0 = tail;
         Some(head)
     }
 
-    fn u32(&mut self) -> Option<u32> {
+    pub(crate) fn u32(&mut self) -> Option<u32> {
         Some(u32::from_be_bytes(self.take(4)?.try_into().ok()?))
     }
 
-    fn u64(&mut self) -> Option<u64> {
+    pub(crate) fn u64(&mut self) -> Option<u64> {
         Some(u64::from_be_bytes(self.take(8)?.try_into().ok()?))
     }
 
-    fn string(&mut self) -> Option<&'a [u8]> {
+    pub(crate) fn string(&mut self) -> Option<&'a [u8]> {
         let n = self.u32()?;
         self.take(usize::try_from(n).ok()?)
     }
@@ -403,7 +403,7 @@ pub struct Certificate {
     pub cert_type: u32,
 }
 
-fn put_string(out: &mut Vec<u8>, s: &[u8]) {
+pub(crate) fn put_string(out: &mut Vec<u8>, s: &[u8]) {
     out.extend_from_slice(&u32::try_from(s.len()).unwrap_or(u32::MAX).to_be_bytes());
     out.extend_from_slice(s);
 }
