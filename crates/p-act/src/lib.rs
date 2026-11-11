@@ -22,6 +22,7 @@ mod time;
 
 pub mod call;
 pub mod clearance;
+pub mod exchange;
 pub mod rating;
 pub mod sign;
 
