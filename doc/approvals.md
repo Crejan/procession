@@ -318,8 +318,9 @@ unchanged, as the bytes it received. The exact formats are in
 [`approval-formats.md`](approval-formats.md).
 
 **Delegation.** pledge creates the agent's key pair, signs the public part
-into an SSH certificate with the person's delegation key (validity, and the
-chosen groups as principals), registers the certificate with the broker, and
+into an SSH certificate with the person's delegation key (validity; the
+person as its only principal; the chosen groups in the extension
+`groups@procession`), registers the certificate with the broker, and
 gives key and certificate to the sandbox as the person starts the agent. An
 SSH certificate cannot be the issuer of another, so a service cannot verify
 that chain with `ssh-keygen`; it does not have to (R1). pledge checks calls

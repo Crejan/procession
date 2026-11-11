@@ -16,6 +16,8 @@ yet.
   verifier checks the signature over the bytes it received and only then
   reads them. A document that contains another carries the other's bytes,
   not a re-serialisation. There is no canonical form to get wrong.
+- **A document or signature carried inside another is always the base64 of
+  its exact bytes** (standard alphabet, padded).
 - **One line of JSON.** A document is one JSON object, UTF-8, without a byte
   order mark and without a line break. That is this workspace's convention
   for machine output, and it is what a person's dialog is built from.
@@ -46,7 +48,8 @@ the namespace. A reader refuses a `v` it does not know.
   `sha256:<64 hex digits>`.
 - **Unknown members** make a document invalid. Nothing is ignored: what a
   dialog does not show must not be in what is signed.
-- **Size**: a call is at most 16 KiB; a request at most 32 KiB.
+- **Size**: a call is at most 16 KiB; a request at most 32 KiB; a clearance
+  at most 1 KiB.
 
 ## 3. The call
 
@@ -62,9 +65,9 @@ What an agent asks for. Signed by the agent.
 | `type` | string | `"call"` |
 | `id` | string | a UUID the agent made for this call and never uses again |
 | `deadline` | string | the time after which the call, and the request made from it, is void |
-| `service.host` | string | the host's name as the site project has it |
+| `service.host` | string | the host's name as the site project has it: `[A-Za-z0-9._-]+`, at most 64 characters |
 | `service.name` | string | the service's name on that host: `[a-z][a-z0-9-]*` |
-| `action` | string | the action, in the service's own words: lower-case words separated by single spaces |
+| `action` | string | the action, in the service's own words: words `[a-z][a-z0-9-]*` separated by single spaces |
 | `params` | array of strings | the action's parameters, in the order the service defines; at most 64, each at most 512 bytes |
 | `claim` | string, optional | what the agent says about its reasons; at most 200 characters. Shown as the agent's claim and never acted on |
 
@@ -79,12 +82,50 @@ What an agent asks for. Signed by the agent.
 The person the agent acts for is not a member: it is the name in the agent's
 certificate, which is inside the signature.
 
+### 3.1 The agent's certificate
+
+The certificate pledge issues for an agent's key with the person's
+delegation key (approvals.md, section 5), and which every call's signature
+contains.
+
+- **The person is its only principal.** A person's name is
+  `[A-Za-z0-9._-]+`, at most 64 characters. A certificate with no principal
+  or more than one is refused.
+- **The delegation's groups are in the extension `groups@procession`**: the
+  group names joined by commas, sorted, without spaces. A delegation without
+  groups has no such extension. A value that is not sorted, has a duplicate
+  or has an empty name is refused. The extension is inside the certificate,
+  so it is signed by the person's delegation key; the broker reads the
+  groups from there and from nowhere else.
+- **Nothing else.** A certificate with any other extension, or with any
+  critical option, is refused. It is issued with `-O clear`, so that it
+  carries none of the login extensions.
+- **The key ID** is a free label for the person's dialogs and the record. No
+  decision is ever made on it.
+- **Key types**: Ed25519 and ECDSA P-256, for the certified key and for the
+  issuing key. Any other type is refused, with an error that names it. The
+  same holds for every key in this document; a person's keys are P-256
+  because the Secure Enclave makes nothing else, and a host needs an Ed25519
+  or P-256 host key to run a service.
+
+```
+ssh-keygen -s <delegation key> -I '<label>' -n <person> -V +8h -O clear \
+    -O extension:groups@procession=admins,diag-readers agent.pub
+```
+
+Checked with OpenSSH 10.2: `-Y verify -I <person>` accepts a signature by
+such a key (an unknown extension is ignored, unlike a critical option), and
+`ssh-keygen -L` shows the extension.
+
+Who needs what from it: a service the person; the broker the person and the
+groups; pledge neither, but it checks that the certificate is one it issued.
+
 ## 4. The request
 
 What a service states it will do. Signed by the service.
 
 ```json
-{"v":1,"type":"request","call":"eyJ2IjoxLCJ0eXBlIjoiY2FsbCIs...","call_sig":"-----BEGIN SSH SIGNATURE-----\nU1NIU0lH...\n-----END SSH SIGNATURE-----\n","rating":{"exposure":"internal","damage":"none","disruption":"none"}}
+{"v":1,"type":"request","call":"eyJ2IjoxLCJ0eXBlIjoiY2FsbCIs...","call_sig":"LS0tLS1CRUdJTiBTU0ggU0lHTkFUVVJFLS0tLS0K...","rating":{"exposure":"internal","damage":"none","disruption":"none"}}
 ```
 
 | Member | Type | Meaning |
@@ -92,7 +133,7 @@ What a service states it will do. Signed by the service.
 | `v` | number | `1` |
 | `type` | string | `"request"` |
 | `call` | string | the call's bytes, base64 (standard alphabet, padded) |
-| `call_sig` | string | the call's signature, as the agent sent it |
+| `call_sig` | string | the call's armoured signature as the agent made it, its bytes base64 (standard alphabet, padded) |
 | `rating.exposure` | string | `open`, `internal` or `secret` |
 | `rating.damage` | string | `none`, `recoverable` or `lasting` |
 | `rating.disruption` | string | `none`, `brief` or `outage` |
@@ -189,8 +230,12 @@ written; an approval does not verify under the name `broker`, nor a
 clearance key under a person's name, nor any signature under another
 namespace.
 
+A verifier may write the site CA's line with only the namespace it is
+verifying; it must never write one with more than the two.
+
 **Names that the site CA must never certify for a person:** `broker`, and
-anything without the `:confirmed` or `:automatic` ending.
+anything without the `:confirmed` or `:automatic` ending. A person's name
+never contains `:` (section 3.1), which these endings rely on.
 
 ## 8. In the first stage
 
