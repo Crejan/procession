@@ -3,9 +3,9 @@
 //! each can be tested alone.
 
 /// How many arguments a call may carry.
-pub const ARG_MAX: usize = 64;
+pub const ARG_MAX: usize = p_act::limits::MAX_PARAMS;
 /// How long one argument may be, in bytes.
-pub const ARG_LEN_MAX: usize = 512;
+pub const ARG_LEN_MAX: usize = p_act::limits::MAX_PARAM_BYTES;
 /// How long an identity (the login that called through sudo) may be. A login
 /// is at most 32 on Linux; `diag-tools` had no limit, and the name becomes a
 /// file name.

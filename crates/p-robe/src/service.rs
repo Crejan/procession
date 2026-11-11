@@ -11,8 +11,8 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 use p_act::exchange::{Outcome as Answered, Submit};
 use p_act::sign::{
-    ApprovalKind, ApprovalTrust, PublicKey, SignError, Signer, request_person, sign_request, signature_from_base64,
-    signature_person, verify_approval,
+    ApprovalKind, ApprovalTrust, PublicKey, SignError, Signer, sign_request, signature_from_base64, signature_person,
+    verify_approval,
 };
 use p_act::{Call, Document, Request, Timestamp};
 
@@ -28,10 +28,10 @@ use base64::engine::general_purpose::STANDARD;
 
 /// The most a call's deadline may lie ahead, and the tolerated difference of
 /// clocks that applies **only** to this bound: after the deadline nothing starts.
-const MAX_AHEAD_SECS: i64 = 600;
-const SKEW_SECS: i64 = 60;
-/// A call is at most 16 KiB, a signature at most 4 KiB (`approval-formats.md`, section 2).
-const CALL_MAX: usize = 16 * 1024;
+use p_act::limits::{
+    CLOCK_TOLERANCE_SECONDS as SKEW_SECS, MAX_CALL_BYTES as CALL_MAX, MAX_DEADLINE_AHEAD_SECONDS as MAX_AHEAD_SECS,
+};
+/// A signature is at most 4 KiB (p-act has no limit of its own for it yet); a call's limit is p-act's.
 const SIG_MAX: usize = 4 * 1024;
 
 /// What the service is, and whose approval it accepts (stage 1: one person,
@@ -291,14 +291,15 @@ impl Service {
     }
 
     fn verify(&self, request: &Request, approval: &str) -> Result<ApprovalKind, Ended> {
-        let who = request_person(request).map_err(|e| unavailable(format!("approval-invalid:call-person:{e}")))?;
-        if who != self.settings.person {
-            return Err(unavailable(format!("approval-invalid:person-mismatch:{who}")));
-        }
-        let trust =
-            ApprovalTrust::PersonKeys { confirmed: &self.settings.confirmed, automatic: &self.settings.automatic };
+        // The person is passed to p-act, which refuses a request whose call belongs to another.
+        let trust = ApprovalTrust::PersonKeys {
+            person: &self.settings.person,
+            confirmed: &self.settings.confirmed,
+            automatic: &self.settings.automatic,
+        };
         verify_approval(request, approval, trust).map_err(|e| match e {
             SignError::AutomaticNotAcceptable => unavailable("approval-invalid:automatic-at-the-top"),
+            SignError::ApprovalForAnotherPerson => unavailable("approval-invalid:person-mismatch"),
             other => unavailable(format!("approval-invalid:{other}")),
         })
     }

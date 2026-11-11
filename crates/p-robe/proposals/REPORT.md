@@ -344,3 +344,17 @@ test now asserts that the only message in the stream is the answer. Tests:
 114 unit + 3 CLI, and with `--features test-verbs` 119 unit + 18 CLI; clippy clean.
 Waiting for p-act's `PersonKeys` with the person: then I switch to it and keep my
 own `person-mismatch` test.
+
+---
+
+## Update: `PersonKeys { person, .. }` and `p_act::limits`
+
+Merged `agent/p-act` (64077e0). The service passes its person to
+`ApprovalTrust::PersonKeys`; p-act now refuses an approval for another person's
+call (`SignError::ApprovalForAnotherPerson`), and my own check is removed. The
+test of the case is kept and passes through p-act's refusal (exact code
+`approval-invalid:person-mismatch`). Numbers of my own replaced by `p_act::limits`:
+the 600 s deadline limit, the 60 s tolerance, the call size, and the parameter
+count and size in `rules.rs`. Left mine: the 4 KiB signature limit (p-act has none),
+the MCP body limit, the 4 MiB message limit. Tests: 114 unit + 3 CLI; with
+`--features test-verbs` 119 unit + 18 CLI; clippy and fmt clean.
