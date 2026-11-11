@@ -238,7 +238,21 @@ that store, not a new decision:
 |---|---|
 | `approved` (the same approval bytes: a signature made in hardware cannot be made again), `declined`, and `refused` for a **verdict**: `unknown-delegation`, `delegation-ended`, `delegation-withdrawn`, `service-mismatch`, `not-showable`, `ceiling`, `malformed`, `deadline-too-far` | `refused` for a **passing condition**: `limit`, `muted`, `unavailable`, `blocked`. It says nothing about the request, only about now |
 
-- The store lives to the call's deadline, not past it.
+- Two more kinds complete the lists. **Recomputed**, not stored, and the
+  same again without a store: `deadline-past` (the clock gives it) and
+  `call-used` (the used identifier gives it). **Never answered again**:
+  `expired` and `cancelled`.
+- Which reason is which: `malformed` is a call that is not a valid call
+  (what does not parse, a certificate that breaks `approval-formats.md`
+  section 3.1, a signature that does not verify). `unknown-delegation` is a
+  well-formed call that is not under a delegation this pledge will answer
+  for (a fingerprint it did not issue, a delegation not yet delivered, a
+  certificate naming another person, an issuing key pledge no longer has).
+  `unavailable` also covers pledge's own stored data being unusable; that is
+  pledge's fault, not the caller's, and it writes an event to the record.
+- The store lives to the call's deadline, not past it, and at most 11
+  minutes: the 10 of the longest deadline plus the tolerated clock
+  difference (a request that does not parse has no deadline to go by).
 - A **cancelled** request is over; the same bytes again are a new request.
 - The call's identifier is **used** once pledge approved or the person
   declined. A *different* request under it is refused `call-used`. A declined
@@ -696,6 +710,14 @@ the broker, is only for **reaching the broker**: it keeps a stranger from
 standing in the broker's place on the network, and decides nothing that is
 signed. An SSH CA key cannot verify an X.509 server certificate, so they are two
 small files that the provisioning writes.
+
+## 8a. What the broker never says
+
+Where a service is reached. The addresses an agent sends its calls to come
+from the person's own file or options in stages 1 and 2, and from stage 3
+from data the site signed, verified by pledge like the list of hosts' keys.
+The broker is not trusted for where anything is, so there is no "services"
+message on its connections, and none is to be added.
 
 ## 9. Open, decided, and for p-act
 

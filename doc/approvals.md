@@ -490,7 +490,7 @@ over its connection. A disabled person gets none.
 | dialogs on screen | one | pledge |
 | requests waiting per agent | a setting, 5 by default; further ones are refused | pledge (its own setting, per person); the broker (the site's setting) |
 | declines before an agent is muted | 3 within 10 minutes; then its requests are refused without a dialog for 10 minutes and the person is told | pledge |
-| a field shown in a dialog | 200 characters; a command 2000; longer is refused | pledge |
+| what a dialog shows | a field whole, up to the formats' limit for it (a parameter 512 bytes, the claim 200 characters); the parameters of a call together at most 2000 characters; longer is refused | pledge |
 | a command's run (U6) | 60 seconds by default, 10 minutes at most; 1 MiB of output | service |
 | the record on the person's machine | kept one year | pledge |
 | group memberships at the broker | read again every 5 minutes | the job beside the broker |
