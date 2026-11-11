@@ -44,7 +44,7 @@ pub struct Settings {
 
 impl Settings {
     /// The longest wait the services accept (formats section 3: ten minutes).
-    pub const MAX_DEADLINE_SECONDS: u32 = 600;
+    pub const MAX_DEADLINE_SECONDS: u32 = crate::limits::MAX_DEADLINE_AHEAD_SECONDS as u32;
     /// The default setting.
     pub const DEFAULT_DEADLINE_SECONDS: u32 = 120;
     /// The default floor, or the setting if that is smaller.

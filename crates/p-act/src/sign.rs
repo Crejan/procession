@@ -127,6 +127,10 @@ pub enum SignError {
     BadGroups(&'static str),
     #[error("`{0}` is not a fingerprint like SHA256:<43 base64 characters>")]
     MalformedFingerprint(String),
+    #[error("the request's call is another person's than the one these approval keys belong to")]
+    ApprovalForAnotherPerson,
+    #[error("not a certificate line: `<type> <base64> [comment]`")]
+    MalformedCertificateLine,
     #[error("the confirmed and the automatic approval key are the same key")]
     SameApprovalKey,
     #[error("an automatic approval is not accepted for a request rated at the top of a scale")]
@@ -543,6 +547,9 @@ pub struct Agent {
     pub key_id: String,
     /// The fingerprint of the agent's key: the delegation's identifier.
     pub delegation: Fingerprint,
+    /// The certificate's validity, seconds since the epoch. Not judged here: `ssh-keygen` does when it verifies.
+    pub valid_after: u64,
+    pub valid_before: u64,
 }
 
 /// The person and groups of the agent's certificate inside `sig`, if it keeps
@@ -551,6 +558,32 @@ pub struct Agent {
 /// verification succeeds ([`verify_call_agent`]).
 pub fn signature_agent(sig: &str) -> Result<Agent, SignError> {
     agent_from_certificate(signature_certificate(sig)?)
+}
+
+/// The wire form of the certificate on a `-cert.pub` line: `<type> <base64> [comment]`, the type inside
+/// the blob being the one named. Not judged.
+pub(crate) fn certificate_line_blob(line: &str) -> Result<Vec<u8>, SignError> {
+    let bad = || SignError::MalformedCertificateLine;
+    if line.bytes().any(|b| b < b' ' || b == 0x7f) {
+        return Err(bad());
+    }
+    let mut parts = line.split(' ');
+    let (kind, b64) = (parts.next().ok_or_else(bad)?, parts.next().ok_or_else(bad)?);
+    let blob = STANDARD.decode(b64).map_err(|_| bad())?;
+    if Reader(&blob).string() != Some(kind.as_bytes()) {
+        return Err(bad());
+    }
+    Ok(blob)
+}
+
+/// The formats section 3.1 rules applied to a bare certificate line (a `-cert.pub` file's content), the
+/// same rules and errors as [`signature_agent`] applies to the certificate inside a signature: exactly
+/// one principal, a person's name; no critical option; no extension but a well-formed
+/// `groups@procession`; **the certified key is Ed25519**; a user certificate; the issuing key Ed25519
+/// or P-256. For pledge to check a certificate before it hands it out, and for the broker to check one
+/// at registration. Validity is reported in the result, not judged.
+pub fn agent_certificate(line: &str) -> Result<Agent, SignError> {
+    agent_from_certificate(certificate_from_blob(&certificate_line_blob(line)?)?)
 }
 
 /// The section 3.1 rules for an agent's certificate, on one already read. The
@@ -580,7 +613,14 @@ pub(crate) fn agent_from_certificate(cert: Certificate) -> Result<Agent, SignErr
         Ok([other]) => return Err(SignError::BadPrincipal(other)),
         Err(many) => return Err(SignError::PrincipalCount { found: many.len() }),
     };
-    Ok(Agent { person, groups: groups.unwrap_or_default(), key_id: cert.key_id, delegation: cert.fingerprint })
+    Ok(Agent {
+        person,
+        groups: groups.unwrap_or_default(),
+        key_id: cert.key_id,
+        delegation: cert.fingerprint,
+        valid_after: cert.valid_after,
+        valid_before: cert.valid_before,
+    })
 }
 
 fn parse_groups(value: &[u8]) -> Result<Vec<String>, SignError> {
@@ -672,8 +712,10 @@ pub fn verify_request(request: &Request, sig: &str, host_key: &PublicKey) -> Res
 pub enum ApprovalTrust<'a> {
     /// The site CA's key, which certified `<person>:confirmed` and `<person>:automatic`.
     SiteCa(&'a PublicKey),
-    /// The one person's two approval keys, listed directly (stage 1: no site CA).
-    PersonKeys { confirmed: &'a PublicKey, automatic: &'a PublicKey },
+    /// The one person's two approval keys, listed directly (stage 1: no site CA). `person` says whose
+    /// they are: a request whose call is another person's is refused ([`SignError::ApprovalForAnotherPerson`]),
+    /// since the keys prove nothing about a person the trust does not name.
+    PersonKeys { person: &'a str, confirmed: &'a PublicKey, automatic: &'a PublicKey },
 }
 
 /// Which of a person's approval keys signed.
@@ -703,18 +745,25 @@ pub fn sign_approval(signer: &Signer, request: &Request) -> Result<String, SignE
 /// always accepted; an automatic one only for a request rated below the top
 /// of every scale. Returns which key signed.
 pub fn verify_approval(request: &Request, sig: &str, trust: ApprovalTrust<'_>) -> Result<ApprovalKind, SignError> {
-    if let ApprovalTrust::PersonKeys { confirmed, automatic } = trust {
+    let person = request_person(request)?;
+    if let ApprovalTrust::PersonKeys { person: whose, confirmed, automatic } = trust {
         // One key under both names would make every automatic approval verify as confirmed.
         if confirmed == automatic {
             return Err(SignError::SameApprovalKey);
         }
+        if !text::is_name(whose) {
+            return Err(SignError::BadPrincipal(whose.to_owned()));
+        }
+        // These keys are `whose`; the call must be `whose` too, or an approval by the right keys covers another person's request.
+        if person != whose {
+            return Err(SignError::ApprovalForAnotherPerson);
+        }
     }
-    let person = request_person(request)?;
     let attempt = |kind: ApprovalKind| {
         let principal = format!("{person}:{}", kind.suffix());
         let allowed = match trust {
             ApprovalTrust::SiteCa(ca) => ca_line("*:confirmed,*:automatic", &[Namespace::Approval], ca),
-            ApprovalTrust::PersonKeys { confirmed, automatic } => key_line(
+            ApprovalTrust::PersonKeys { confirmed, automatic, .. } => key_line(
                 &principal,
                 Namespace::Approval,
                 if kind == ApprovalKind::Confirmed { confirmed } else { automatic },

@@ -93,14 +93,46 @@ below.
 
 ## 2. What arrives on standard input (decided: option B)
 
-At most 64 KiB, in three parts, so that the configuration can be logged and
-checked without ever holding the key:
+**The exact bytes**, which `pact` reads and pledge writes, and which `pact`
+refuses to read in any other form (`p_act::pact::bundle`):
+
+```
+<configuration: one JSON object, no line break inside>\n
+-----BEGIN OPENSSH PRIVATE KEY-----\n
+<the key's base64, in lines>\n
+-----END OPENSSH PRIVATE KEY-----\n
+<certificate: ssh-ed25519-cert-v01@openssh.com <base64> [comment]>\n
+```
+
+- Line ends are `\n` only; a `\r` anywhere is refused.
+- The configuration line is JSON, with its string escapes (a PEM root has `\n`
+  escaped inside the string, no raw line break). `pact` reads members in any
+  order; what pledge writes (`Bundle::write`) is in the order `v`, `services`,
+  `deadline_seconds`, `tls_root`.
+- The key block follows the line directly, with nothing between. It is the file
+  `ssh-keygen` writes: the begin line, the base64 in lines, the end line with
+  its `\n`. `ssh-keygen` wraps at 70 columns; `pact` reads any width, but no
+  empty line.
+- The certificate line follows the end line directly: one line, the type, one
+  space, the base64, optionally a space and a comment, **then exactly one `\n`,
+  which is required**. Nothing follows it: not a blank line, not a second
+  line, not a space.
+- **64 KiB counts over everything read from standard input**, all three parts
+  together: more is refused as too large, whatever it holds. (`pact` reads 64 KiB
+  and one byte, so it never reads without end.)
+- Each part has its own error: no configuration line, a configuration that
+  breaks a rule, a key block that is missing or malformed or encrypted or of
+  another type (named), a certificate line that is missing or malformed or not
+  for the key or expired or that breaks section 3.1, a missing final line feed,
+  trailing data.
+
+In words, the three parts:
 
 1. **one line**: the configuration as one JSON object with `v`;
-2. **the key**, an unmodified unencrypted OpenSSH private key block
-   (`-----BEGIN OPENSSH PRIVATE KEY-----` ...), which a person can produce
-   with `cat`;
-3. **the certificate**, one `-cert.pub` line, and nothing after it.
+2. **the key**, an unmodified unencrypted OpenSSH private key block, which a
+   person can produce with `cat`;
+3. **the certificate**, one `-cert.pub` line (which is what `ssh-keygen -s`
+   writes, with its `\n`).
 
 ```json
 {"v":1,"services":[{"host":"a.example","name":"probe","url":"http://127.0.0.1:8443/mcp"}],"deadline_seconds":120,"tls_root":"-----BEGIN CERTIFICATE-----\n..."}
@@ -113,12 +145,16 @@ checked without ever holding the key:
   this list comes from the model.
 - `deadline_seconds`: the setting, 1 to 600, default 120.
 - `tls_root`: a PEM certificate; required if any service is `https`.
-- **The floor for the wait is not in the bundle**: it is the option
-  `--min-wait SECONDS` of the command line (default 10, or the setting if
-  smaller), for tests.
+- **The floor for the wait is not in the bundle** (`min_wait_seconds` is an
+  unknown member and refused): it is the option `--min-wait SECONDS` of the
+  command line (default 10, or the setting if smaller), for tests.
 - Unknown members, a `v` that is not 1, a bundle over 64 KiB, a duplicate
   service: refused. pledge writes the bundle when the person starts the agent
-  (approvals.md flow A); the p-ledge agent reviews the shape.
+  (approvals.md flow A), in one buffer, with `Bundle::write(&Config, &KeyBlock,
+  certificate, now)`: the key is a `KeyBlock` that prints nothing and is zeroed
+  when it goes, and what is written is read back with the parser before it is
+  returned, so pledge never hands out a bundle `pact` would refuse. The shared
+  numbers (the 600 seconds, the 64 KiB) are `p_act::limits`.
 - The key must be Ed25519, unencrypted, and its certificate must be its own
   (fingerprint compared), a user certificate, valid now, and keep to formats
   section 3.1: one principal, no critical option, no extension but a

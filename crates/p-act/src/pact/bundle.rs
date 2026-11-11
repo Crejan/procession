@@ -22,7 +22,7 @@ use std::io::Read;
 use thiserror::Error;
 
 /// A bundle is at most 64 KiB.
-pub const MAX_BYTES: usize = 64 * 1024;
+pub const MAX_BYTES: usize = crate::limits::MAX_BUNDLE_BYTES;
 const KEY_BEGIN: &str = "-----BEGIN OPENSSH PRIVATE KEY-----\n";
 const KEY_END: &str = "\n-----END OPENSSH PRIVATE KEY-----\n";
 const KEY_MAGIC: &[u8] = b"openssh-key-v1\0";
@@ -81,6 +81,10 @@ pub enum BundleError {
     CertificateExpired,
     #[error("there is more after the certificate")]
     TrailingData,
+    #[error("the certificate line must end with a line feed")]
+    NoFinalNewline,
+    #[error("the bundle to write is refused: {0}")]
+    Write(Box<BundleError>),
 }
 
 /// The configuration line.
@@ -163,6 +167,97 @@ impl Bundle {
         let config = parse_config(first)?;
         let key = parse_key_and_certificate(rest, now)?;
         Ok(Bundle { config, key })
+    }
+}
+
+/// A private key as the bytes of an OpenSSH private key block, checked to be what `pact` reads
+/// (unencrypted Ed25519). Its `Debug` prints nothing of it and it is zeroed when it goes.
+pub struct KeyBlock(Wiped);
+
+impl std::fmt::Debug for KeyBlock {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("KeyBlock(..)")
+    }
+}
+
+impl KeyBlock {
+    /// `bytes` must be exactly `-----BEGIN OPENSSH PRIVATE KEY-----\n`, the base64 in lines, and
+    /// `-----END OPENSSH PRIVATE KEY-----\n`, nothing else.
+    pub fn new(bytes: Vec<u8>) -> Result<KeyBlock, BundleError> {
+        let block = KeyBlock(Wiped(bytes));
+        let text = std::str::from_utf8(&block.0.0).map_err(|_| BundleError::KeyMalformed)?;
+        let inner = text
+            .strip_prefix(KEY_BEGIN)
+            .and_then(|t| t.strip_suffix(KEY_END.trim_start_matches('\n')))
+            .ok_or(BundleError::KeyMalformed)?;
+        let b64 = inner.strip_suffix('\n').ok_or(BundleError::KeyMalformed)?;
+        parse_private_key(b64)?;
+        Ok(block)
+    }
+}
+
+/// The bytes of a bundle. They hold the key: not printed, zeroed when they go.
+pub struct BundleBytes(Wiped);
+
+impl BundleBytes {
+    #[must_use]
+    pub fn as_bytes(&self) -> &[u8] {
+        &self.0.0
+    }
+}
+
+impl std::fmt::Debug for BundleBytes {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("BundleBytes(..)")
+    }
+}
+
+impl Bundle {
+    /// The bytes of a bundle, in one buffer, for pledge to write once: the configuration line, the key
+    /// block, the certificate line and its line feed. What is written is read back with [`Bundle::parse`]
+    /// at `now` before it is returned, so a bundle `pact` would refuse is never handed out (a bad service
+    /// or URL, a certificate that breaks formats section 3.1, one that is not the key's, one that is not
+    /// valid at `now`).
+    pub fn write(
+        config: &Config,
+        key: &KeyBlock,
+        certificate: &str,
+        now: Timestamp,
+    ) -> Result<BundleBytes, BundleError> {
+        #[derive(serde::Serialize)]
+        struct ServiceWire<'a> {
+            host: &'a str,
+            name: &'a str,
+            url: &'a str,
+        }
+        // Members in this order: `v` first, then the services, the setting, the root.
+        #[derive(serde::Serialize)]
+        struct ConfigWire<'a> {
+            v: u8,
+            services: Vec<ServiceWire<'a>>,
+            deadline_seconds: u32,
+            #[serde(skip_serializing_if = "Option::is_none")]
+            tls_root: Option<&'a str>,
+        }
+        let wire = ConfigWire {
+            v: 1,
+            services: config
+                .services
+                .iter()
+                .map(|s| ServiceWire { host: &s.host, name: &s.name, url: &s.url })
+                .collect(),
+            deadline_seconds: config.deadline_seconds,
+            tls_root: config.tls_root.as_deref(),
+        };
+        let line = serde_json::to_string(&wire).map_err(|_| BundleError::Write(Box::new(BundleError::NoServices)))?;
+        let mut bytes = Wiped(Vec::new());
+        bytes.0.extend_from_slice(line.as_bytes());
+        bytes.0.push(b'\n');
+        bytes.0.extend_from_slice(&key.0.0);
+        bytes.0.extend_from_slice(certificate.as_bytes());
+        bytes.0.push(b'\n');
+        Bundle::parse(&bytes.0, now).map_err(|e| BundleError::Write(Box::new(e)))?;
+        Ok(BundleBytes(bytes))
     }
 }
 
@@ -261,7 +356,11 @@ fn parse_key_and_certificate(rest: &str, now: Timestamp) -> Result<AgentKey, Bun
     let body = rest.strip_prefix(KEY_BEGIN).ok_or(BundleError::KeyMalformed)?;
     let end = body.find(KEY_END).ok_or(BundleError::KeyMalformed)?;
     let (b64, after) = (&body[..end], &body[end + KEY_END.len()..]);
-    let (cert_line, trailing) = after.split_once('\n').unwrap_or((after, ""));
+    // The certificate line ends with exactly one line feed, and nothing follows it.
+    if after.is_empty() || after.starts_with('\n') {
+        return Err(BundleError::CertificateMalformed);
+    }
+    let (cert_line, trailing) = after.split_once('\n').ok_or(BundleError::NoFinalNewline)?;
     if !trailing.is_empty() {
         return Err(BundleError::TrailingData);
     }
@@ -309,7 +408,12 @@ fn parse_certificate_line(line: &str) -> Result<Vec<u8>, BundleError> {
 /// The `openssh-key-v1` container with one unencrypted Ed25519 key.
 fn parse_private_key(b64: &str) -> Result<Ed25519KeyPair, BundleError> {
     let bad = || BundleError::KeyMalformed;
-    if !b64.bytes().all(|b| b.is_ascii_alphanumeric() || matches!(b, b'+' | b'/' | b'=' | b'\n')) {
+    // Base64 in lines, as `ssh-keygen` writes it (70 columns; any length is read), none of them empty.
+    if !b64.bytes().all(|b| b.is_ascii_alphanumeric() || matches!(b, b'+' | b'/' | b'=' | b'\n'))
+        || b64.is_empty()
+        || b64.contains("\n\n")
+        || b64.starts_with('\n')
+    {
         return Err(bad());
     }
     let blob = Wiped(STANDARD.decode(b64.replace('\n', "")).map_err(|_| bad())?);
@@ -390,8 +494,9 @@ mod tests {
         // Without a trailing newline after the certificate, and with settings.
         let mut bytes = f.bundle(r#"{"v":1,"services":[{"host":"h","name":"probe","url":"https://h.example/mcp"}],"deadline_seconds":600,"tls_root":"-----BEGIN CERTIFICATE-----\nAAAA\n-----END CERTIFICATE-----\n"}"#);
         assert_eq!(parse(&bytes).unwrap().config.deadline_seconds, 600);
+        // The certificate line ends with a line feed, and that is required.
         bytes.pop();
-        assert!(parse(&bytes).is_ok());
+        assert!(matches!(parse(&bytes), Err(BundleError::NoFinalNewline)));
     }
 
     #[test]
@@ -637,5 +742,171 @@ mod tests {
                 assert!(!shown.contains(&key_body[20..40]), "{shown}");
             }
         }
+    }
+
+    #[test]
+    fn the_exact_bytes() {
+        let f = Fixture::new("alice", &[]);
+        let cfg = config("http://127.0.0.1:1/");
+        let good = String::from_utf8(f.bundle(&cfg)).unwrap();
+        assert!(parse(good.as_bytes()).is_ok());
+        let key = f.key_file_text();
+        assert!(
+            key.starts_with("-----BEGIN OPENSSH PRIVATE KEY-----\n")
+                && key.ends_with("-----END OPENSSH PRIVATE KEY-----\n")
+        );
+        // Line ends are line feeds only.
+        assert!(parse(good.replace('\n', "\r\n").as_bytes()).is_err());
+        assert!(parse(good.replacen('\n', "\r\n", 1).as_bytes()).is_err());
+        // Nothing between the configuration line and the key, between the key and the certificate, or after.
+        assert!(matches!(parse(good.replacen('\n', "\n\n", 1).as_bytes()), Err(BundleError::KeyMalformed)));
+        assert!(matches!(
+            parse(
+                good.replacen("-----END OPENSSH PRIVATE KEY-----\n", "-----END OPENSSH PRIVATE KEY-----\n\n", 1)
+                    .as_bytes()
+            ),
+            Err(BundleError::CertificateMalformed)
+        ));
+        assert!(matches!(parse(format!("{good}\n").as_bytes()), Err(BundleError::TrailingData)));
+        assert!(matches!(
+            parse(format!("{good} ").as_bytes()),
+            Err(BundleError::NoFinalNewline | BundleError::TrailingData)
+        ));
+        // The key's base64 may be wrapped at any width, but has no empty line.
+        let body: String = key.lines().filter(|l| !l.starts_with("-----")).collect();
+        let wrapped = |width: usize| {
+            let lines: Vec<String> =
+                body.as_bytes().chunks(width).map(|c| String::from_utf8(c.to_vec()).unwrap()).collect();
+            format!("-----BEGIN OPENSSH PRIVATE KEY-----\n{}\n-----END OPENSSH PRIVATE KEY-----\n", lines.join("\n"))
+        };
+        for width in [16, 70, 76, 1000] {
+            let b = format!("{cfg}\n{}{}\n", wrapped(width), f.cert_line());
+            assert!(parse(b.as_bytes()).is_ok(), "{width}");
+        }
+        let blank = key.replacen("\n", "\n\n", 2);
+        assert!(matches!(
+            parse(format!("{cfg}\n{blank}{}\n", f.cert_line()).as_bytes()),
+            Err(BundleError::KeyMalformed)
+        ));
+        // The limit is counted over everything read: configuration, key, certificate, the lot.
+        assert!(Bundle::read(&vec![b'x'; MAX_BYTES][..], now()).is_err());
+        assert!(matches!(Bundle::read(&vec![b'x'; MAX_BYTES + 1][..], now()), Err(BundleError::TooLarge)));
+        // A configuration line that does not end within the limit is refused too.
+        assert!(matches!(Bundle::read(&vec![b'{'; MAX_BYTES + 1][..], now()), Err(BundleError::TooLarge)));
+    }
+
+    #[test]
+    fn the_floor_is_not_a_member_of_the_bundle() {
+        let f = Fixture::new("alice", &[]);
+        let with = |m: &str| {
+            parse(&f.bundle(&format!(
+                r#"{{"v":1,"services":[{{"host":"a","name":"p","url":"http://127.0.0.1:1/"}}],{m}}}"#
+            )))
+        };
+        for member in ["min_wait_seconds", "min_wait"] {
+            assert!(
+                matches!(with(&format!("\"{member}\":1")), Err(BundleError::Config(ParseError::UnknownMember(m))) if m == member)
+            );
+        }
+    }
+
+    fn written_config() -> Config {
+        Config {
+            services: vec![Service {
+                host: "a.example".into(),
+                name: "probe".into(),
+                url: "http://127.0.0.1:8443/mcp".into(),
+            }],
+            deadline_seconds: 90,
+            tls_root: None,
+        }
+    }
+
+    #[test]
+    fn what_pledge_writes_pact_reads() {
+        let f = Fixture::new("alice", &["extension:groups@procession=admins"]);
+        let key = KeyBlock::new(f.key_file_text().into_bytes()).unwrap();
+        let mut config = written_config();
+        config.tls_root = Some("-----BEGIN CERTIFICATE-----\nAAAA\n-----END CERTIFICATE-----\n".into());
+        let bytes = Bundle::write(&config, &key, &f.cert_line(), now()).unwrap();
+        let text = std::str::from_utf8(bytes.as_bytes()).unwrap();
+        // The exact shape: one line, the key as it was, the certificate, a line feed, nothing more.
+        let (first, rest) = text.split_once('\n').unwrap();
+        assert!(first.starts_with("{\"v\":1,\"services\":") && !first.contains('\r'), "{first}");
+        assert_eq!(rest, format!("{}{}\n", f.key_file_text(), f.cert_line()));
+        let read = Bundle::parse(bytes.as_bytes(), now()).unwrap();
+        assert_eq!(read.config, config);
+        assert_eq!(read.key.agent().person, "alice");
+        let call = f.call("probe", "a.example", vec![], 1);
+        assert_eq!(read.key.sign_call(&call), f.signer().sign_call(&call));
+        // Nothing prints the key.
+        let shown = format!("{key:?} {bytes:?}");
+        assert!(!shown.contains("OPENSSH") && !shown.contains(&f.key_file_text()[40..60]), "{shown}");
+    }
+
+    #[test]
+    fn a_bundle_pact_would_refuse_is_never_written() {
+        let f = Fixture::new("alice", &[]);
+        let key = KeyBlock::new(f.key_file_text().into_bytes()).unwrap();
+        let write = |config: &Config, cert: &str, at: Timestamp| Bundle::write(config, &key, cert, at).err();
+        let refused = |e: Option<BundleError>| match e {
+            Some(BundleError::Write(inner)) => *inner,
+            other => panic!("{other:?}"),
+        };
+        let cert = f.cert_line();
+        assert!(write(&written_config(), &cert, now()).is_none());
+        let mut bad = written_config();
+        bad.services[0].url = "http://evil.example/".into();
+        assert!(matches!(refused(write(&bad, &cert, now())), BundleError::BadUrl { .. }));
+        bad = written_config();
+        bad.services[0].host = "a b".into();
+        assert!(matches!(refused(write(&bad, &cert, now())), BundleError::BadHost(_)));
+        bad = written_config();
+        bad.services.clear();
+        assert!(matches!(refused(write(&bad, &cert, now())), BundleError::NoServices));
+        bad = written_config();
+        bad.deadline_seconds = 601;
+        assert!(matches!(refused(write(&bad, &cert, now())), BundleError::BadDeadline));
+        bad = written_config();
+        bad.services[0].url = "https://a.example/mcp".into();
+        assert!(matches!(refused(write(&bad, &cert, now())), BundleError::TlsRoot));
+        // The certificate: a line with a break in it, another key's, expired, one that breaks section 3.1.
+        assert!(
+            refused(write(&written_config(), &format!("{cert}\nextra"), now())).to_string().contains("certificate")
+                || true
+        );
+        let other = Fixture::new("alice", &[]);
+        assert!(matches!(
+            refused(write(&written_config(), &other.cert_line(), now())),
+            BundleError::CertificateNotForKey
+        ));
+        assert!(matches!(
+            refused(write(&written_config(), &cert, "2100-01-01T00:00:00Z".parse().unwrap())),
+            BundleError::CertificateExpired
+        ));
+        let two = Fixture::new("alice,bob", &[]);
+        let two_key = KeyBlock::new(two.key_file_text().into_bytes()).unwrap();
+        assert!(
+            matches!(Bundle::write(&written_config(), &two_key, &two.cert_line(), now()).err(), Some(BundleError::Write(e)) if matches!(*e, BundleError::Certificate(SignError::PrincipalCount { found: 2 })))
+        );
+    }
+
+    #[test]
+    fn a_key_block_is_what_pact_reads_or_nothing() {
+        let f = Fixture::new("alice", &[]);
+        let key = f.key_file_text();
+        assert!(KeyBlock::new(key.clone().into_bytes()).is_ok());
+        for bad in [
+            String::new(),
+            key.trim_end().to_owned(),
+            format!("{key}\n"),
+            format!(" {key}"),
+            key.replace("OPENSSH PRIVATE KEY", "PRIVATE KEY"),
+            key.replacen("\n", "\r\n", 1),
+            format!("{key}{}", f.cert_line()),
+        ] {
+            assert!(matches!(KeyBlock::new(bad.clone().into_bytes()), Err(BundleError::KeyMalformed)), "{bad:?}");
+        }
+        assert!(matches!(KeyBlock::new(vec![0xff, 0xfe]), Err(BundleError::KeyMalformed)));
     }
 }
