@@ -697,6 +697,14 @@ standing in the broker's place on the network, and decides nothing that is
 signed. An SSH CA key cannot verify an X.509 server certificate, so they are two
 small files that the provisioning writes.
 
+## 8a. What the broker never says
+
+Where a service is reached. The addresses an agent sends its calls to come
+from the person's own file or options in stages 1 and 2, and from stage 3
+from data the site signed, verified by pledge like the list of hosts' keys.
+The broker is not trusted for where anything is, so there is no "services"
+message on its connections, and none is to be added.
+
 ## 9. Open, decided, and for p-act
 
 **Decided by the designer, followed here:**
