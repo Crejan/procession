@@ -1,5 +1,5 @@
 //! The SSH agent protocol's messages (draft-miller-ssh-agent): framing, the
-//! requests this SSH agent understands and the replies it gives.
+//! messages this SSH agent understands and the replies it gives.
 //!
 //! ```text
 //! message := uint32 length || byte type || payload[length - 1]
@@ -7,7 +7,7 @@
 //!
 //! Understood: `SSH_AGENTC_REQUEST_IDENTITIES` (11), `SSH_AGENTC_SIGN_REQUEST`
 //! (13) and the `session-bind@openssh.com` extension (27). Everything else is
-//! answered with `SSH_AGENT_FAILURE` (5). A request is parsed strictly:
+//! answered with `SSH_AGENT_FAILURE` (5). A message is parsed strictly:
 //! trailing bytes make it malformed, as they do in OpenSSH's own SSH agent.
 
 use std::fmt;
@@ -34,11 +34,11 @@ pub const EXTENSION: u8 = 27;
 /// is refused before anything is allocated for it.
 pub const MAX_MESSAGE_LEN: usize = 256 * 1024;
 
-/// One request, borrowed from the message it was parsed out of.
+/// One message from a client, borrowed from the message it was parsed out of.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum Request<'a> {
+pub enum Message<'a> {
     /// List the keys on offer.
-    RequestIdentities,
+    ListIdentities,
     /// Sign `data` with the key whose blob is `key_blob`.
     Sign {
         /// The key, by its public key blob (the raw key or its certificate).
@@ -50,7 +50,7 @@ pub enum Request<'a> {
         /// The signature flags (the hash for RSA); 0 for other key types.
         flags: u32,
     },
-    /// An extension request: its name and the rest of the payload.
+    /// An extension message: its name and the rest of the payload.
     Extension {
         /// The extension's name.
         name: &'a str,
@@ -62,7 +62,7 @@ pub enum Request<'a> {
 }
 
 /// A message of a type this SSH agent understands whose payload does not
-/// parse. Answered like [`Request::Unsupported`]: with `SSH_AGENT_FAILURE`.
+/// parse. Answered like [`Message::Unsupported`]: with `SSH_AGENT_FAILURE`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Malformed {
     /// The message's type byte, `None` if the message was empty.
@@ -72,7 +72,7 @@ pub struct Malformed {
 impl fmt::Display for Malformed {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self.message_type {
-            Some(kind) => write!(f, "malformed SSH agent message of type {kind}"),
+            Some(message_type) => write!(f, "malformed SSH agent message of type {message_type}"),
             None => f.write_str("empty SSH agent message"),
         }
     }
@@ -80,7 +80,7 @@ impl fmt::Display for Malformed {
 
 impl std::error::Error for Malformed {}
 
-impl<'a> Request<'a> {
+impl<'a> Message<'a> {
     /// Parses one message (type byte and payload, without the length).
     ///
     /// # Errors
@@ -88,11 +88,13 @@ impl<'a> Request<'a> {
     /// [`Malformed`] if the message is empty or its payload does not parse
     /// exactly.
     pub fn parse(message: &'a [u8]) -> Result<Self, Malformed> {
-        let Some((&kind, payload)) = message.split_first() else { return Err(Malformed { message_type: None }) };
-        let malformed = Malformed { message_type: Some(kind) };
+        let Some((&message_type, payload)) = message.split_first() else {
+            return Err(Malformed { message_type: None });
+        };
+        let malformed = Malformed { message_type: Some(message_type) };
         let mut reader = Reader::new(payload);
-        let request = match kind {
-            REQUEST_IDENTITIES => Self::RequestIdentities,
+        let parsed = match message_type {
+            REQUEST_IDENTITIES => Self::ListIdentities,
             SIGN_REQUEST => {
                 let (Some(key_blob), Some(data), Some(flags)) = (reader.string(), reader.string(), reader.u32()) else {
                     return Err(malformed);
@@ -106,7 +108,7 @@ impl<'a> Request<'a> {
             }
             other => return Ok(Self::Unsupported(other)),
         };
-        if reader.remaining() == 0 { Ok(request) } else { Err(malformed) }
+        if reader.remaining() == 0 { Ok(parsed) } else { Err(malformed) }
     }
 }
 
@@ -182,10 +184,10 @@ pub fn read_message<R: Read>(reader: &mut R) -> Result<Option<Vec<u8>>, FrameErr
 ///
 /// If the payload is 4 GiB or longer, which no SSH agent message is.
 #[must_use]
-pub fn frame(kind: u8, payload: &[u8]) -> Vec<u8> {
+pub fn frame(message_type: u8, payload: &[u8]) -> Vec<u8> {
     let mut out = Vec::with_capacity(5 + payload.len());
     put_u32(&mut out, u32::try_from(payload.len() + 1).expect("a reply is shorter than 4 GiB"));
-    out.push(kind);
+    out.push(message_type);
     out.extend_from_slice(payload);
     out
 }
@@ -253,40 +255,40 @@ mod tests {
     }
 
     #[test]
-    fn the_three_requests_parse() {
-        assert_eq!(Request::parse(&[REQUEST_IDENTITIES]), Ok(Request::RequestIdentities));
+    fn the_three_messages_parse() {
+        assert_eq!(Message::parse(&[REQUEST_IDENTITIES]), Ok(Message::ListIdentities));
         let message = sign_message(b"key", b"data", 2, b"");
-        assert_eq!(Request::parse(&message), Ok(Request::Sign { key_blob: b"key", data: b"data", flags: 2 }));
+        assert_eq!(Message::parse(&message), Ok(Message::Sign { key_blob: b"key", data: b"data", flags: 2 }));
         let mut extension = vec![EXTENSION];
         extension.extend(strings(&[b"session-bind@openssh.com"]));
         extension.extend_from_slice(&SESSION_ID);
         assert_eq!(
-            Request::parse(&extension),
-            Ok(Request::Extension { name: "session-bind@openssh.com", body: &SESSION_ID })
+            Message::parse(&extension),
+            Ok(Message::Extension { name: "session-bind@openssh.com", body: &SESSION_ID })
         );
     }
 
     // ported: testR11_7_unknownOpcode_returnsFailure
     #[test]
     fn an_unknown_type_is_unsupported_not_an_error() {
-        assert_eq!(Request::parse(&[0xFE]), Ok(Request::Unsupported(0xFE)));
+        assert_eq!(Message::parse(&[0xFE]), Ok(Message::Unsupported(0xFE)));
         // Messages this SSH agent never serves, whatever their payload:
-        for kind in [1, 17, 18, 19, 20, 22, 23, 25, 26] {
-            assert_eq!(Request::parse(&[kind, 1, 2, 3]), Ok(Request::Unsupported(kind)));
+        for message_type in [1, 17, 18, 19, 20, 22, 23, 25, 26] {
+            assert_eq!(Message::parse(&[message_type, 1, 2, 3]), Ok(Message::Unsupported(message_type)));
         }
     }
 
     #[test]
     fn a_payload_that_does_not_parse_exactly_is_malformed() {
-        assert_eq!(Request::parse(&[]), Err(Malformed { message_type: None }));
+        assert_eq!(Message::parse(&[]), Err(Malformed { message_type: None }));
         let bad = Malformed { message_type: Some(SIGN_REQUEST) };
-        assert_eq!(Request::parse(&[SIGN_REQUEST]), Err(bad));
+        assert_eq!(Message::parse(&[SIGN_REQUEST]), Err(bad));
         let full = sign_message(b"key", b"data", 0, b"");
-        assert_eq!(Request::parse(&full[..full.len() - 1]), Err(bad));
-        assert_eq!(Request::parse(&sign_message(b"key", b"data", 0, &[0])), Err(bad));
-        assert_eq!(Request::parse(&[REQUEST_IDENTITIES, 0]), Err(Malformed { message_type: Some(REQUEST_IDENTITIES) }));
+        assert_eq!(Message::parse(&full[..full.len() - 1]), Err(bad));
+        assert_eq!(Message::parse(&sign_message(b"key", b"data", 0, &[0])), Err(bad));
+        assert_eq!(Message::parse(&[REQUEST_IDENTITIES, 0]), Err(Malformed { message_type: Some(REQUEST_IDENTITIES) }));
         assert_eq!(
-            Request::parse(&[EXTENSION, 0, 0, 0, 2, 0xFF, 0xFE]),
+            Message::parse(&[EXTENSION, 0, 0, 0, 2, 0xFF, 0xFE]),
             Err(Malformed { message_type: Some(EXTENSION) })
         );
     }

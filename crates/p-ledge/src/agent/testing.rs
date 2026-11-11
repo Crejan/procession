@@ -50,8 +50,8 @@ pub fn ecdsa_key(p384: bool) -> TestKey {
     let rng = SystemRandom::new();
     let pkcs8 = EcdsaKeyPair::generate_pkcs8(alg, &rng).expect("generate");
     let pair = EcdsaKeyPair::from_pkcs8(alg, pkcs8.as_ref(), &rng).expect("load");
-    let kind = format!("ecdsa-sha2-{curve}");
-    let blob = strings(&[kind.as_bytes(), curve.as_bytes(), pair.public_key().as_ref()]);
+    let key_type = format!("ecdsa-sha2-{curve}");
+    let blob = strings(&[key_type.as_bytes(), curve.as_bytes(), pair.public_key().as_ref()]);
     TestKey {
         blob,
         signer: Rc::new(move |data| {
@@ -60,7 +60,7 @@ pub fn ecdsa_key(p384: bool) -> TestKey {
             let mut body = Vec::new();
             put_mpint(&mut body, r);
             put_mpint(&mut body, s);
-            strings(&[kind.as_bytes(), &body])
+            strings(&[key_type.as_bytes(), &body])
         }),
     }
 }
@@ -103,10 +103,10 @@ pub fn certificate(
     forged: Option<Vec<u8>>,
 ) -> TestKey {
     let mut reader = super::wire::Reader::new(&key.blob);
-    let kind = reader.utf8().expect("type").to_owned();
+    let key_type = reader.utf8().expect("type").to_owned();
     let rest = reader.rest().to_vec();
     let mut blob = Vec::new();
-    put_string(&mut blob, format!("{kind}-cert-v01@openssh.com").as_bytes());
+    put_string(&mut blob, format!("{key_type}-cert-v01@openssh.com").as_bytes());
     put_string(&mut blob, &[0x4E; 32]);
     blob.extend_from_slice(&rest);
     put_u64(&mut blob, 1);
@@ -211,7 +211,7 @@ pub fn bind_body(
 
 /// A `known_hosts` line for `key`.
 pub fn known_hosts_line(patterns: &str, key: &[u8], marker: &str) -> String {
-    let kind = super::wire::Reader::new(key).utf8().expect("type").to_owned();
+    let key_type = super::wire::Reader::new(key).utf8().expect("type").to_owned();
     let prefix = if marker.is_empty() { String::new() } else { format!("{marker} ") };
-    format!("{prefix}{patterns} {kind} {}", STANDARD.encode(key))
+    format!("{prefix}{patterns} {key_type} {}", STANDARD.encode(key))
 }

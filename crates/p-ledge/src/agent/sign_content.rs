@@ -214,7 +214,7 @@ mod tests {
     #[test]
     fn a_certificate_login_names_the_certificate_and_is_signed_through_either_blob() {
         // `ssh` signs a certificate login through the raw key's identity: the
-        // request names one blob, the data the other.
+        // signing request names one blob, the data the other.
         let raw = key();
         let certificate = vec![0xCE; 40];
         let data = UserauthData::new(&certificate).build();

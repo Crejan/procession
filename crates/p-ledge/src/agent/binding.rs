@@ -69,7 +69,7 @@ impl SessionBinding {
         }
         let is_forwarding = forwarding == 1;
         let session_id = session_id.to_vec();
-        let signature_type = Reader::new(signature).utf8().filter(|kind| VERIFIABLE_SIGNATURE_TYPES.contains(kind));
+        let signature_type = Reader::new(signature).utf8().filter(|name| VERIFIABLE_SIGNATURE_TYPES.contains(name));
         let (Some(_), Some(host_key)) = (signature_type, HostKey::parse(key_blob)) else {
             return Parsed::Unverifiable { session_id, is_forwarding };
         };
@@ -222,7 +222,7 @@ impl Session {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::agent::message::{self, Request};
+    use crate::agent::message::{self, Message};
     use crate::agent::testing::{
         SESSION_ID, TestKey, UserauthData, bind_body, certificate, ecdsa_key, ed25519_key, fresh_ed25519_key, rsa_key,
         sshsig,
@@ -263,13 +263,13 @@ mod tests {
         session.bind(&bind_body(host, session_id, forwarding, None, b""))
     }
 
-    /// What `Request::parse` and `Session::bind` make of a whole message, as the reader process will do.
+    /// What `Message::parse` and `Session::bind` make of a whole message, as the reader process will do.
     fn answer(session: &mut Session, extension: &str, body: &[u8]) -> u8 {
         let mut msg = vec![message::EXTENSION];
         msg.extend(strings(&[extension.as_bytes()]));
         msg.extend_from_slice(body);
-        match Request::parse(&msg) {
-            Ok(Request::Extension { name: EXTENSION_NAME, body }) if session.bind(body) => message::SUCCESS,
+        match Message::parse(&msg) {
+            Ok(Message::Extension { name: EXTENSION_NAME, body }) if session.bind(body) => message::SUCCESS,
             _ => message::FAILURE,
         }
     }
