@@ -14,6 +14,10 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
 use crate::agent::host_key::fingerprint;
+use crate::answers::Answers;
+use crate::approvals::Approvals;
+use crate::config::Config;
+use crate::delegations::Delegations;
 use crate::dialog::Dialogs;
 use crate::error::{Error, Result};
 use crate::holder::{KeyHolder, KeyType};
@@ -112,6 +116,8 @@ pub struct Shared {
     pub dialog_timeout: Duration,
     /// The clock.
     pub clock: Box<dyn Fn() -> Timestamp + Send + Sync>,
+    /// Requests, delegations, answers.
+    pub approvals: Approvals,
 }
 
 /// What a caller gives [`Shared::new`].
@@ -126,6 +132,8 @@ pub struct Parts {
     pub programs_file: PathBuf,
     /// The `known_hosts` files.
     pub known_hosts: Vec<PathBuf>,
+    /// The state directory: `config.json`, `delegations.json`, `answers.jsonl`.
+    pub state_dir: PathBuf,
 }
 
 /// The current time from the system clock.
@@ -146,6 +154,13 @@ impl Shared {
     /// [`Error::Holder`] if the holder cannot list its keys, [`Error::Corrupt`]
     /// if the remembered decisions cannot be read.
     pub fn new(parts: Parts) -> Result<Self> {
+        let config = Config::load(&parts.state_dir.join("config.json"))?;
+        let now = system_clock().unix();
+        let approvals = Approvals::new(
+            config,
+            Delegations::open(parts.state_dir.join("delegations.json"))?,
+            Answers::open(&parts.state_dir.join("answers.jsonl"), now)?,
+        );
         let shared = Self {
             holder: Mutex::new(parts.holder),
             keys: RwLock::new(Vec::new()),
@@ -158,10 +173,23 @@ impl Shared {
             require_binding: true,
             dialog_timeout: LOGIN_DIALOG,
             clock: Box::new(system_clock),
+            approvals,
         };
         shared.load_programs()?;
         shared.reload_keys()?;
         Ok(shared)
+    }
+
+    /// The key made for `purpose` (`confirmed`, `automatic`, `delegation`), if there is one.
+    #[must_use]
+    pub fn key_with_purpose(&self, purpose: &str) -> Option<KeyInfo> {
+        self.keys.read().ok()?.iter().find(|key| key.meta.as_ref().is_some_and(|m| m.purpose == purpose)).cloned()
+    }
+
+    /// The key with this fingerprint.
+    #[must_use]
+    pub fn key_by_fingerprint(&self, fingerprint: &str) -> Option<KeyInfo> {
+        self.keys.read().ok()?.iter().find(|key| key.fingerprint == fingerprint).cloned()
     }
 
     /// The time now.

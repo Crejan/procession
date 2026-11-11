@@ -70,6 +70,11 @@ impl Paths {
     pub fn agent_socket(&self) -> PathBuf {
         self.sockets.join("agent.sock")
     }
+    /// The socket services on this machine submit requests to.
+    #[must_use]
+    pub fn service_socket(&self) -> PathBuf {
+        self.sockets.join("service.sock")
+    }
     /// The control socket.
     #[must_use]
     pub fn control_socket(&self) -> PathBuf {
@@ -93,6 +98,40 @@ pub fn ensure_private_dir(dir: &Path) -> Result<()> {
         Err(e) => return Err(Error::io(format!("creating {}", dir.display()))(e)),
     }
     check_private(dir, true)
+}
+
+/// As [`ensure_private_dir`], and when `grouped` also accepts mode 0710: a
+/// group may search the directory (not list it), so that services that run
+/// under their own account can reach `service.sock`.
+///
+/// # Errors
+///
+/// [`Error::Io`] or [`Error::Unsafe`].
+pub fn ensure_socket_dir(dir: &Path, grouped: bool) -> Result<()> {
+    if !grouped {
+        return ensure_private_dir(dir);
+    }
+    if let Some(parent) = dir.parent() {
+        fs::create_dir_all(parent).map_err(Error::io(format!("creating {}", parent.display())))?;
+    }
+    match fs::DirBuilder::new().mode(0o700).create(dir) {
+        Ok(()) => {}
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {}
+        Err(e) => return Err(Error::io(format!("creating {}", dir.display()))(e)),
+    }
+    let meta = fs::symlink_metadata(dir).map_err(Error::io(format!("examining {}", dir.display())))?;
+    let unsafe_ = |problem| Error::Unsafe { path: dir.to_owned(), problem };
+    if meta.file_type().is_symlink() || !meta.is_dir() {
+        return Err(unsafe_("is a symlink or not a directory"));
+    }
+    // SAFETY: getuid has no preconditions.
+    if meta.uid() != unsafe { libc::getuid() } {
+        return Err(unsafe_("is not owned by this user"));
+    }
+    if !matches!(meta.permissions().mode() & 0o777, 0o700 | 0o710) {
+        return Err(unsafe_("must be mode 0700 or 0710"));
+    }
+    Ok(())
 }
 
 /// Checks `path` as [`ensure_private_dir`] does (`directory`), or as a

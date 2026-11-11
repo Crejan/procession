@@ -14,10 +14,11 @@ use std::thread;
 use serde_json::json;
 
 use crate::agent::known_hosts::KnownHosts;
+use crate::config::Config as Settings;
 use crate::dialog::Dialogs;
 use crate::error::{Error, Result};
 use crate::holder::ChildHolder;
-use crate::paths::{Paths, ensure_private_dir};
+use crate::paths::{Paths, ensure_private_dir, ensure_socket_dir};
 use crate::peer::{self, own_uid};
 use crate::record::Record;
 use crate::shared::{Parts, Shared, system_clock};
@@ -71,7 +72,8 @@ pub fn bind_socket(path: &Path) -> Result<UnixListener> {
 pub fn run(config: Config) -> Result<()> {
     eprintln!("{WARNING}");
     ensure_private_dir(&config.paths.state)?;
-    ensure_private_dir(&config.paths.sockets)?;
+    let settings = Settings::load(&config.paths.state.join("config.json"))?;
+    ensure_socket_dir(&config.paths.sockets, settings.service_group.is_some())?;
     let (record, opened) = Record::open(&config.paths.record(), system_clock())?;
     let holder = ChildHolder::spawn(&config.holder_program, &config.paths.keys())?;
     let shared = Arc::new(Shared::new(Parts {
@@ -80,6 +82,7 @@ pub fn run(config: Config) -> Result<()> {
         dialogs: config.dialogs,
         programs_file: config.paths.programs(),
         known_hosts: config.known_hosts,
+        state_dir: config.paths.state.clone(),
     })?);
     shared.event("started", json!({"form": "files", "version": env!("CARGO_PKG_VERSION")}));
     if let Some(bytes) = opened.repaired_bytes {
@@ -93,6 +96,9 @@ pub fn run(config: Config) -> Result<()> {
     }
     let agent = bind_socket(&config.paths.agent_socket())?;
     let control_listener = bind_socket(&config.paths.control_socket())?;
+    let service = bind_service_socket(&config.paths, settings.service_group.as_deref())?;
+    let for_service = Arc::clone(&shared);
+    thread::spawn(move || accept_service(&for_service, &service));
     eprintln!(
         "pledge: serving. SSH agent socket: {path}\npledge: use it with: export SSH_AUTH_SOCK={path}",
         path = config.paths.agent_socket().display()
@@ -101,6 +107,39 @@ pub fn run(config: Config) -> Result<()> {
     thread::spawn(move || accept_control(&for_control, &control_listener));
     accept_agent(&shared, &agent);
     Ok(())
+}
+
+/// Binds `service.sock`. Without a group: socket 0600 in a directory 0700.
+/// With one: the directory 0710 and the socket 0660, both of that group.
+fn bind_service_socket(paths: &Paths, group: Option<&str>) -> Result<UnixListener> {
+    let listener = bind_socket(&paths.service_socket())?;
+    let Some(group) = group else { return Ok(listener) };
+    let name = std::ffi::CString::new(group).map_err(|_| Error::Refused("service_group is not a name".into()))?;
+    // SAFETY: `name` is a valid C string; the result is read at once, at startup, on one thread.
+    let gid = unsafe { libc::getgrnam(name.as_ptr()).as_ref().map(|entry| entry.gr_gid) }
+        .ok_or_else(|| Error::Refused(format!("there is no group {group}")))?;
+    for (path, mode) in [(paths.sockets.as_path(), 0o710), (paths.service_socket().as_path(), 0o660)] {
+        let c_path =
+            std::ffi::CString::new(path.as_os_str().as_encoded_bytes()).map_err(|_| Error::Refused("path".into()))?;
+        // SAFETY: `c_path` is a valid C string; a uid of -1 (u32::MAX) leaves the owner as it is.
+        if unsafe { libc::chown(c_path.as_ptr(), u32::MAX, gid) } != 0 {
+            return Err(Error::io(format!("giving {} to the group {group}", path.display()))(
+                std::io::Error::last_os_error(),
+            ));
+        }
+        fs::set_permissions(path, fs::Permissions::from_mode(mode))
+            .map_err(Error::io(format!("protecting {}", path.display())))?;
+    }
+    Ok(listener)
+}
+
+fn accept_service(shared: &Arc<Shared>, listener: &UnixListener) {
+    for stream in listener.incoming().flatten() {
+        // The door is the file mode; who connects is information, not a decision.
+        let peer = peer::peer(&stream).ok().map(|p| (p.uid, p.pid));
+        let shared = Arc::clone(shared);
+        thread::spawn(move || crate::service_conn::serve(&shared, stream, peer));
+    }
 }
 
 /// Whether the peer of `stream` is this user.
@@ -138,6 +177,7 @@ pub fn default_known_hosts() -> Vec<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::paths::ensure_socket_dir;
     use crate::testing::TestDir;
 
     #[test]
@@ -149,6 +189,38 @@ mod tests {
         assert!(matches!(bind_socket(&path), Err(Error::Locked(_))));
         drop(listener);
         let _again = bind_socket(&path).expect("a stale socket is replaced");
+    }
+
+    fn own_group_name() -> String {
+        // SAFETY: getgid has no preconditions; the name is copied at once, on one thread.
+        let name = unsafe {
+            libc::getgrgid(libc::getgid())
+                .as_ref()
+                .map(|entry| std::ffi::CStr::from_ptr(entry.gr_name).to_string_lossy().into_owned())
+        };
+        name.expect("the user's group has a name")
+    }
+
+    #[test]
+    fn service_sock_is_0600_in_0700_without_a_group_and_0660_in_0710_with_one() {
+        let dir = TestDir::new("serve-door");
+        let paths = Paths { state: dir.path().join("state"), sockets: dir.path().join("run") };
+        ensure_socket_dir(&paths.sockets, false).expect("dir");
+        let _plain = bind_service_socket(&paths, None).expect("bound");
+        let mode = |path: &Path| fs::metadata(path).expect("meta").permissions().mode() & 0o777;
+        assert_eq!((mode(&paths.sockets), mode(&paths.service_socket())), (0o700, 0o600));
+        drop(_plain);
+
+        let grouped = Paths { state: dir.path().join("state"), sockets: dir.path().join("run2") };
+        ensure_socket_dir(&grouped.sockets, true).expect("dir");
+        let _listener = bind_service_socket(&grouped, Some(&own_group_name())).expect("bound with a group");
+        assert_eq!((mode(&grouped.sockets), mode(&grouped.service_socket())), (0o710, 0o660));
+        ensure_socket_dir(&grouped.sockets, true).expect("0710 is accepted when a group is set (a restart)");
+        assert!(ensure_socket_dir(&grouped.sockets, false).is_err(), "and not when none is");
+        assert!(matches!(
+            bind_service_socket(&grouped, Some("no-such-group-here")),
+            Err(Error::Locked(_) | Error::Refused(_))
+        ));
     }
 
     #[test]

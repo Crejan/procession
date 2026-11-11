@@ -78,29 +78,61 @@ mod rig {
         pub shared: Arc<Shared>,
         pub dialogs: Arc<Scripted>,
         pub dir: TestDir,
+        live: bool,
     }
 
     impl Rig {
+        /// A rig whose clock stands at [`NOW`].
         pub fn new(answers: impl IntoIterator<Item = Outcome<Answer>>) -> Self {
+            Self::build(answers, false, |_| {})
+        }
+
+        /// A rig on the real clock (signatures are checked by `ssh-keygen`, which uses it),
+        /// after `setup` has put files into the state directory.
+        pub fn live(answers: impl IntoIterator<Item = Outcome<Answer>>, setup: impl FnOnce(&std::path::Path)) -> Self {
+            Self::build(answers, true, setup)
+        }
+
+        fn build(
+            answers: impl IntoIterator<Item = Outcome<Answer>>,
+            live: bool,
+            setup: impl FnOnce(&std::path::Path),
+        ) -> Self {
             let dir = TestDir::new("conn");
+            setup(dir.path());
             let dialogs = Arc::new(Scripted::new(answers));
+            let shared = Self::shared_for(&dir, &dialogs, live);
+            Self { shared: Arc::new(shared), dialogs, dir, live }
+        }
+
+        fn shared_for(dir: &TestDir, dialogs: &Arc<Scripted>, live: bool) -> Shared {
             let (reader_side, holder_side) = UnixStream::pair().expect("pair");
             let store = KeyStore::open(&dir.path().join("keys")).expect("store");
             let (input, output) = (holder_side.try_clone().expect("clone"), holder_side);
             thread::spawn(move || serve_holder(store, input, output));
             let holder = HolderClient::new(reader_side.try_clone().expect("clone"), reader_side);
-            let (record, _) = Record::open(&dir.path().join("record.jsonl"), Timestamp::from_unix(NOW).expect("time"))
-                .expect("record");
+            let (record, _) =
+                Record::open(&dir.path().join("record.jsonl"), crate::shared::system_clock()).expect("record");
             let mut shared = Shared::new(Parts {
                 holder: Box::new(holder),
                 record,
-                dialogs: Arc::clone(&dialogs) as Arc<dyn crate::dialog::Dialogs>,
+                dialogs: Arc::clone(dialogs) as Arc<dyn crate::dialog::Dialogs>,
                 programs_file: dir.path().join("programs.json"),
                 known_hosts: vec![dir.path().join("known_hosts")],
+                state_dir: dir.path().to_owned(),
             })
             .expect("shared");
-            shared.clock = Box::new(|| Timestamp::from_unix(NOW).expect("time"));
-            Self { shared: Arc::new(shared), dialogs, dir }
+            if !live {
+                shared.clock = Box::new(|| Timestamp::from_unix(NOW).expect("time"));
+            }
+            shared
+        }
+
+        /// Stops pledge and starts it again on the same files, as a restart does.
+        pub fn restart(&mut self) {
+            // Close the old record so that its lock is released.
+            *self.shared.record.lock().expect("lock") = Record::failing();
+            self.shared = Arc::new(Self::shared_for(&self.dir, &self.dialogs, self.live));
         }
 
         pub fn key(&self, meta: KeyMeta) -> Vec<u8> {

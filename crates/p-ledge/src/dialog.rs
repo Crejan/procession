@@ -8,10 +8,10 @@
 //! output and reads the answer from standard input.
 
 use std::io::{Read, Write};
-use std::sync::Mutex;
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError};
+use std::sync::{Mutex, TryLockError};
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use crate::agent::binding::SessionBinding;
 use crate::agent::known_hosts::HostName;
@@ -25,8 +25,39 @@ pub enum Outcome<T> {
     Answer(T),
     /// Nobody answered in time.
     Timeout,
+    /// The one who asked no longer wants an answer: the dialog was closed.
+    Cancelled,
     /// There is nobody to ask (no terminal input).
     Unavailable,
+}
+
+impl<T> Outcome<T> {
+    /// Goes on with the answer, or passes on what is not one.
+    pub fn and_then<U>(self, next: impl FnOnce(T) -> Outcome<U>) -> Outcome<U> {
+        match self {
+            Self::Answer(answer) => next(answer),
+            Self::Timeout => Outcome::Timeout,
+            Self::Cancelled => Outcome::Cancelled,
+            Self::Unavailable => Outcome::Unavailable,
+        }
+    }
+}
+
+/// How long a dialog may take, and whether it is still wanted. A dialog that
+/// waits its turn behind another counts that wait against `timeout`.
+pub struct Wait<'a> {
+    /// The longest the dialog stays: for a request, until its deadline.
+    pub timeout: Duration,
+    /// Asked while the dialog waits or is open; `true` closes it.
+    pub cancelled: &'a (dyn Fn() -> bool + Sync),
+}
+
+impl Wait<'static> {
+    /// A wait that is never cancelled.
+    #[must_use]
+    pub fn up_to(timeout: Duration) -> Self {
+        Self { timeout, cancelled: &|| false }
+    }
 }
 
 /// What a dialog shows: a title and labelled fields.
@@ -81,13 +112,15 @@ pub fn describe(content: &SignContent, verified: Option<&SessionBinding>, name: 
 pub trait Dialogs: Send + Sync {
     /// An unknown program asks to use a key: block, decline once, admit
     /// once, or admit generally.
-    fn ask_admission(&self, program: &str, what: &Description, timeout: Duration) -> Outcome<Admission>;
+    fn ask_admission(&self, program: &str, what: &Description, wait: &Wait<'_>) -> Outcome<Admission>;
     /// The presence check for one signature. In the development form it is
     /// a question; in the hardware form it is a touch.
-    fn presence(&self, program: &str, what: &Description, timeout: Duration) -> Outcome<bool>;
+    fn presence(&self, program: &str, what: &Description, wait: &Wait<'_>) -> Outcome<bool>;
     /// A yes or no to `question`, for what the person asked pledge to do
-    /// itself (making or retiring a key): the presence check of those.
-    fn confirm(&self, question: &str, timeout: Duration) -> Outcome<bool>;
+    /// itself, or the presence check of an approval.
+    fn confirm(&self, question: &str, wait: &Wait<'_>) -> Outcome<bool>;
+    /// A request from an agent: show it as it is and ask whether to approve.
+    fn ask_request(&self, what: &Description, wait: &Wait<'_>) -> Outcome<bool>;
     /// Tells the person something; nothing is asked.
     fn tell(&self, text: &str);
 }
@@ -132,14 +165,31 @@ impl Terminal {
         }
     }
 
-    /// Runs one dialog: `body` gets a way to read the next answer line.
+    /// Runs one dialog: waits its turn, shows `prompt`, and gives `body` a
+    /// way to read the next answer line.
     fn dialog<T>(
         &self,
-        timeout: Duration,
+        wait: &Wait<'_>,
         prompt: &str,
         body: impl FnOnce(&dyn Fn(&str) -> Outcome<String>) -> Outcome<T>,
     ) -> Outcome<T> {
-        let Ok(lines) = self.lines.lock() else { return Outcome::Unavailable };
+        const SLICE: Duration = Duration::from_millis(25);
+        let until = Instant::now() + wait.timeout;
+        let lines = loop {
+            match self.lines.try_lock() {
+                Ok(lines) => break lines,
+                Err(TryLockError::Poisoned(_)) => return Outcome::Unavailable,
+                Err(TryLockError::WouldBlock) => {
+                    if (wait.cancelled)() {
+                        return Outcome::Cancelled;
+                    }
+                    if Instant::now() >= until {
+                        return Outcome::Timeout;
+                    }
+                    thread::sleep(SLICE);
+                }
+            }
+        };
         if self.interactive {
             while lines.try_recv().is_ok() {}
         }
@@ -148,63 +198,70 @@ impl Terminal {
             if !again.is_empty() {
                 self.say(again);
             }
-            match lines.recv_timeout(timeout) {
-                Ok(line) => Outcome::Answer(line.trim().to_owned()),
-                Err(RecvTimeoutError::Timeout) => Outcome::Timeout,
-                Err(RecvTimeoutError::Disconnected) => Outcome::Unavailable,
+            loop {
+                if (wait.cancelled)() {
+                    return Outcome::Cancelled;
+                }
+                let left = until.saturating_duration_since(Instant::now());
+                if left.is_zero() {
+                    return Outcome::Timeout;
+                }
+                match lines.recv_timeout(left.min(SLICE)) {
+                    Ok(line) => return Outcome::Answer(line.trim().to_owned()),
+                    Err(RecvTimeoutError::Timeout) => {}
+                    Err(RecvTimeoutError::Disconnected) => return Outcome::Unavailable,
+                }
             }
         };
         let outcome = body(&read);
-        if !matches!(outcome, Outcome::Unavailable) {
-            self.say("\n");
+        match outcome {
+            Outcome::Unavailable => {}
+            Outcome::Timeout | Outcome::Cancelled => self.say("\n[closed]\n"),
+            Outcome::Answer(_) => self.say("\n"),
         }
         outcome
     }
 }
 
+fn yes(answer: &str) -> Outcome<bool> {
+    Outcome::Answer(matches!(answer, "y" | "yes"))
+}
+
 impl Dialogs for Terminal {
-    fn ask_admission(&self, program: &str, what: &Description, timeout: Duration) -> Outcome<Admission> {
+    fn ask_admission(&self, program: &str, what: &Description, wait: &Wait<'_>) -> Outcome<Admission> {
         let prompt = format!(
             "\npledge: an unknown program asks to use your SSH key\n  program: {program}\n{}\
              [b]lock, [d]ecline once (default), admit [o]nce, admit [g]enerally? ",
             what.render()
         );
-        self.dialog(timeout, &prompt, |read| match read("") {
-            Outcome::Answer(answer) => match answer.as_str() {
+        self.dialog(wait, &prompt, |read| {
+            read("").and_then(|answer| match answer.as_str() {
                 "b" => Outcome::Answer(Admission::Block),
                 "o" => Outcome::Answer(Admission::AdmitOnce),
-                "g" => match read("Type the program's name to admit it: ") {
-                    Outcome::Answer(typed) if typed == program => Outcome::Answer(Admission::AdmitGenerally),
-                    Outcome::Answer(_) => Outcome::Answer(Admission::DeclineOnce),
-                    Outcome::Timeout => Outcome::Timeout,
-                    Outcome::Unavailable => Outcome::Unavailable,
-                },
+                "g" => read("Type the program's name to admit it: ").and_then(|typed| {
+                    Outcome::Answer(if typed == program { Admission::AdmitGenerally } else { Admission::DeclineOnce })
+                }),
                 _ => Outcome::Answer(Admission::DeclineOnce),
-            },
-            Outcome::Timeout => Outcome::Timeout,
-            Outcome::Unavailable => Outcome::Unavailable,
+            })
         })
     }
 
-    fn presence(&self, program: &str, what: &Description, timeout: Duration) -> Outcome<bool> {
+    fn presence(&self, program: &str, what: &Description, wait: &Wait<'_>) -> Outcome<bool> {
         let prompt = format!(
             "\npledge: presence check\n  program: {program}\n{}Allow this one signature? [y/N] ",
             what.render()
         );
-        self.dialog(timeout, &prompt, |read| match read("") {
-            Outcome::Answer(answer) => Outcome::Answer(matches!(answer.as_str(), "y" | "yes")),
-            Outcome::Timeout => Outcome::Timeout,
-            Outcome::Unavailable => Outcome::Unavailable,
-        })
+        self.dialog(wait, &prompt, |read| read("").and_then(|answer| yes(&answer)))
     }
 
-    fn confirm(&self, question: &str, timeout: Duration) -> Outcome<bool> {
+    fn confirm(&self, question: &str, wait: &Wait<'_>) -> Outcome<bool> {
         let prompt = format!("\npledge: presence check\n  {question}\nAllow? [y/N] ");
-        self.dialog(timeout, &prompt, |read| match read("") {
-            Outcome::Answer(answer) => Outcome::Answer(matches!(answer.as_str(), "y" | "yes")),
-            Outcome::Timeout => Outcome::Timeout,
-            Outcome::Unavailable => Outcome::Unavailable,
-        })
+        self.dialog(wait, &prompt, |read| read("").and_then(|answer| yes(&answer)))
+    }
+
+    fn ask_request(&self, what: &Description, wait: &Wait<'_>) -> Outcome<bool> {
+        let prompt = format!("\npledge: a request\n{}Approve it? [y/N] ", what.render());
+        self.dialog(wait, &prompt, |read| read("").and_then(|answer| yes(&answer)))
     }
 
     fn tell(&self, text: &str) {
@@ -228,6 +285,8 @@ pub enum Answer {
     Admission(Admission),
     /// To a presence check or a confirmation.
     Yes(bool),
+    /// The dialog stays open until it is cancelled or its time is up.
+    Hold,
 }
 
 #[cfg(test)]
@@ -236,34 +295,56 @@ impl Scripted {
         Self { answers: Mutex::new(answers.into_iter().collect()), shown: Mutex::new(Vec::new()) }
     }
 
+    /// Adds an answer for a dialog still to come.
+    pub fn push(&self, answer: Outcome<Answer>) {
+        self.answers.lock().expect("lock").push_back(answer);
+    }
+
     fn next(&self, text: String) -> Outcome<Answer> {
         self.shown.lock().expect("lock").push(text);
         self.answers.lock().expect("lock").pop_front().unwrap_or(Outcome::Unavailable)
+    }
+
+    fn hold<T>(wait: &Wait<'_>) -> Outcome<T> {
+        let until = Instant::now() + wait.timeout;
+        loop {
+            if (wait.cancelled)() {
+                return Outcome::Cancelled;
+            }
+            if Instant::now() >= until {
+                return Outcome::Timeout;
+            }
+            thread::sleep(Duration::from_millis(10));
+        }
+    }
+
+    fn yes_or_hold(&self, text: String, wait: &Wait<'_>) -> Outcome<bool> {
+        match self.next(text) {
+            Outcome::Answer(Answer::Hold) => Self::hold(wait),
+            other => other.and_then(|answer| match answer {
+                Answer::Yes(y) => Outcome::Answer(y),
+                Answer::Admission(_) | Answer::Hold => Outcome::Unavailable,
+            }),
+        }
     }
 }
 
 #[cfg(test)]
 impl Dialogs for Scripted {
-    fn ask_admission(&self, program: &str, what: &Description, _: Duration) -> Outcome<Admission> {
-        match self.next(format!("admission {program}\n{}", what.render())) {
-            Outcome::Answer(Answer::Admission(a)) => Outcome::Answer(a),
-            Outcome::Answer(Answer::Yes(_)) | Outcome::Unavailable => Outcome::Unavailable,
-            Outcome::Timeout => Outcome::Timeout,
-        }
+    fn ask_admission(&self, program: &str, what: &Description, _: &Wait<'_>) -> Outcome<Admission> {
+        self.next(format!("admission {program}\n{}", what.render())).and_then(|a| match a {
+            Answer::Admission(a) => Outcome::Answer(a),
+            Answer::Yes(_) | Answer::Hold => Outcome::Unavailable,
+        })
     }
-    fn presence(&self, program: &str, what: &Description, _: Duration) -> Outcome<bool> {
-        match self.next(format!("presence {program}\n{}", what.render())) {
-            Outcome::Answer(Answer::Yes(y)) => Outcome::Answer(y),
-            Outcome::Answer(Answer::Admission(_)) | Outcome::Unavailable => Outcome::Unavailable,
-            Outcome::Timeout => Outcome::Timeout,
-        }
+    fn presence(&self, program: &str, what: &Description, wait: &Wait<'_>) -> Outcome<bool> {
+        self.yes_or_hold(format!("presence {program}\n{}", what.render()), wait)
     }
-    fn confirm(&self, question: &str, _: Duration) -> Outcome<bool> {
-        match self.next(format!("confirm {question}")) {
-            Outcome::Answer(Answer::Yes(y)) => Outcome::Answer(y),
-            Outcome::Answer(Answer::Admission(_)) | Outcome::Unavailable => Outcome::Unavailable,
-            Outcome::Timeout => Outcome::Timeout,
-        }
+    fn confirm(&self, question: &str, wait: &Wait<'_>) -> Outcome<bool> {
+        self.yes_or_hold(format!("confirm {question}"), wait)
+    }
+    fn ask_request(&self, what: &Description, wait: &Wait<'_>) -> Outcome<bool> {
+        self.yes_or_hold(format!("request\n{}", what.render()), wait)
     }
     fn tell(&self, text: &str) {
         self.shown.lock().expect("lock").push(format!("tell {text}"));
@@ -274,6 +355,7 @@ impl Dialogs for Scripted {
 mod tests {
     use std::io::Cursor;
     use std::sync::{Arc, Mutex};
+    use std::time::Instant;
 
     use super::*;
 
@@ -295,7 +377,9 @@ mod tests {
         }
     }
 
-    const SECOND: Duration = Duration::from_secs(1);
+    fn second() -> Wait<'static> {
+        Wait::up_to(Duration::from_secs(1))
+    }
 
     fn what() -> Description {
         Description {
@@ -322,14 +406,18 @@ mod tests {
             ("g\n\n", Admission::DeclineOnce),
         ] {
             let (terminal, _) = terminal(typed);
-            assert_eq!(terminal.ask_admission("/usr/bin/git", &what(), SECOND), Outcome::Answer(expected), "{typed:?}");
+            assert_eq!(
+                terminal.ask_admission("/usr/bin/git", &what(), &second()),
+                Outcome::Answer(expected),
+                "{typed:?}"
+            );
         }
     }
 
     #[test]
     fn the_dialog_shows_the_program_and_every_field_as_it_is() {
         let (terminal, capture) = terminal("y\n");
-        assert_eq!(terminal.presence("/usr/bin/ssh", &what(), SECOND), Outcome::Answer(true));
+        assert_eq!(terminal.presence("/usr/bin/ssh", &what(), &second()), Outcome::Answer(true));
         let text = capture.text();
         assert!(text.contains("program: /usr/bin/ssh\n"), "{text}");
         assert!(text.contains("    user: jan\n    host: a.example\n"), "{text}");
@@ -341,17 +429,17 @@ mod tests {
             [("y\n", true), ("yes\n", true), ("Y\n", false), ("\n", false), ("n\n", false), ("yy\n", false)]
         {
             let (terminal, _) = terminal(typed);
-            assert_eq!(terminal.confirm("make a key", SECOND), Outcome::Answer(expected), "{typed:?}");
+            assert_eq!(terminal.confirm("make a key", &second()), Outcome::Answer(expected), "{typed:?}");
         }
     }
 
     #[test]
     fn no_input_is_unavailable_and_silence_is_a_timeout() {
         let (terminal, _) = terminal("");
-        assert_eq!(terminal.presence("p", &what(), SECOND), Outcome::Unavailable);
+        assert_eq!(terminal.presence("p", &what(), &second()), Outcome::Unavailable);
         let (sender, receiver) = std::os::unix::net::UnixStream::pair().expect("pair");
         let silent = Terminal::new(receiver, Capture::default(), false);
-        assert_eq!(silent.presence("p", &what(), Duration::from_millis(50)), Outcome::Timeout);
+        assert_eq!(silent.presence("p", &what(), &Wait::up_to(Duration::from_millis(50))), Outcome::Timeout);
         drop(sender);
     }
 
@@ -362,12 +450,41 @@ mod tests {
         writer.write_all(b"y\n").expect("write");
         thread::sleep(Duration::from_millis(100));
         assert_eq!(
-            terminal.presence("p", &what(), Duration::from_millis(100)),
+            terminal.presence("p", &what(), &Wait::up_to(Duration::from_millis(100))),
             Outcome::Timeout,
             "the stray y did not answer"
         );
-        writer.write_all(b"y\n").expect("write");
-        assert_eq!(terminal.presence("p", &what(), SECOND), Outcome::Answer(true));
+        let typed = thread::spawn(move || {
+            thread::sleep(Duration::from_millis(150));
+            writer.write_all(b"y\n").expect("write");
+        });
+        assert_eq!(terminal.presence("p", &what(), &second()), Outcome::Answer(true), "typed while the dialog is open");
+        typed.join().expect("thread");
+    }
+
+    #[test]
+    fn a_dialog_closes_when_it_is_cancelled_and_one_that_waits_its_turn_counts_the_wait() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        let (_keep, reader) = std::os::unix::net::UnixStream::pair().expect("pair");
+        let capture = Capture::default();
+        let terminal = Arc::new(Terminal::new(reader, capture.clone(), false));
+        let cancelled = Arc::new(AtomicBool::new(false));
+        let first = {
+            let (terminal, cancelled) = (Arc::clone(&terminal), Arc::clone(&cancelled));
+            thread::spawn(move || {
+                let is_cancelled = || cancelled.load(Ordering::SeqCst);
+                terminal.ask_request(&what(), &Wait { timeout: Duration::from_secs(5), cancelled: &is_cancelled })
+            })
+        };
+        thread::sleep(Duration::from_millis(100));
+        // A second dialog waits behind the first, and gives up at its own deadline.
+        let started = Instant::now();
+        assert_eq!(terminal.ask_request(&what(), &Wait::up_to(Duration::from_millis(200))), Outcome::Timeout);
+        assert!(started.elapsed() < Duration::from_secs(2));
+        assert!(!capture.text().contains("[closed]"), "the one that never showed prints nothing");
+        cancelled.store(true, Ordering::SeqCst);
+        assert_eq!(first.join().expect("thread"), Outcome::Cancelled);
+        assert!(capture.text().contains("[closed]"));
     }
 
     #[test]

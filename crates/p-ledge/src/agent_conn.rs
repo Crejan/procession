@@ -16,7 +16,7 @@ use crate::agent::known_hosts::{HostName, KnownHosts};
 use crate::agent::message::{self, Identity, Message, read_message};
 use crate::agent::sign_content::SignContent;
 use crate::agent::text::is_showable;
-use crate::dialog::{Description, Outcome, describe};
+use crate::dialog::{Description, Outcome, Wait, describe};
 use crate::mute::DECLINES;
 use crate::policy::{Admission, Reason, SigningRequest, Verdict, sshsig_use};
 use crate::record::hash_line;
@@ -184,12 +184,12 @@ fn decide(
             .copied()
             .unwrap_or(Verdict::Refuse(Reason::NotUnderstood))
     };
-    let timeout = shared.dialog_timeout;
-    let presence = |shared: &Shared| match shared.dialogs.presence(program, description, timeout) {
+    let wait = Wait::up_to(shared.dialog_timeout);
+    let presence = |shared: &Shared| match shared.dialogs.presence(program, description, &wait) {
         Outcome::Answer(true) => None,
         Outcome::Answer(false) => Some(declined(shared, program)),
         Outcome::Timeout => Some(End::Expired),
-        Outcome::Unavailable => Some(End::Refused("unavailable")),
+        Outcome::Unavailable | Outcome::Cancelled => Some(End::Refused("unavailable")),
     };
     let proceed = match verdict {
         Verdict::Refuse(Reason::NotUnderstood) => Some(End::Refused("unrecognised")),
@@ -197,9 +197,9 @@ fn decide(
         Verdict::Refuse(Reason::Blocked) => Some(End::Refused("blocked")),
         Verdict::Sign => None,
         Verdict::CheckPresence => presence(shared),
-        Verdict::AskAdmission => match shared.dialogs.ask_admission(program, description, timeout) {
+        Verdict::AskAdmission => match shared.dialogs.ask_admission(program, description, &wait) {
             Outcome::Timeout => Some(End::Expired),
-            Outcome::Unavailable => Some(End::Refused("unavailable")),
+            Outcome::Unavailable | Outcome::Cancelled => Some(End::Refused("unavailable")),
             Outcome::Answer(answer) => admission(shared, program, answer).or_else(|| presence(shared)),
         },
     };

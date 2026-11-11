@@ -16,7 +16,8 @@ use serde::Deserialize;
 use serde_json::{Map, Value, json};
 
 use crate::agent::text::is_showable;
-use crate::dialog::Outcome;
+use crate::agents;
+use crate::dialog::{Outcome, Wait};
 use crate::holder::KeyType;
 use crate::policy::{Admission, Standing};
 use crate::shared::{KeyInfo, KeyMeta, Shared};
@@ -172,7 +173,19 @@ impl Code {
 
 /// Serves one connection until it ends. The caller has checked that the peer
 /// is the person's own user.
-pub fn serve(shared: &Shared, mut stream: UnixStream) {
+pub fn serve(shared: &Shared, stream: UnixStream) {
+    // Delegations started on this connection whose bundle was not reported
+    // written: if the connection ends first, they are withdrawn.
+    let mut pending: Vec<String> = Vec::new();
+    serve_commands(shared, stream, &mut pending);
+    for id in pending {
+        if agents::withdraw(shared, &id, "delivery-failed").is_ok() {
+            eprintln!("pledge: the bundle of {id} was not reported written: the delegation is withdrawn");
+        }
+    }
+}
+
+fn serve_commands(shared: &Shared, mut stream: UnixStream, pending: &mut Vec<String>) {
     let Ok(mut lines) = LineReader::new(&stream) else { return };
     let protocol_error = |stream: &mut UnixStream, error: &str| {
         let _ = write_line(stream, &json!({"schema_version": SCHEMA_VERSION, "type": "error", "error": error}));
@@ -193,7 +206,7 @@ pub fn serve(shared: &Shared, mut stream: UnixStream) {
         if command.message_type != "command" || !valid_reference(&command.reference) {
             return protocol_error(&mut stream, "unknown-type");
         }
-        let reply = match dispatch(shared, &command.name, command.args) {
+        let reply = match dispatch(shared, &command.name, command.args, pending) {
             Ok(data) => {
                 json!({"schema_version": SCHEMA_VERSION, "type": "reply", "ref": command.reference, "result": "ok", "data": data})
             }
@@ -241,7 +254,7 @@ struct ProgramArgs {
     scope: Option<String>,
 }
 
-fn dispatch(shared: &Shared, name: &str, args: Value) -> Result<Value, Code> {
+fn dispatch(shared: &Shared, name: &str, args: Value, pending: &mut Vec<String>) -> Result<Value, Code> {
     match name {
         "status" => arguments::<NoArgs>(args).map(|_| status(shared)),
         "keys.list" => arguments::<NoArgs>(args).and_then(|_| keys_list(shared)),
@@ -264,8 +277,32 @@ fn dispatch(shared: &Shared, name: &str, args: Value) -> Result<Value, Code> {
         "programs.forget" => {
             program_decision(shared, &arguments::<ProgramArgs>(args)?.program, None, "program-forgotten")
         }
+        "agents.start" => {
+            let (data, id) = agents::start(shared, arguments(args)?)?;
+            pending.push(id);
+            Ok(data)
+        }
+        "agents.delivered" => {
+            let id = arguments::<DelegationArgs>(args)?.delegation;
+            let done = agents::delivered(shared, &id)?;
+            pending.retain(|p| *p != id);
+            Ok(done)
+        }
+        "agents.failed" => {
+            let id = arguments::<DelegationArgs>(args)?.delegation;
+            pending.retain(|p| *p != id);
+            agents::withdraw(shared, &id, "delivery-failed")
+        }
+        "agents.list" => arguments::<NoArgs>(args).map(|_| agents::list(shared)),
+        "agents.withdraw" => agents::withdraw(shared, &arguments::<DelegationArgs>(args)?.delegation, "person"),
         _ => Err(Code::UnknownCommand),
     }
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct DelegationArgs {
+    delegation: String,
 }
 
 fn status(shared: &Shared) -> Value {
@@ -296,10 +333,10 @@ fn keys_list(shared: &Shared) -> Result<Value, Code> {
 }
 
 fn presence(shared: &Shared, question: &str) -> Result<(), Code> {
-    match shared.dialogs.confirm(question, PRESENCE_TIMEOUT) {
+    match shared.dialogs.confirm(question, &Wait::up_to(PRESENCE_TIMEOUT)) {
         Outcome::Answer(true) => Ok(()),
         Outcome::Answer(false) | Outcome::Timeout => Err(Code::PresenceDenied),
-        Outcome::Unavailable => Err(Code::Unavailable),
+        Outcome::Unavailable | Outcome::Cancelled => Err(Code::Unavailable),
     }
 }
 
@@ -346,6 +383,30 @@ fn keys_create(shared: &Shared, args: CreateArgs) -> Result<Value, Code> {
                     created: String::new(),
                 },
                 format!("make a {} key for the program {program} to log in as {user} on {host}", key_type.name()),
+            )
+        }
+        purpose @ ("confirmed" | "automatic" | "delegation") => {
+            if args.program.is_some() || args.user.is_some() || args.host.is_some() {
+                return Err(Code::BadArguments);
+            }
+            if shared.key_with_purpose(purpose).is_some() {
+                return Err(Code::AlreadyExists);
+            }
+            let what = match purpose {
+                "confirmed" => "approvals the person was asked for",
+                "automatic" => "approvals in mode automatic",
+                _ => "an agent's certificate",
+            };
+            (
+                KeyMeta {
+                    purpose: purpose.into(),
+                    program: None,
+                    use_: None,
+                    comment: format!("pledge {purpose}"),
+                    key_type: String::new(),
+                    created: String::new(),
+                },
+                format!("make the {purpose} key, for {what} (never offered on the SSH agent socket)"),
             )
         }
         _ => return Err(Code::BadArguments),
@@ -423,6 +484,13 @@ pub struct Client {
 }
 
 impl Client {
+    /// A client over a connection already made.
+    #[must_use]
+    pub fn from_stream(stream: UnixStream) -> Self {
+        let lines = LineReader::new(&stream).expect("a socket can be cloned");
+        Self { stream, lines, next: 1 }
+    }
+
     /// Connects to the control socket at `path`.
     ///
     /// # Errors

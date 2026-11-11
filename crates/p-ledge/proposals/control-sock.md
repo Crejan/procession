@@ -67,7 +67,9 @@ Two types besides `error`:
 | `programs.admit` | `program`, `scope` (`generally`) | none | the name typed, by the command line |
 | `programs.block` | `program` | none | no |
 | `programs.forget` | `program` | none | no |
-| `agents.start` | `groups` (list of names), `automatic_ceiling`, `ask_ceiling` (ratings), `valid_seconds` | `delegation`, `key` (the agent's private key), `certificate`, `valid_until` | yes |
+| `agents.start` | `groups` (list of names), `automatic_ceiling`, `ask_ceiling` (ratings), `valid_seconds` (60 to 86400, default 28800), `label` | `delegation`, `key_block` and `certificate` (each the base64 of its exact bytes), `valid_until`. The delegation is *pending* and signs nothing | yes |
+| `agents.delivered` | `delegation` | none: the bundle is written; the delegation signs from now on. If the connection ends first, or `agents.failed` is sent, the delegation is withdrawn (`by` `delivery-failed`) | no |
+| `agents.failed` | `delegation` | none | no |
 | `agents.list` | none | each delegation pledge issued: `delegation`, `groups`, both ceilings, `valid_until`, `withdrawn`, `last_asked`, `muted_until` | no |
 | `agents.withdraw` | `delegation` | none | no: it only narrows |
 
@@ -80,6 +82,7 @@ has a check of its own (R3).
   an automatic ceiling above `internal`, `recoverable`, `brief`, or one above
   the ask ceiling (`refused`): pledge does not let one be set that high
   (`SPEC.md`, section 4; `p-act` rating).
+- **Applied as built in step 3** (`review-pact-bundle.md`, section 5): the reply carries the key and the certificate as base64 of their exact bytes; the command line composes the bundle (`bundle.rs`) and reports it with `agents.delivered`.
 - **`agents.start` returns a private key** over the socket to the command
   line, which writes it to standard output or to a file only the person can
   read (`SPEC.md`, section 4). pledge keeps the ceilings and the
