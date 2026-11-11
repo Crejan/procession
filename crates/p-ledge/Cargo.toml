@@ -7,9 +7,18 @@ description = "Holds a person's keys on their own machine: an SSH agent with a r
 license = "MIT OR Apache-2.0"
 keywords = ["ssh", "ssh-agent", "secure-enclave", "approval", "policy"]
 categories = ["command-line-utilities", "authentication"]
-include = ["src/**", "SPEC.md"]
+include = ["src/**", "testdata/**", "proposals/**", "SPEC.md"]
 publish = false
 
 [[bin]]
 name = "pledge"
 path = "src/main.rs"
+
+[dependencies]
+# Verifies the host's signature in session-bind@openssh.com and the CA's in a
+# host certificate (ed25519, ECDSA P-256/P-384, RSA 2048..8192 with SHA-2),
+# and hashes for fingerprints. Already in the workspace's lock file. The
+# tests also sign with it.
+ring = "0.17"
+# known_hosts keys and fingerprints.
+base64 = "0.23"
