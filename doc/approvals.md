@@ -34,8 +34,9 @@ word stands for that instead.
 | target | what an action acts on: a host, a disk, a unit, a path |
 | pledge | the program on the person's machine that holds their keys, asks them and signs. "The person's machine" is the machine it runs on |
 | broker | the one central program of a site (`page`): it checks that a request may be put to a person, carries it there and back, registers delegations |
-| site project | the fundament site repository: the source of truth for persons, groups, hosts and rules |
-| site CA | the key in the site's provisioning that certifies persons' keys |
+| site project | the fundament site repository: the source of truth for persons, groups, hosts and rules. On a site with a directory, who is in which group is the directory's |
+| site CA | the key that certifies persons' keys and the broker's |
+| issuer | whoever holds the site CA's key and signs with it. Never the broker |
 
 **What is said and signed**
 
@@ -201,10 +202,18 @@ contains control characters or bidirectional marks, is refused. What the
 agent says about its reasons is shown as the agent's claim, apart from the
 rest.
 
-**R10. What a person may have carried out is the site project's answer**,
-not a second rule set: the person (`persons.yml`, `enabled`), their groups
-(`identity.yml` `groups`), where a group is admitted (`access`, by host
-class), and which commands a group may run where (grants). The broker
+**R10. What a person may have carried out is the site's answer**, not a
+second rule set. The person is enabled (`persons.yml`, `enabled`), and one of
+the delegation's groups is a group the person is in at that moment and is
+among the groups that the service's binding names for this host. That is the
+whole test: the groups in a certificate are what the person chose when
+issuing it, and someone removed from a group loses it for agents that are
+already running; a group that is an entitlement passes
+like any other. Each fact is read where the site keeps it: persons, hosts
+and service bindings in the site project; who is in which group in the site
+project on a local site and in the directory on a directory site. Where a
+group is admitted to log in (`access`) plays no part: an agent does not log
+in. Commands (U6) are a separate, later rule over grants. The broker
 evaluates it.
 
 **R11. When in doubt, no.** Expired, unreachable, unverifiable, unknown: no
@@ -221,7 +230,7 @@ signed, the agent.
 | Trusted | For | Not for |
 |---|---|---|
 | a service | doing what its request says and nothing else; rating honestly. A service can do what it can do, with or without a request, so nothing here can restrain it | |
-| the site project and its administrators | saying who is who and who may what; entering people's keys | |
+| the site project, the directory on a site that has one, and their administrators | saying who is who, who is in which group and who may what; entering people's keys | |
 | the broker | keeping what a person may not have carried out away from them (R10); honouring withdrawals and blocks; limits; being there | releasing an action (R1); saying who a person is; saying a request is a person's own agent's (R8, which pledge checks itself) |
 | the sandbox | giving an agent no way out except services (R2) | keeping the agent's key secret |
 | the key hardware of a person's machine | not giving up a key; a presence check where the key demands one | |
@@ -288,7 +297,7 @@ for their person and use (`<person>:confirmed`, `<person>:automatic`). A
 service holds one line, the site CA's key, and tells a confirmed approval
 from an automatic one by the name it verifies against. A certificate is
 valid for 30 days and renewed automatically while the person is enabled in
-the site project. The site CA's key is in the site's provisioning, never at
+the site project. The site CA's key is the issuer's (section 6), never at
 the broker: a broker that could certify keys could approve as anyone.
 
 **A service has a key of its own, certified by its host.** The host's SSH
@@ -318,8 +327,9 @@ unchanged, as the bytes it received. The exact formats are in
 [`approval-formats.md`](approval-formats.md).
 
 **Delegation.** pledge creates the agent's key pair, signs the public part
-into an SSH certificate with the person's delegation key (validity, and the
-chosen groups as principals), registers the certificate with the broker, and
+into an SSH certificate with the person's delegation key (validity; the
+person as its only principal; the chosen groups in the extension
+`groups@procession`), registers the certificate with the broker, and
 gives key and certificate to the sandbox as the person starts the agent. An
 SSH certificate cannot be the issuer of another, so a service cannot verify
 that chain with `ssh-keygen`; it does not have to (R1). pledge checks calls
@@ -373,8 +383,9 @@ work).
 | the person's machine | pledge | the person's keys, in hardware; the ceilings of their delegations; the calls it has signed for; the record |
 | the sandbox | the agent | its key and certificate |
 | a host | a service | its own key, with the certificate the host key issued for it; the site CA's public key |
-| the broker's host | the broker (`page`) | its key, with the certificate the site CA issued for it; its TLS certificate; requests waiting for a person, until their deadlines; persons, groups, access rules, grants, hosts with their keys and classes, persons' keys, all from the site project; the register of delegations |
-| the site's provisioning | the site project, the site CA, the roll-out | the site CA's key |
+| the broker's host | the broker (`page`); a job that reads group memberships where the site keeps them and writes them in the form `page load` takes | its key, with the certificate the site CA issued for it; its TLS certificate; requests waiting for a person, until their deadlines; persons and their keys, hosts with their keys, and which groups may use which service on which host, from the site project; who is in which group, from the site project or the directory; for each of these where it came from and when; the register of delegations |
+| the site's provisioning | the site project, the roll-out | |
+| the issuer: whoever holds the site CA's key (open, section 10). Never the broker's host | the site CA | the site CA's key |
 
 ```
  person's machine                         broker's host
@@ -391,8 +402,10 @@ work).
 1. The agent sends a call to the service.
 2. pledge holds a connection to the broker whenever the machine is awake.
    Requests arrive on it; approvals, new delegations and withdrawals leave on
-   it; blocks, renewed certificates and the names of the person's groups
-   arrive on it.
+   it; blocks, renewed certificates, the names of the person's groups and
+   the list of hosts' keys, signed with the site CA's key
+   (`approval-formats.md`), arrive on it. The broker carries that list and
+   cannot alter it: which key is a host's never rests on the broker's word.
 3. The service sends its request to the broker and receives approval and
    clearance, or a refusal.
 4. The service carries the action out by its own means.
@@ -438,7 +451,7 @@ broker, then replaces them in the site project: the person makes new keys on
 the new machine, the administrator enters them, the roll-out certifies them.
 Delegations of the old machine end with its delegation key.
 
-**E. Renewal** On a schedule the site's provisioning issues fresh
+**E. Renewal** The issuer issues fresh
 certificates for every enabled person's approval keys; pledge receives them
 over its connection. A disabled person gets none.
 
@@ -460,7 +473,7 @@ over its connection. A disabled person gets none.
 | a field shown in a dialog | 200 characters; a command 2000; longer is refused | pledge |
 | a command's run (U6) | 60 seconds by default, 10 minutes at most; 1 MiB of output | service |
 | the record on the person's machine | kept one year | pledge |
-| roll-out of a change in the site project to the broker | on every change, and at least hourly | site's provisioning |
+| group memberships at the broker | read again every 5 minutes | the job beside the broker |
 
 ## 8. Stages
 
@@ -492,7 +505,8 @@ Each stage is usable by itself and is the test of the one before.
   new delegation from the person; the agent changes nothing itself.
 - **Sandboxes provided by the site**, as a program of its own.
 - **A second approving device** per person, so that a closed laptop does not
-  stop an agent.
+  stop an agent. It would change the names in certificates first:
+  `<person>:confirmed` names a person, not a device.
 - **Encryption through the broker**, so that it does not see what is asked.
 - **pledge on Linux** with a FIDO2 token.
 
@@ -506,9 +520,6 @@ specifications:
   else.
 - Key and certificate get into a sandbox on another host over the SSH
   connection the person starts it through, on standard input.
-- A command (U6) is matched against grants as sudo matches: its path and
-  arguments against the grant's `commands`, run as the grant's `runas`. No
-  grant, no request.
 - There is one broker per site. It learns of hosts and their keys with the
   roll-out, like everything else. Its clearance says "passed" and nothing
   more.
@@ -516,10 +527,31 @@ specifications:
 Open:
 
 - **In fundament's model**, to be agreed there: a home for a person's four
-  keys; that a service type in the catalogue names the groups that may use
-  it, as it names `grants` and `command_accounts` today (finer rules per
-  action only when one is needed); the broker as a service type; the host
-  key certifying a service's key as part of the roll-out.
+  keys, which must be four different keys; the broker as a service type; the
+  host key certifying a service's key as part of the roll-out, refused where
+  the host's live key is not the one the site holds. Decided here: which
+  groups may use a service is a required `groups` parameter on the service's
+  binding, and that is its one home (finer rules per action or noun only
+  when one is needed).
+- **Who the issuer is, and how long certificates live.** Either the operator
+  at a converge, with longer certificates (90 days, renewed at any converge
+  once fewer than 60 remain, an alert when one nears its end) and no
+  always-on holder of the site CA's key; or an always-on issuer on a host
+  that is not the broker's, with the 30 days of section 7 on a timer. The
+  owner decides. Nothing else depends on which: nothing scheduled depends on
+  a converge, the broker's data from the site project arrives when the
+  broker's host is converged, and stopping someone at once is `page block`
+  (for a leaver: block, then a limited converge of the broker's host, then
+  the rest). Stages 1 and 2 need neither.
+- **Whether a service's key is certified by the site CA instead of its
+  host's key**, which would make the list of hosts' keys unnecessary. With
+  the owner. Nothing is built on either answer yet.
+- **How a command (U6) is matched against grants.** "As sudo matches" is not
+  a design: it makes the broker a second sudo matcher, and gives the service
+  a sudo rule as wide as every group grant on its host. Stage 4.
+- **TLS for the broker on a site without a certificate authority.** The
+  requirement is a certificate that pledge and services can verify: from the
+  site's own where there is one, pinned otherwise. Left to the binding.
 - **Where exactly the lines between the levels of a scale run.** The
   examples in R4 are a start, not a definition. To be settled with the first
   real verb table.

@@ -63,8 +63,10 @@ rating them is its responsibility.
   this host and cannot reach the dispatcher.
 - **A person**, through the dispatcher under their own login, by a sudo rule
   the site writes for that one path, as today. No approval: the person is
-  there and acts themselves. The same grant is what lets that person's agent
-  ask at all.
+  there and acts themselves. That grant has nothing to do with agents: which
+  groups' agents may use this service is the `groups` parameter of the
+  service's binding in the site project (`doc/approvals.md`, R10), and the
+  broker checks it.
 
 The dispatcher refuses the verb `run command` (below): a person who may run
 commands has sudo for that and needs no detour, and the detour would hide
@@ -158,6 +160,9 @@ them.
   request). Today p-robe depends on p-ledge's library for it. *Proposal:* a
   small crate of its own once the call and the request are specified, used
   by p-ledge, p-age and p-robe.
+- **Narrowing by noun.** `diag-tools` could limit an identity to some nouns;
+  R10 has no successor for that. *Proposal:* not now; a binding could later
+  name groups per noun.
 - **The verbs about a site** that `diag-tools` has. *Proposal:* a second
   service on the host that has that view, with the same dispatcher; not part
   of a host's table.
