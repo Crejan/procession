@@ -234,9 +234,14 @@ evaluates it.
 action.
 
 **R12. Everything is recorded on the person's machine**: each request that
-reached it, the answer (approved, declined, refused, expired; or cancelled,
-when the service gave up before there was one), the key that signed, the
-agent.
+reached it, the answer, the key that signed, the agent. The answer is one
+of six: approved, declined, refused, expired, cancelled (the service gave up
+before there was an answer) or lost (pledge stopped while the request
+waited). A request that waits for the person is recorded when it arrives,
+before any dialog, so that "each request that reached it" holds even if
+pledge dies. `approved` means that this machine signed, not that the action
+was done: what a service then ran is in the service's own log, which carries
+the call's identifier.
 
 ## 4. Threat model
 
@@ -524,6 +529,10 @@ Each stage is usable by itself and is the test of the one before.
 - **An agent proposing its delegation, or asking for more.** The answer is a
   new delegation from the person; the agent changes nothing itself.
 - **Sandboxes provided by the site**, as a program of its own.
+- **A service reporting back what it did with an approval.** Not there yet:
+  over the broker it would be a fifth signed document, from the one party
+  the design already trusts, after the fact, and it protects nothing. The
+  record says what the person's machine agreed to.
 - **A second approving device** per person, so that a closed laptop does not
   stop an agent. It would change the names in certificates first:
   `<person>:confirmed` names a person, not a device.
