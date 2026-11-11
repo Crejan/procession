@@ -169,6 +169,19 @@ A request rated at the top of any scale (`secret`, `lasting`, `outage`) is
 never signed with the automatic approval key: pledge does not let an automatic ceiling be set that high and
 does not honour one it finds.
 
+A "no" at the presence check is a decline: it counts toward muting and uses
+the call's identifier. When the same request is submitted on several
+connections, there is one dialog, and it closes when the last submitter of
+those bytes has gone. A dialog shows every field whole, up to the formats'
+limit for it; the parameters of a call together are at most 2000 characters,
+beyond that the request is refused as not showable. The identifier is marked
+used before the approval is signed: a crash in between costs a second
+decision on the same bytes, never a second signature in circulation. A
+delegation that was started and whose bundle was not handed over was never a
+delegation: the record has an event of its own for it
+(`delegation-not-delivered`), and "withdrawn" there always means that
+something which could sign was stopped.
+
 **Deadlines.** pledge refuses to sign after a request's deadline, closes a
 dialog that is still open when it passes, and records the request as
 expired. It watches the deadline itself.
