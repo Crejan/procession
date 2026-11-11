@@ -52,3 +52,21 @@ Followed in `approval-connections.md`:
 - Allowed-signers lines now show the two services' lines of formats section 7.
 Still open (G6a): how group memberships reach the broker on a directory site, the issuer's name for the hosts list, how host keys reach a pledge before stage 3.
 p-act's note: do not depend on its old `call_sig` handling; the broker decodes base64 before `looks_armoured`.
+
+## Update after the reconciliation decisions (orchestrator, p-ledge's `service-sock.md`, p-robe's review)
+
+`approval-connections.md` is now the home of the shared exchange; section 3 is it, section 2 lists what a transport decides, sections 4 and 5 are the two broker transports.
+1. One `submit` (`request`, `request_sig`) on all three hops; the broker passes the service's bytes on unchanged. No `request` message type.
+2. One `answer`: pledge's is the same bytes toward a service and toward the broker; the broker builds its own for the service and adds `clearance`, `clearance_sig` on `approved`. Clearance members are configuration: required (service, stage 2) or refused (stage 1, pledge, the broker reading pledge); never "if present". Separate `approval`/`decline`/`refuse` and `accepted` are gone.
+3. Correlation by the request's hash; an `answer`/`cancel` for an unheld hash is ignored and logged (hash and time only).
+4. `schema_version` on every unsigned message; `v` on signed documents (connection, standing, clearance). The documents' carrying members are `doc`/`doc_sig`.
+5. `by` on `refused`/`expired`; no `detail` anywhere; closed lists, unknown to `unknown`. pledge's reasons are p-ledge's table (my "first set" removed); the broker's list stays. Broker rebuilds, never forwards.
+6. `cancel` in the shared exchange; the broker passes it on to pledge. G10 closed.
+7. Line 96 KiB on every transport; open requests per connection is a transport parameter (section 2 table: `service.sock` 16, service to broker 1, broker to pledge not limited by the connection).
+8. G11 closed. G1, G2, G3, G4, G5, G8, G9 and the dependency choice remain marked open for the designer and owner.
+
+Found while doing this:
+- **A closed connection cancels on `service.sock` but must not at the broker.** A service that reconnects and resubmits the same bytes attaches to the held request; if the end of a connection cancelled, the resubmission would be a second request for one call identifier (R5). Section 2 makes it a transport parameter. p-ledge's text ("a connection that closes cancels all its open asks") is right for its transport and should say so.
+- **pledge's reasons lack a code for a person or key blocked at the broker** (needed when a standing blocks while requests wait). Proposal: `blocked`. Asked of p-ledge.
+- **Stored answers (G2)** now appear as a rule of the exchange (3.7): a repeated `submit` gets the same answer again.
+- The broker's reason names (`deadline`, `delegation`, ...) differ from pledge's (`deadline-past`, `unknown-delegation`, ...) on purpose; `by` says whose list a code is from.
