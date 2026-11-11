@@ -7,12 +7,20 @@ description = "Diagnostics of a host as a fixed table of rated verbs, offered to
 license = "MIT OR Apache-2.0"
 keywords = ["diagnostics", "agent", "mcp", "approval"]
 categories = ["command-line-utilities"]
-include = ["src/**", "SPEC.md"]
+include = ["src/**", "tests/**", "proposals/**", "SPEC.md"]
 publish = false
 
 [[bin]]
 name = "probe"
 path = "src/main.rs"
 
+[features]
+# Two verbs that do nothing (`test echo`, rated harmless; `test peak`, rated at
+# the top of one scale) so that the service can be tried end to end, and a way
+# for the tests to put the audit sink and the lock directory somewhere else.
+# Never in a build that is installed on a host: `sys kit` warns when it is.
+test-verbs = []
+
 [dependencies]
 p-ledge = { path = "../p-ledge", version = "0.0.0" }
+libc = "0.2"
