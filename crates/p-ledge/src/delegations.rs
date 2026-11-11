@@ -78,16 +78,6 @@ impl RatingWords {
     }
 }
 
-/// Where a delegation is in its life.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum State {
-    /// Issued, but its bundle was not yet reported written. It signs nothing.
-    Pending,
-    /// In use.
-    Active,
-}
-
 /// One delegation.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -112,8 +102,6 @@ pub struct Delegation {
     pub issued: i64,
     /// When it ends (Unix time).
     pub valid_until: i64,
-    /// Pending or active.
-    pub state: State,
     /// When it was withdrawn (Unix time), if it was.
     #[serde(default)]
     pub withdrawn: Option<i64>,
@@ -234,23 +222,6 @@ impl Delegations {
         })
     }
 
-    /// Makes a pending delegation active. `false` if there is none pending.
-    ///
-    /// # Errors
-    ///
-    /// [`Error::Io`] if it cannot be saved.
-    pub fn activate(&self, id: &str) -> Result<bool> {
-        self.with(|list| {
-            match list.iter_mut().find(|d| d.id == id && d.state == State::Pending && d.withdrawn.is_none()) {
-                Some(d) => {
-                    d.state = State::Active;
-                    Ok(true)
-                }
-                None => Ok(false),
-            }
-        })
-    }
-
     /// Withdraws a delegation. `false` if there is none, or it was withdrawn already.
     ///
     /// # Errors
@@ -302,7 +273,6 @@ mod tests {
             issuer: "SHA256:x".into(),
             issued: 1000,
             valid_until: 2000,
-            state: State::Active,
             withdrawn: None,
             last_asked: None,
         }
@@ -350,37 +320,23 @@ mod tests {
     }
 
     #[test]
-    fn delegations_are_added_activated_withdrawn_and_kept_on_disk() {
+    fn delegations_are_added_withdrawn_and_kept_on_disk() {
         let dir = TestDir::new("delegations");
         let path = dir.path().join("delegations.json");
         let store = Delegations::open(path.clone()).expect("open");
-        let mut pending = sample("p");
-        pending.state = State::Pending;
-        store.add(pending.clone()).expect("add");
-        assert!(store.add(pending).is_err(), "no duplicates");
-        assert!(store.activate("p").expect("activate"));
-        assert!(!store.activate("p").expect("again"), "only a pending one");
+        let delegation = sample("p");
+        store.add(delegation.clone()).expect("add");
+        assert!(store.add(delegation).is_err(), "no duplicates");
         store.touch("p", 1500).expect("touch");
         assert!(store.withdraw("p", 1600).expect("withdraw"));
         assert!(!store.withdraw("p", 1700).expect("again"));
         let again = Delegations::open(path.clone()).expect("reopen");
         let kept = again.get("p").expect("kept");
-        assert_eq!((kept.state, kept.withdrawn, kept.last_asked), (State::Active, Some(1600), Some(1500)));
+        assert_eq!((kept.withdrawn, kept.last_asked), (Some(1600), Some(1500)));
         assert_eq!(
             std::os::unix::fs::PermissionsExt::mode(&fs::metadata(&path).expect("meta").permissions()) & 0o777,
             0o600
         );
         assert!(again.get("none").is_none());
-    }
-
-    #[test]
-    fn a_withdrawn_pending_delegation_cannot_be_activated() {
-        let dir = TestDir::new("delegations-w");
-        let store = Delegations::open(dir.path().join("d.json")).expect("open");
-        let mut pending = sample("p");
-        pending.state = State::Pending;
-        store.add(pending).expect("add");
-        store.withdraw("p", 5).expect("withdraw");
-        assert!(!store.activate("p").expect("activate"));
     }
 }

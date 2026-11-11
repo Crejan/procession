@@ -110,14 +110,14 @@ pub struct Shared {
     pub programs_file: PathBuf,
     /// The `known_hosts` files that name verified hosts.
     pub known_hosts: Vec<PathBuf>,
-    /// Whether a login must be bound to a verified host (`SPEC.md`, section 3).
-    pub require_binding: bool,
     /// How long a login's dialog waits.
     pub dialog_timeout: Duration,
     /// The clock.
     pub clock: Box<dyn Fn() -> Timestamp + Send + Sync>,
     /// Requests, delegations, answers.
     pub approvals: Approvals,
+    /// Where private temporary directories are made (for issuing): a directory only the person can enter.
+    pub work_dir: PathBuf,
 }
 
 /// What a caller gives [`Shared::new`].
@@ -134,6 +134,8 @@ pub struct Parts {
     pub known_hosts: Vec<PathBuf>,
     /// The state directory: `config.json`, `delegations.json`, `answers.jsonl`.
     pub state_dir: PathBuf,
+    /// Where private temporary directories are made.
+    pub work_dir: PathBuf,
 }
 
 /// The current time from the system clock.
@@ -170,10 +172,10 @@ impl Shared {
             muter: Mutex::new(Muter::default()),
             programs_file: parts.programs_file,
             known_hosts: parts.known_hosts,
-            require_binding: true,
             dialog_timeout: LOGIN_DIALOG,
             clock: Box::new(system_clock),
             approvals,
+            work_dir: parts.work_dir,
         };
         shared.load_programs()?;
         shared.reload_keys()?;

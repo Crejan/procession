@@ -96,6 +96,14 @@ pub enum Standing {
 /// The namespaces a shared key signs SSHSIG in (`SPEC.md`, section 3).
 pub const SHARED_NAMESPACES: [&str; 2] = ["git", "file"];
 
+/// The form of [`SigningRequest::use_`] for a login: a user and the
+/// fingerprint of the host's key. A bound key is bound to exactly this; a host's
+/// name is for showing only.
+#[must_use]
+pub fn login_use(user: &str, host_fingerprint: &str) -> String {
+    format!("login {user}@{host_fingerprint}")
+}
+
 /// The form of [`SigningRequest::use_`] for an SSHSIG signature.
 #[must_use]
 pub fn sshsig_use(namespace: &str) -> String {

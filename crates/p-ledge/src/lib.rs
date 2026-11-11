@@ -9,8 +9,8 @@
 //! - [`record`], [`dialog`], [`mute`], [`paths`], [`peer`], [`cli`]: the rest
 //!   of `pledge serve` and its command line.
 //!
-//! - [`approvals`], [`service_conn`], [`agents`], [`delegations`], [`answers`],
-//!   [`config`], [`bundle`], [`openssh`], [`sshsig`]: approvals with keys in
+//! - [`approvals`], [`service_conn`], [`agents`], [`issue`], [`delegations`],
+//!   [`answers`], [`config`], [`sshsig`]: approvals with keys in
 //!   files (step 3): `service.sock`, the checks of `SPEC.md` section 4, the
 //!   delegations `pledge agents start` issues, the store of answers.
 //!
@@ -22,7 +22,6 @@ pub mod agent_conn;
 pub mod agents;
 pub mod answers;
 pub mod approvals;
-pub mod bundle;
 pub mod cli;
 pub mod config;
 pub mod control;
@@ -30,8 +29,8 @@ pub mod delegations;
 pub mod dialog;
 pub mod error;
 pub mod holder;
+pub mod issue;
 pub mod mute;
-pub mod openssh;
 pub mod paths;
 pub mod peer;
 pub mod policy;

@@ -10,7 +10,6 @@ use std::sync::Arc;
 use serde_json::{Value, json};
 
 use crate::agent::text::escape_unshowable;
-use crate::bundle;
 use crate::config::Config;
 use crate::control::{Client, ClientError};
 use crate::dialog::Terminal;
@@ -50,9 +49,9 @@ pub fn usage() -> String {
     }
     text.push_str(
         "\nserve    [--state-dir D] [--socket-dir D] [--known-hosts FILE]...\n\
-         keys     list | create shared|confirmed|automatic|delegation [--type T] | create bound --program P --user U --host H [--type T] | retire FINGERPRINT\n\
+         keys     list | create shared|confirmed|automatic|delegation [--type T] | create bound --program P --user U --host-key SHA256:... [--type T] | retire FINGERPRINT\n\
          programs list | admit PROGRAM | block PROGRAM | forget PROGRAM\n\
-         agents   start [--groups A,B] [--automatic E,D,S] [--ask E,D,S] [--valid 8h] [--label L] [--output FILE] | list | withdraw ID\n\
+         agents   start [--groups A,B] [--automatic E,D,S] [--ask E,D,S] [--valid 8h] [--label L] [--service host/name=url]... [--tls-root FILE] [--deadline S] [--output FILE] | list | withdraw ID\n\
          history  [--type T] [--result R] [--format json] [--verify]\n\
          \nall but serve take [--state-dir D] [--socket-dir D]; types: ed25519 (default), ecdsa-p256\n",
     );
@@ -185,8 +184,8 @@ fn keys_verb(mut args: Vec<String>) -> Done {
     let paths = paths(&mut args)?;
     let json_out = take_value(&mut args, "--format").as_deref() == Some("json");
     let key_type = take_value(&mut args, "--type");
-    let (program, user, host) =
-        (take_value(&mut args, "--program"), take_value(&mut args, "--user"), take_value(&mut args, "--host"));
+    let (program, user, host_key) =
+        (take_value(&mut args, "--program"), take_value(&mut args, "--user"), take_value(&mut args, "--host-key"));
     let mut words = args.iter().map(String::as_str);
     match (words.next(), words.next(), words.next()) {
         (Some("list"), None, None) => {
@@ -203,7 +202,8 @@ fn keys_verb(mut args: Vec<String>) -> Done {
         }
         (Some("create"), Some(purpose @ ("shared" | "bound" | "confirmed" | "automatic" | "delegation")), None) => {
             let mut create = json!({"purpose": purpose});
-            for (name, value) in [("key_type", key_type), ("program", program), ("user", user), ("host", host)] {
+            for (name, value) in [("key_type", key_type), ("program", program), ("user", user), ("host_key", host_key)]
+            {
                 if let Some(value) = value {
                     create[name] = Value::String(value);
                 }
@@ -333,6 +333,24 @@ fn seconds(text: &str) -> std::result::Result<u64, Failure> {
         .ok_or_else(|| Failure::Usage(format!("'{text}' is not a duration (8h, 30m, 90s or seconds)")))
 }
 
+/// The services of the bundle: `--service host/name=url` (repeatable) if given,
+/// else the person's own `config.json`.
+fn bundle_services(config: &Config, options: &[String]) -> std::result::Result<Vec<Value>, Failure> {
+    if options.is_empty() {
+        return Ok(config.services.iter().map(|s| json!({"host": s.host, "name": s.name, "url": s.url})).collect());
+    }
+    options
+        .iter()
+        .map(|text| {
+            let (service, url) =
+                text.split_once('=').ok_or_else(|| Failure::Usage(format!("'{text}': --service host/name=url")))?;
+            let (host, name) =
+                service.split_once('/').ok_or_else(|| Failure::Usage(format!("'{text}': --service host/name=url")))?;
+            Ok(json!({"host": host, "name": name, "url": url}))
+        })
+        .collect()
+}
+
 fn agents_verb(mut args: Vec<String>) -> Done {
     let paths = paths(&mut args)?;
     let json_out = take_value(&mut args, "--format").as_deref() == Some("json");
@@ -340,17 +358,38 @@ fn agents_verb(mut args: Vec<String>) -> Done {
         (take_value(&mut args, "--groups"), take_value(&mut args, "--automatic"), take_value(&mut args, "--ask"));
     let (valid, label, output) =
         (take_value(&mut args, "--valid"), take_value(&mut args, "--label"), take_value(&mut args, "--output"));
-    let to_terminal = take_switch(&mut args, "--to-terminal");
+    let (tls_root, deadline) = (take_value(&mut args, "--tls-root"), take_value(&mut args, "--deadline"));
+    let service_options = take_values(&mut args, "--service");
     let mut words = args.iter().map(String::as_str);
     match (words.next(), words.next(), words.next()) {
         (Some("start"), None, None) => {
             let config = Config::load(&paths.state.join("config.json"))?;
-            bundle::check_config(&config).map_err(|e| Failure::Refused(e.to_string()))?;
-            // SAFETY: isatty only reads the descriptor's type.
-            if output.is_none() && !to_terminal && unsafe { libc::isatty(1) } == 1 {
-                return Err(Failure::Refused("the bundle holds a private key: it is not written to a terminal (use --output FILE, a pipe, or --to-terminal)".into()));
+            let services = bundle_services(&config, &service_options)?;
+            if services.is_empty() {
+                return Err(Failure::Refused("no services: name them in config.json or with --service host/name=url; an agent would have nowhere to send its calls".into()));
             }
-            let mut start = json!({"groups": groups.map_or_else(Vec::new, |g| g.split(',').filter(|g| !g.is_empty()).map(str::to_owned).collect())});
+            // A bundle holds a private key: it is never written to a terminal.
+            // SAFETY: isatty only reads the descriptor's type.
+            if output.is_none() && unsafe { libc::isatty(1) } == 1 {
+                return Err(Failure::Refused(
+                    "the bundle holds a private key: it is not written to a terminal (use --output FILE, or a pipe)"
+                        .into(),
+                ));
+            }
+            let mut start = json!({
+                "groups": groups.map_or_else(Vec::new, |g| g.split(',').filter(|g| !g.is_empty()).map(str::to_owned).collect()),
+                "services": services,
+            });
+            if let Some(file) = tls_root {
+                start["tls_root"] =
+                    json!(std::fs::read_to_string(&file).map_err(|e| Failure::Failed(format!("{file}: {e}")))?);
+            } else if let Some(root) = &config.tls_root {
+                start["tls_root"] = json!(root);
+            }
+            if let Some(text) = deadline.or_else(|| config.deadline_seconds.map(|d| d.to_string())) {
+                start["deadline_seconds"] =
+                    json!(text.parse::<u32>().map_err(|_| Failure::Usage("--deadline is a number of seconds".into()))?);
+            }
             if let Some(text) = automatic {
                 start["automatic_ceiling"] = ceiling_words(&text)?;
             }
@@ -366,8 +405,7 @@ fn agents_verb(mut args: Vec<String>) -> Done {
             let mut control = client(&paths)?;
             let data = control.call("agents.start", start)?;
             let id = data["delegation"].as_str().unwrap_or_default().to_owned();
-            let delivered = deliver(&config, &data, output.as_deref());
-            match delivered {
+            match deliver(&data, output.as_deref()) {
                 Ok(()) => {
                     control.call("agents.delivered", json!({"delegation": id}))?;
                     eprintln!("pledge: delegation {id} valid until {}", data["valid_until"].as_str().unwrap_or("?"));
@@ -375,7 +413,7 @@ fn agents_verb(mut args: Vec<String>) -> Done {
                 }
                 Err(message) => {
                     let _ = control.call("agents.failed", json!({"delegation": id}));
-                    Err(Failure::Failed(format!("{message}; the delegation {id} is withdrawn")))
+                    Err(Failure::Failed(format!("{message}; the delegation {id} never existed")))
                 }
             }
         }
@@ -407,18 +445,14 @@ fn agents_verb(mut args: Vec<String>) -> Done {
 }
 
 /// Writes the bundle, once, from one buffer: to a new file only the person can
-/// read, or to standard output. Any error means it did not (all) arrive.
-fn deliver(config: &Config, data: &Value, output: Option<&str>) -> std::result::Result<(), String> {
+/// read, or to standard output (never a terminal: checked before). Any error
+/// means it did not (all) arrive.
+fn deliver(data: &Value, output: Option<&str>) -> std::result::Result<(), String> {
     use base64::Engine as _;
-    let decode = |name: &str| {
-        base64::engine::general_purpose::STANDARD
-            .decode(data[name].as_str().unwrap_or(""))
-            .map_err(|_| format!("the reply has no valid {name}"))
-    };
-    let (key_block, certificate) = (decode("key_block")?, decode("certificate")?);
-    let certificate = String::from_utf8(certificate).map_err(|_| "the certificate is not text".to_owned())?;
-    let bundle = bundle::write(config, &key_block, &certificate).map_err(|e| e.to_string())?;
-    match output {
+    let mut bundle = base64::engine::general_purpose::STANDARD
+        .decode(data["bundle"].as_str().unwrap_or(""))
+        .map_err(|_| "the reply has no valid bundle".to_owned())?;
+    let result = match output {
         Some(path) => {
             use std::os::unix::fs::OpenOptionsExt;
             let mut file = std::fs::OpenOptions::new()
@@ -436,7 +470,9 @@ fn deliver(config: &Config, data: &Value, output: Option<&str>) -> std::result::
             let mut out = io::stdout().lock();
             out.write_all(&bundle).and_then(|()| out.flush()).map_err(|e| format!("writing the bundle: {e}"))
         }
-    }
+    };
+    bundle.fill(0);
+    result
 }
 
 fn history_verb(mut args: Vec<String>) -> Done {

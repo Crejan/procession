@@ -120,6 +120,7 @@ mod rig {
                 programs_file: dir.path().join("programs.json"),
                 known_hosts: vec![dir.path().join("known_hosts")],
                 state_dir: dir.path().to_owned(),
+                work_dir: dir.path().join("work"),
             })
             .expect("shared");
             if !live {

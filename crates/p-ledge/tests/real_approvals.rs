@@ -160,7 +160,7 @@ fn verify(server: &Server, request: &Request, answer: &Answer) -> ApprovalKind {
     verify_approval(
         request,
         approved.approval(),
-        ApprovalTrust::PersonKeys { confirmed: &confirmed, automatic: &automatic },
+        ApprovalTrust::PersonKeys { person: "jan", confirmed: &confirmed, automatic: &automatic },
     )
     .expect("verifies")
 }
@@ -275,7 +275,7 @@ fn the_same_bytes_get_the_same_answer_after_pledge_is_restarted() {
 }
 
 #[test]
-fn agents_start_refuses_without_services_and_withdraws_a_delegation_it_could_not_deliver() {
+fn agents_start_refuses_without_services_and_a_delegation_it_could_not_deliver_never_exists() {
     let mut server = start("bundle-errors", false);
     make_keys(&mut server);
     server.answer("y\n");
@@ -297,8 +297,12 @@ fn agents_start_refuses_without_services_and_withdraws_a_delegation_it_could_not
     let out = server.pledge(&["agents", "start", "--output", existing.to_str().expect("path")]);
     assert_eq!(out.status.code(), Some(3), "{}", text(&out));
     assert_eq!(fs::read_to_string(&existing).expect("read"), "mine", "nothing it did not create is touched");
-    assert!(
-        server.ok(&["agents", "list"]).starts_with("withdrawn"),
-        "a bundle that did not arrive is a delegation that ends at once"
-    );
+    assert!(server.ok(&["agents", "list"]).is_empty(), "a bundle that did not arrive: the delegation never existed");
+    let events: Vec<(String, String)> = server
+        .history()
+        .iter()
+        .filter_map(|e| e["event"].as_str().map(|ev| (ev.to_owned(), e["by"].as_str().unwrap_or("").to_owned())))
+        .collect();
+    assert!(events.contains(&("delegation-withdrawn".to_owned(), "delivery-failed".to_owned())), "{events:?}");
+    assert!(!events.iter().any(|(e, _)| e == "delegation-issued"));
 }

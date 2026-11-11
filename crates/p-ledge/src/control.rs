@@ -17,9 +17,10 @@ use serde_json::{Map, Value, json};
 
 use crate::agent::text::is_showable;
 use crate::agents;
+use crate::delegations::Delegation;
 use crate::dialog::{Outcome, Wait};
 use crate::holder::KeyType;
-use crate::policy::{Admission, Standing};
+use crate::policy::{Admission, Standing, login_use};
 use crate::shared::{KeyInfo, KeyMeta, Shared};
 
 /// The longest line, on every transport.
@@ -176,16 +177,15 @@ impl Code {
 pub fn serve(shared: &Shared, stream: UnixStream) {
     // Delegations started on this connection whose bundle was not reported
     // written: if the connection ends first, they are withdrawn.
-    let mut pending: Vec<String> = Vec::new();
+    let mut pending: Vec<Delegation> = Vec::new();
     serve_commands(shared, stream, &mut pending);
-    for id in pending {
-        if agents::withdraw(shared, &id, "delivery-failed").is_ok() {
-            eprintln!("pledge: the bundle of {id} was not reported written: the delegation is withdrawn");
-        }
+    for delegation in pending {
+        agents::abandoned(shared, &delegation.id);
+        eprintln!("pledge: the bundle of {} was not reported written: the delegation never existed", delegation.id);
     }
 }
 
-fn serve_commands(shared: &Shared, mut stream: UnixStream, pending: &mut Vec<String>) {
+fn serve_commands(shared: &Shared, mut stream: UnixStream, pending: &mut Vec<Delegation>) {
     let Ok(mut lines) = LineReader::new(&stream) else { return };
     let protocol_error = |stream: &mut UnixStream, error: &str| {
         let _ = write_line(stream, &json!({"schema_version": SCHEMA_VERSION, "type": "error", "error": error}));
@@ -237,7 +237,7 @@ struct CreateArgs {
     key_type: Option<String>,
     program: Option<String>,
     user: Option<String>,
-    host: Option<String>,
+    host_key: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -254,7 +254,7 @@ struct ProgramArgs {
     scope: Option<String>,
 }
 
-fn dispatch(shared: &Shared, name: &str, args: Value, pending: &mut Vec<String>) -> Result<Value, Code> {
+fn dispatch(shared: &Shared, name: &str, args: Value, pending: &mut Vec<Delegation>) -> Result<Value, Code> {
     match name {
         "status" => arguments::<NoArgs>(args).map(|_| status(shared)),
         "keys.list" => arguments::<NoArgs>(args).and_then(|_| keys_list(shared)),
@@ -278,23 +278,23 @@ fn dispatch(shared: &Shared, name: &str, args: Value, pending: &mut Vec<String>)
             program_decision(shared, &arguments::<ProgramArgs>(args)?.program, None, "program-forgotten")
         }
         "agents.start" => {
-            let (data, id) = agents::start(shared, arguments(args)?)?;
-            pending.push(id);
+            let (data, delegation) = agents::start(shared, arguments(args)?)?;
+            pending.push(delegation);
             Ok(data)
         }
         "agents.delivered" => {
             let id = arguments::<DelegationArgs>(args)?.delegation;
-            let done = agents::delivered(shared, &id)?;
-            pending.retain(|p| *p != id);
-            Ok(done)
+            let at = pending.iter().position(|d| d.id == id).ok_or(Code::NotFound)?;
+            agents::delivered(shared, pending.remove(at))
         }
         "agents.failed" => {
             let id = arguments::<DelegationArgs>(args)?.delegation;
-            pending.retain(|p| *p != id);
-            agents::withdraw(shared, &id, "delivery-failed")
+            let at = pending.iter().position(|d| d.id == id).ok_or(Code::NotFound)?;
+            agents::abandoned(shared, &pending.remove(at).id);
+            Ok(json!({}))
         }
         "agents.list" => arguments::<NoArgs>(args).map(|_| agents::list(shared)),
-        "agents.withdraw" => agents::withdraw(shared, &arguments::<DelegationArgs>(args)?.delegation, "person"),
+        "agents.withdraw" => agents::withdraw(shared, &arguments::<DelegationArgs>(args)?.delegation),
         _ => Err(Code::UnknownCommand),
     }
 }
@@ -347,6 +347,13 @@ fn plain(word: Option<&str>) -> Result<&str, Code> {
     word.filter(|w| !w.is_empty() && is_showable(w) && !w.contains([' ', '@'])).ok_or(Code::BadArguments)
 }
 
+/// `SHA256:` and the 43 characters of an unpadded base64 digest.
+fn is_fingerprint(text: &str) -> bool {
+    text.strip_prefix("SHA256:").is_some_and(|rest| {
+        rest.len() == 43 && rest.bytes().all(|b| b.is_ascii_alphanumeric() || matches!(b, b'+' | b'/'))
+    })
+}
+
 fn keys_create(shared: &Shared, args: CreateArgs) -> Result<Value, Code> {
     let key_type = match args.key_type.as_deref() {
         None => KeyType::Ed25519,
@@ -354,7 +361,7 @@ fn keys_create(shared: &Shared, args: CreateArgs) -> Result<Value, Code> {
     };
     let (meta, question) = match args.purpose.as_str() {
         "shared" => {
-            if args.program.is_some() || args.user.is_some() || args.host.is_some() {
+            if args.program.is_some() || args.user.is_some() || args.host_key.is_some() {
                 return Err(Code::BadArguments);
             }
             (
@@ -372,21 +379,26 @@ fn keys_create(shared: &Shared, args: CreateArgs) -> Result<Value, Code> {
         "bound" => {
             let program =
                 args.program.as_deref().filter(|p| !p.is_empty() && is_showable(p)).ok_or(Code::BadArguments)?;
-            let (user, host) = (plain(args.user.as_deref())?, plain(args.host.as_deref())?);
+            let user = plain(args.user.as_deref())?;
+            // The host is fixed by its host key's fingerprint, always; a name is for showing only.
+            let host_key = args.host_key.as_deref().filter(|f| is_fingerprint(f)).ok_or(Code::BadArguments)?;
             (
                 KeyMeta {
                     purpose: "bound".into(),
                     program: Some(program.to_owned()),
-                    use_: Some(format!("login {user}@{host}")),
-                    comment: format!("pledge bound {user}@{host}"),
+                    use_: Some(login_use(user, host_key)),
+                    comment: format!("pledge bound {user}@{host_key}"),
                     key_type: String::new(),
                     created: String::new(),
                 },
-                format!("make a {} key for the program {program} to log in as {user} on {host}", key_type.name()),
+                format!(
+                    "make a {} key for the program {program} to log in as {user} on the host with key {host_key}",
+                    key_type.name()
+                ),
             )
         }
         purpose @ ("confirmed" | "automatic" | "delegation") => {
-            if args.program.is_some() || args.user.is_some() || args.host.is_some() {
+            if args.program.is_some() || args.user.is_some() || args.host_key.is_some() {
                 return Err(Code::BadArguments);
             }
             if shared.key_with_purpose(purpose).is_some() {
@@ -579,9 +591,9 @@ mod tests {
         let bound = call(
             &mut conn,
             "keys.create",
-            json!({"purpose": "bound", "key_type": "ecdsa-p256", "program": "/opt/preserve", "user": "u1", "host": "backup.example.org"}),
+            json!({"purpose": "bound", "key_type": "ecdsa-p256", "program": "/opt/preserve", "user": "u1", "host_key": "SHA256:1T2d+o1uviO6G2bFXBL66gkeZjLHNtJDENGwH+Q0A+w"}),
         );
-        assert_eq!(bound["data"]["use"], "login u1@backup.example.org");
+        assert_eq!(bound["data"]["use"], "login u1@SHA256:1T2d+o1uviO6G2bFXBL66gkeZjLHNtJDENGwH+Q0A+w");
         let listed = call(&mut conn, "keys.list", json!({}));
         assert_eq!(listed["data"]["keys"].as_array().map(Vec::len), Some(2));
         assert_eq!(call(&mut conn, "keys.retire", json!({"fingerprint": fingerprint}))["result"], "ok");
@@ -632,8 +644,16 @@ mod tests {
             ("nonsense", json!({}), "unknown-command"),
             ("status", json!({"extra": 1}), "bad-arguments"),
             ("keys.create", json!({"purpose": "other"}), "bad-arguments"),
-            ("keys.create", json!({"purpose": "bound", "program": "p", "user": "a b", "host": "h"}), "bad-arguments"),
-            ("keys.create", json!({"purpose": "bound", "program": "p", "user": "u", "host": "h\n"}), "bad-arguments"),
+            (
+                "keys.create",
+                json!({"purpose": "bound", "program": "p", "user": "a b", "host_key": "SHA256:1T2d+o1uviO6G2bFXBL66gkeZjLHNtJDENGwH+Q0A+w"}),
+                "bad-arguments",
+            ),
+            (
+                "keys.create",
+                json!({"purpose": "bound", "program": "p", "user": "u", "host_key": "SHA256:short"}),
+                "bad-arguments",
+            ),
             ("keys.create", json!({"purpose": "shared", "key_type": "rsa"}), "bad-arguments"),
             ("keys.retire", json!({"fingerprint": "SHA256:none"}), "not-found"),
             ("programs.admit", json!({"program": "p", "scope": "once"}), "bad-arguments"),

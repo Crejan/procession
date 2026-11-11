@@ -83,6 +83,7 @@ pub fn run(config: Config) -> Result<()> {
         programs_file: config.paths.programs(),
         known_hosts: config.known_hosts,
         state_dir: config.paths.state.clone(),
+        work_dir: config.paths.sockets.clone(),
     })?);
     shared.event("started", json!({"form": "files", "version": env!("CARGO_PKG_VERSION")}));
     if let Some(bytes) = opened.repaired_bytes {
@@ -188,7 +189,19 @@ mod tests {
         assert_eq!(fs::metadata(&path).expect("meta").permissions().mode() & 0o777, 0o600);
         assert!(matches!(bind_socket(&path), Err(Error::Locked(_))));
         drop(listener);
-        let _again = bind_socket(&path).expect("a stale socket is replaced");
+        // Closing a socket takes a moment on some systems: a stale one is replaced once it refuses.
+        let mut replaced = None;
+        for _ in 0..40 {
+            match bind_socket(&path) {
+                Ok(listener) => {
+                    replaced = Some(listener);
+                    break;
+                }
+                Err(Error::Locked(_)) => std::thread::sleep(std::time::Duration::from_millis(50)),
+                Err(e) => panic!("{e}"),
+            }
+        }
+        assert!(replaced.is_some(), "a stale socket is replaced");
     }
 
     fn own_group_name() -> String {

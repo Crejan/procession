@@ -1,44 +1,34 @@
 //! Delegations: `pledge agents start`, `list`, `withdraw` (`SPEC.md`, section
 //! 4; `doc/approval-formats.md`, section 3.1; `proposals/review-pact-bundle.md`).
 //!
-//! `start` makes the agent's Ed25519 key in memory, has the key holder sign a
-//! certificate for it with the delegation key (the person is its only
-//! principal; no critical options; the extension `groups@procession`), checks
-//! the certificate with the code that checks calls, and replies with the key
-//! block and the certificate. The delegation is **pending** and signs nothing
-//! until the command line reports the bundle written (`delivered`); a
-//! connection that ends first withdraws it. pledge keeps the certificate and the
-//! ceilings, not the key.
+//! `start` has the agent's key pair and certificate made by OpenSSH through
+//! the one seam, [`issue`](crate::issue), composes the bundle with p-act, and
+//! replies with its bytes. A delegation **exists** for pledge only from
+//! `agents.delivered`: until then it is held on the connection that started
+//! it, signs for no call, and has been written nowhere; a connection that ends
+//! first leaves only a record entry. pledge keeps the certificate and the
+//! ceilings, never the key.
 
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD;
+use p_act::Timestamp;
+use p_act::limits::{DEFAULT_DELEGATION_SECONDS, MAX_DELEGATION_SECONDS};
+use p_act::pact::Service;
+use p_act::pact::bundle::{Bundle, Config as BundleConfig};
 use p_act::rating::{Ceilings, Rating};
-use p_act::sign::{PublicKey, verify_call_agent};
-use p_act::{Call, CallContent, CallId, Document, ServiceId, Timestamp};
-use ring::rand::{SecureRandom, SystemRandom};
 use serde::Deserialize;
 use serde_json::{Value, json};
 
-use crate::agent::host_key::fingerprint;
 use crate::agent::text::is_showable;
-use crate::config::is_name;
+use crate::config::{DEFAULT_DEADLINE_SECONDS, ServiceEntry, is_name};
 use crate::control::Code;
-use crate::delegations::{Delegation, RatingWords, State};
+use crate::delegations::{Delegation, RatingWords};
 use crate::dialog::{Outcome, Wait};
-use crate::openssh::{AgentKey, CertificateParts, certificate_blob, certificate_line, certificate_to_sign};
+use crate::issue::{Issuing, issue};
 use crate::shared::Shared;
-use crate::sshsig;
 
-/// A delegation's validity by default, in seconds: 8 hours.
-pub const DEFAULT_VALID_SECONDS: u64 = 8 * 3600;
-/// The shortest a delegation may last: a minute. (The certificate is checked
-/// by `ssh-keygen` against the real clock; a shorter one could end between
-/// being made and being checked.)
+/// The shortest a delegation may last: a minute.
 pub const MIN_VALID_SECONDS: u64 = 60;
-/// The longest a delegation may last: 24 hours.
-pub const MAX_VALID_SECONDS: u64 = 24 * 3600;
-/// How far before now a certificate's validity starts, for clocks that differ.
-const BACKDATE_SECONDS: i64 = 60;
 
 /// The arguments of `agents.start`.
 #[derive(Deserialize)]
@@ -55,60 +45,22 @@ pub struct StartArgs {
     pub valid_seconds: Option<u64>,
     /// A free label, for dialogs and the record.
     pub label: Option<String>,
+    /// The services the bundle names: the person's own, from a file or options; never the broker's word.
+    pub services: Vec<ServiceEntry>,
+    /// The TLS root for `https` services (PEM).
+    pub tls_root: Option<String>,
+    /// The deadline the agent is told to give its calls.
+    pub deadline_seconds: Option<u32>,
 }
 
-fn random_uuid() -> Option<String> {
-    let mut bytes = [0_u8; 16];
-    SystemRandom::new().fill(&mut bytes).ok()?;
-    bytes[6] = bytes[6] & 0x0F | 0x40;
-    bytes[8] = bytes[8] & 0x3F | 0x80;
-    let hex: Vec<String> = bytes.iter().map(|b| format!("{b:02x}")).collect();
-    Some(format!(
-        "{}-{}-{}-{}-{}",
-        hex[0..4].concat(),
-        hex[4..6].concat(),
-        hex[6..8].concat(),
-        hex[8..10].concat(),
-        hex[10..16].concat()
-    ))
-}
-
-/// Checks the certificate just made with the code that checks calls: a probe
-/// call signed with the agent's key and certificate must verify under the
-/// delegation key, and name the person, the groups and the key's fingerprint.
-fn self_check(
-    key: &AgentKey,
-    certificate: &[u8],
-    issuer: &PublicKey,
-    person: &str,
-    groups: &[String],
-    id: &str,
-    now: Timestamp,
-) -> bool {
-    let (Some(uuid), Some(deadline)) = (random_uuid(), now.checked_add(60)) else { return false };
-    let Ok(call_id) = CallId::parse(&uuid) else { return false };
-    let content = CallContent {
-        id: call_id,
-        deadline,
-        service: ServiceId { host: "localhost".into(), name: "probe".into() },
-        action: "check".into(),
-        params: Vec::new(),
-        claim: None,
-    };
-    let Ok(call) = Call::compose(&content) else { return false };
-    let Ok(signature) = key.sign(&sshsig::signed_data("call-v1@procession", call.as_bytes())) else { return false };
-    let armoured = sshsig::armour(certificate, "call-v1@procession", &signature);
-    verify_call_agent(&call, &armoured, issuer)
-        .is_ok_and(|agent| agent.person == person && agent.groups == groups && agent.delegation.as_str() == id)
-}
-
-/// `agents.start`. Returns the reply's data and the new delegation's identifier.
+/// Starts a delegation. Returns the reply's data and the delegation, which the
+/// caller holds until it is delivered.
 ///
 /// # Errors
 ///
 /// A [`Code`] for what is wrong: no person configured, no delegation key,
-/// arguments outside what a person may set, the presence check.
-pub fn start(shared: &Shared, args: StartArgs) -> Result<(Value, String), Code> {
+/// arguments outside what a person may set, the presence check, issuing.
+pub fn start(shared: &Shared, args: StartArgs) -> Result<(Value, Delegation), Code> {
     let person = shared.approvals.config.person.clone().ok_or(Code::Refused)?;
     let mut groups = args.groups;
     if !groups.iter().all(|g| is_name(g)) {
@@ -123,19 +75,26 @@ pub fn start(shared: &Shared, args: StartArgs) -> Result<(Value, String), Code> 
     let ask = rating(args.ask_ceiling, Rating::WORST)?;
     // A person cannot set an automatic ceiling above `HIGHEST_AUTOMATIC`, or above the ask ceiling.
     Ceilings::new(automatic, ask).ok_or(Code::Refused)?;
-    let valid = args.valid_seconds.unwrap_or(DEFAULT_VALID_SECONDS);
+    let valid = args.valid_seconds.unwrap_or(u64::try_from(DEFAULT_DELEGATION_SECONDS).unwrap_or(0));
     if valid < MIN_VALID_SECONDS {
         return Err(Code::BadArguments);
     }
-    if valid > MAX_VALID_SECONDS {
+    if valid > u64::try_from(MAX_DELEGATION_SECONDS).unwrap_or(0) {
         return Err(Code::Refused);
     }
     let label = args.label.unwrap_or_else(|| "pledge agent".to_owned());
     if label.is_empty() || !is_showable(&label) {
         return Err(Code::BadArguments);
     }
-    let issuer = shared.key_with_purpose("delegation").ok_or(Code::Unavailable)?;
-    let issuer_key = PublicKey::parse(&issuer.public_line()).map_err(|_| Code::Unavailable)?;
+    let bundle_config = BundleConfig {
+        services: args
+            .services
+            .iter()
+            .map(|s| Service { host: s.host.clone(), name: s.name.clone(), url: s.url.clone() })
+            .collect(),
+        deadline_seconds: args.deadline_seconds.unwrap_or(DEFAULT_DEADLINE_SECONDS),
+        tls_root: args.tls_root,
+    };
     let question = format!(
         "start an agent for {person}: groups {}; automatic up to {}/{}/{}, ask up to {}/{}/{}; valid {valid} seconds",
         if groups.is_empty() { "(none)".to_owned() } else { groups.join(",") },
@@ -151,86 +110,77 @@ pub fn start(shared: &Shared, args: StartArgs) -> Result<(Value, String), Code> 
         Outcome::Answer(false) | Outcome::Timeout => return Err(Code::PresenceDenied),
         Outcome::Unavailable | Outcome::Cancelled => return Err(Code::Unavailable),
     }
-
+    let issuer = shared.key_with_purpose("delegation").ok_or(Code::Unavailable)?;
     let now = shared.now();
-    let now_secs = u64::try_from(now.unix()).map_err(|_| Code::Unavailable)?;
-    let key = AgentKey::generate().map_err(|_| Code::Unavailable)?;
-    let public: [u8; 32] =
-        key.public_blob()[key.public_blob().len() - 32..].try_into().map_err(|_| Code::Unavailable)?;
-    let parts = CertificateParts {
-        person: &person,
-        groups: &groups,
-        label: &label,
-        valid_after: now_secs.saturating_sub(BACKDATE_SECONDS.unsigned_abs()),
-        valid_before: now_secs + valid,
-        serial: now_secs,
-    };
-    let to_sign = certificate_to_sign(&public, &parts, &issuer.blob).map_err(|_| Code::Unavailable)?;
-    let signature = shared
-        .holder
-        .lock()
-        .map_err(|_| Code::Unavailable)?
-        .sign(&issuer.blob, &to_sign)
-        .map_err(|_| Code::Unavailable)?;
-    let blob = certificate_blob(&to_sign, &signature);
-    let line = certificate_line(&blob);
-    let id = fingerprint(&key.public_blob());
-    if !self_check(&key, &blob, &issuer_key, &person, &groups, &id, now) {
-        return Err(Code::Unavailable);
-    }
-    let valid_until = now.unix() + i64::try_from(valid).map_err(|_| Code::BadArguments)?;
+    let issued = issue(
+        shared,
+        &shared.work_dir,
+        &Issuing { person: &person, groups: &groups, label: &label, valid_seconds: valid, now: now.unix() },
+    )
+    .map_err(|e| {
+        eprintln!("pledge: issuing a certificate failed: {e}");
+        Code::Unavailable
+    })?;
+    // Written once, and read back with `pact`'s own parser before it is handed out.
+    let bundle = Bundle::write(&bundle_config, &issued.key, &issued.certificate, now).map_err(|e| {
+        eprintln!("pledge: the bundle is refused: {e}");
+        Code::BadArguments
+    })?;
+    let id = issued.agent.delegation.as_str().to_owned();
+    let valid_until = i64::try_from(issued.agent.valid_before).map_err(|_| Code::Unavailable)?;
     let delegation = Delegation {
         id: id.clone(),
-        agent_public: key.public_line(),
-        certificate: line.clone(),
-        person: person.clone(),
-        groups: groups.clone(),
+        agent_public: issued.agent_public.clone(),
+        certificate: issued.certificate.clone(),
+        person,
+        groups,
         automatic: RatingWords::of(automatic),
         ask: RatingWords::of(ask),
-        issuer: issuer.fingerprint.clone(),
+        issuer: issuer.fingerprint,
         issued: now.unix(),
         valid_until,
-        state: State::Pending,
         withdrawn: None,
         last_asked: None,
     };
-    shared.approvals.delegations.add(delegation).map_err(|_| Code::Unavailable)?;
-    shared.event(
-        "delegation-issued",
-        json!({"delegation": id, "person": person, "groups": groups, "automatic": RatingWords::of(automatic), "ask": RatingWords::of(ask), "valid_until": Timestamp::from_unix(valid_until).map(|t| t.to_string())}),
-    );
-    let block = key.private_block(&label);
     let data = json!({
         "delegation": id,
-        "key_block": STANDARD.encode(block.expose()),
-        "certificate": STANDARD.encode(line.as_bytes()),
+        "bundle": STANDARD.encode(bundle.as_bytes()),
         "valid_until": Timestamp::from_unix(valid_until).map(|t| t.to_string()),
     });
-    Ok((data, id))
+    Ok((data, delegation))
 }
 
-/// `agents.delivered`: the bundle is written; the delegation signs from now on.
+/// `agents.delivered`: the bundle is written; the delegation exists from now on.
 ///
 /// # Errors
 ///
-/// [`Code::NotFound`] if no such delegation is pending.
-pub fn delivered(shared: &Shared, id: &str) -> Result<Value, Code> {
-    match shared.approvals.delegations.activate(id) {
-        Ok(true) => Ok(json!({})),
-        Ok(false) => Err(Code::NotFound),
-        Err(_) => Err(Code::Unavailable),
-    }
+/// [`Code::Unavailable`] if it cannot be stored.
+pub fn delivered(shared: &Shared, delegation: Delegation) -> Result<Value, Code> {
+    let (id, person, groups) = (delegation.id.clone(), delegation.person.clone(), delegation.groups.clone());
+    let (automatic, ask, until) = (delegation.automatic.clone(), delegation.ask.clone(), delegation.valid_until);
+    shared.approvals.delegations.add(delegation).map_err(|_| Code::Unavailable)?;
+    shared.event(
+        "delegation-issued",
+        json!({"delegation": id, "person": person, "groups": groups, "automatic": automatic, "ask": ask, "valid_until": Timestamp::from_unix(until).map(|t| t.to_string())}),
+    );
+    Ok(json!({}))
 }
 
-/// Withdraws a delegation and records it. `by` is `person` or `delivery-failed`.
+/// A delegation whose bundle was not delivered: it never existed for pledge;
+/// the record says so.
+pub fn abandoned(shared: &Shared, id: &str) {
+    shared.event("delegation-withdrawn", json!({"delegation": id, "by": "delivery-failed"}));
+}
+
+/// Withdraws a delegation and records it.
 ///
 /// # Errors
 ///
 /// [`Code::NotFound`] if there is none, or it was withdrawn already.
-pub fn withdraw(shared: &Shared, id: &str, by: &str) -> Result<Value, Code> {
+pub fn withdraw(shared: &Shared, id: &str) -> Result<Value, Code> {
     match shared.approvals.delegations.withdraw(id, shared.now().unix()) {
         Ok(true) => {
-            shared.event("delegation-withdrawn", json!({"delegation": id, "by": by}));
+            shared.event("delegation-withdrawn", json!({"delegation": id, "by": "person"}));
             Ok(json!({}))
         }
         Ok(false) => Err(Code::NotFound),
@@ -250,8 +200,6 @@ pub fn list(shared: &Shared) -> Value {
         .map(|d| {
             let state = if d.withdrawn.is_some() {
                 "withdrawn"
-            } else if d.state == State::Pending {
-                "pending"
             } else if now >= d.valid_until {
                 "ended"
             } else {

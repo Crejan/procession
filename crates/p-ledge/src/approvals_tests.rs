@@ -24,6 +24,7 @@ use p_act::{Call, CallContent, CallId, Document, Request, ServiceId, Timestamp};
 use serde_json::{Value, json};
 
 use crate::agents::{self, StartArgs};
+use crate::config::ServiceEntry;
 use crate::delegations::RatingWords;
 use crate::dialog::{Answer as Scripted, Outcome};
 use crate::holder::KeyType;
@@ -116,6 +117,10 @@ impl Lab {
     }
 
     fn with(extra: Value) -> Self {
+        Self::build(extra, KeyType::Ed25519)
+    }
+
+    fn build(extra: Value, delegation_type: KeyType) -> Self {
         let material = Material::new();
         let host = material.host_line();
         let rig = Rig::live([], move |dir| {
@@ -126,7 +131,7 @@ impl Lab {
         for purpose in ["delegation", "confirmed", "automatic"] {
             rig.shared
                 .create_key(
-                    KeyType::Ed25519,
+                    if purpose == "delegation" { delegation_type } else { KeyType::Ed25519 },
                     KeyMeta {
                         purpose: purpose.into(),
                         program: None,
@@ -141,27 +146,53 @@ impl Lab {
         Self { rig, material, next_call: 1, next_agent: 1 }
     }
 
-    /// An agent under a delegation `agents start` issued, with its bundle's key and certificate on disk.
+    fn start_args(
+        groups: &[&str],
+        automatic: Option<RatingWords>,
+        ask: Option<RatingWords>,
+        valid: Option<u64>,
+    ) -> StartArgs {
+        StartArgs {
+            groups: groups.iter().map(|g| (*g).to_owned()).collect(),
+            automatic_ceiling: automatic,
+            ask_ceiling: ask,
+            valid_seconds: valid,
+            label: None,
+            services: vec![ServiceEntry {
+                host: "a.example".into(),
+                name: "probe".into(),
+                url: "http://127.0.0.1:8443/mcp".into(),
+            }],
+            tls_root: None,
+            deadline_seconds: None,
+        }
+    }
+
+    /// Writes the key block and certificate of a bundle as `<name>` and `<name>-cert.pub`; the signer for them.
+    fn write_bundle(&self, data: &Value, name: &str) -> Signer {
+        let bundle = String::from_utf8(STANDARD.decode(data["bundle"].as_str().expect("bundle")).expect("base64"))
+            .expect("text");
+        let (_, rest) = bundle.split_once('\n').expect("line 1");
+        let end = "-----END OPENSSH PRIVATE KEY-----\n";
+        let split = rest.find(end).expect("key block") + end.len();
+        let (block, certificate) = rest.split_at(split);
+        let file = self.material.dir.path().join(name);
+        std::fs::write(&file, block).expect("key");
+        std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o600)).expect("chmod");
+        std::fs::write(format!("{}-cert.pub", file.display()), certificate).expect("cert");
+        Signer::certified(&file).expect("signer")
+    }
+
+    /// An agent under a delegation `agents start` issued and delivered, with its bundle's key and certificate on disk.
     fn agent(&mut self, groups: &[&str], automatic: RatingWords, ask: RatingWords, valid: u64) -> Agent {
         self.rig.dialogs.push(yes());
-        let args = StartArgs {
-            groups: groups.iter().map(|g| (*g).to_owned()).collect(),
-            automatic_ceiling: Some(automatic),
-            ask_ceiling: Some(ask),
-            valid_seconds: Some(valid),
-            label: None,
-        };
-        let (data, id) = agents::start(&self.rig.shared, args).expect("agents start");
-        let decode = |name: &str| {
-            String::from_utf8(STANDARD.decode(data[name].as_str().expect(name)).expect("base64")).expect("text")
-        };
-        let file = self.material.dir.path().join(format!("agent{}", self.next_agent));
+        let args = Self::start_args(groups, Some(automatic), Some(ask), Some(valid));
+        let (data, delegation) = agents::start(&self.rig.shared, args).expect("agents start");
+        let signer = self.write_bundle(&data, &format!("agent{}", self.next_agent));
         self.next_agent += 1;
-        std::fs::write(&file, decode("key_block")).expect("key");
-        std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o600)).expect("chmod");
-        std::fs::write(format!("{}-cert.pub", file.display()), decode("certificate")).expect("cert");
-        agents::delivered(&self.rig.shared, &id).expect("delivered");
-        Agent { id, signer: Signer::certified(&file).expect("signer") }
+        let id = delegation.id.clone();
+        agents::delivered(&self.rig.shared, delegation).expect("delivered");
+        Agent { id, signer }
     }
 
     fn default_agent(&mut self) -> Agent {
@@ -224,8 +255,12 @@ impl Lab {
             PublicKey::parse(&key.public_line()).expect("public key")
         };
         let (confirmed, automatic) = (key("confirmed"), key("automatic"));
-        verify_approval(request, approval, ApprovalTrust::PersonKeys { confirmed: &confirmed, automatic: &automatic })
-            .expect("the approval verifies with ssh-keygen")
+        verify_approval(
+            request,
+            approval,
+            ApprovalTrust::PersonKeys { person: "jan", confirmed: &confirmed, automatic: &automatic },
+        )
+        .expect("the approval verifies with ssh-keygen")
     }
 }
 
@@ -371,13 +406,7 @@ fn the_top_of_a_scale_is_never_signed_with_the_automatic_key_whatever_the_delega
     assert_eq!(lab.verifies(&request, approval(&answer)), ApprovalKind::Automatic);
     // And pledge refuses to issue a delegation whose automatic ceiling is above that.
     lab.rig.dialogs.push(yes());
-    let too_high = StartArgs {
-        groups: vec![],
-        automatic_ceiling: Some(words("secret", "none", "none")),
-        ask_ceiling: None,
-        valid_seconds: None,
-        label: None,
-    };
+    let too_high = Lab::start_args(&[], Some(words("secret", "none", "none")), None, None);
     assert_eq!(agents::start(&lab.rig.shared, too_high).err(), Some(crate::control::Code::Refused));
 }
 
@@ -572,7 +601,7 @@ fn a_call_under_a_withdrawn_delegation_is_refused_and_so_is_one_under_an_ended_o
     let (request, sig) = lab.make(&agent, &[], Rating::HARMLESS);
     let mut svc = lab.connect();
     approval(&svc.ask(&request, &sig));
-    agents::withdraw(&lab.rig.shared, &agent.id, "person").expect("withdraw");
+    agents::withdraw(&lab.rig.shared, &agent.id).expect("withdraw");
     let (later, later_sig) = lab.make(&agent, &["later"], Rating::HARMLESS);
     assert_eq!(refusal(&svc.ask(&later, &later_sig)), PledgeReason::DelegationWithdrawn);
     assert_eq!(refusal(&svc.ask(&later, &later_sig)), PledgeReason::DelegationWithdrawn, "a verdict, kept");
@@ -632,49 +661,57 @@ fn a_call_whose_signature_is_over_other_bytes_is_refused_even_under_a_real_deleg
 }
 
 #[test]
-fn a_delegation_signs_nothing_until_its_bundle_is_written_and_is_withdrawn_if_it_never_is() {
+fn an_agent_under_a_p256_delegation_key_is_approved_and_its_call_verifies() {
+    let mut lab = Lab::build(json!({}), KeyType::EcdsaP256);
+    let agent = lab.default_agent();
+    let (request, sig) = lab.make(&agent, &["pid=1"], Rating::HARMLESS);
+    let answer = lab.connect().ask(&request, &sig);
+    assert_eq!(lab.verifies(&request, approval(&answer)), ApprovalKind::Automatic);
+    let delegation = lab.rig.shared.approvals.delegations.get(&agent.id).expect("delegation");
+    let issuer = lab.rig.shared.key_by_fingerprint(&delegation.issuer).expect("issuer");
+    assert!(issuer.public_line().starts_with("ecdsa-sha2-nistp256 "));
+}
+
+#[test]
+fn a_delegation_exists_for_pledge_only_from_delivered() {
     let mut lab = Lab::new();
     lab.rig.dialogs.push(yes());
-    let (data, id) = agents::start(
-        &lab.rig.shared,
-        StartArgs { groups: vec![], automatic_ceiling: None, ask_ceiling: None, valid_seconds: None, label: None },
-    )
-    .expect("start");
-    let file = lab.material.dir.path().join("pending");
-    std::fs::write(&file, STANDARD.decode(data["key_block"].as_str().expect("key")).expect("b64")).expect("key");
-    std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o600)).expect("chmod");
-    std::fs::write(
-        format!("{}-cert.pub", file.display()),
-        STANDARD.decode(data["certificate"].as_str().expect("cert")).expect("b64"),
-    )
-    .expect("cert");
-    let agent = Agent { id: id.clone(), signer: Signer::certified(&file).expect("signer") };
+    let (data, delegation) = agents::start(&lab.rig.shared, Lab::start_args(&[], None, None, None)).expect("start");
+    let signer = lab.write_bundle(&data, "pending");
+    let agent = Agent { id: delegation.id.clone(), signer };
     let (request, sig) = lab.make(&agent, &[], Rating::HARMLESS);
-    assert_eq!(refusal(&lab.connect().ask(&request, &sig)), PledgeReason::UnknownDelegation, "pending");
-    assert_eq!(agents::list(&lab.rig.shared)["delegations"][0]["state"], "pending");
-    agents::delivered(&lab.rig.shared, &id).expect("delivered");
+    assert_eq!(
+        refusal(&lab.connect().ask(&request, &sig)),
+        PledgeReason::UnknownDelegation,
+        "not delivered: pledge has never heard of it"
+    );
+    assert!(agents::list(&lab.rig.shared)["delegations"].as_array().expect("list").is_empty(), "written nowhere");
+    assert!(lab.rig.shared.approvals.delegations.all().is_empty());
+    agents::delivered(&lab.rig.shared, delegation).expect("delivered");
     let (request, sig) = lab.make(&agent, &["after"], Rating::HARMLESS);
     approval(&lab.connect().ask(&request, &sig));
     assert_eq!(agents::list(&lab.rig.shared)["delegations"][0]["state"], "active");
 }
 
 #[test]
-fn a_control_connection_that_ends_before_the_bundle_is_delivered_withdraws_the_delegation() {
+fn a_control_connection_that_ends_before_delivery_leaves_only_a_record_entry() {
     let lab = Lab::new();
     lab.rig.dialogs.push(yes());
     let (client, server) = UnixStream::pair().expect("pair");
     let shared = Arc::clone(&lab.rig.shared);
     let handler = thread::spawn(move || crate::control::serve(&shared, server));
     let mut client = crate::control::Client::from_stream(client);
-    let data = client.call("agents.start", json!({"groups": ["admins"]})).expect("start");
+    let mut args = json!({"groups": ["admins"], "services": [{"host": "a.example", "name": "probe", "url": "http://127.0.0.1:8443/mcp"}]});
+    args["valid_seconds"] = json!(3600);
+    let data = client.call("agents.start", args).expect("start");
     let id = data["delegation"].as_str().expect("id").to_owned();
     drop(client);
     handler.join().expect("handler");
-    let list = agents::list(&lab.rig.shared);
-    assert_eq!(list["delegations"][0]["state"], "withdrawn");
+    assert!(lab.rig.shared.approvals.delegations.all().is_empty(), "it never existed");
     assert!(lab.rig.record().iter().any(|e| e["event"] == "delegation-withdrawn"
         && e["by"] == "delivery-failed"
         && e["delegation"] == id.as_str()));
+    assert!(!lab.rig.record().iter().any(|e| e["event"] == "delegation-issued"));
 }
 
 #[test]

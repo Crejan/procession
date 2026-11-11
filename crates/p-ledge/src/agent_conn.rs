@@ -10,15 +10,15 @@ use std::io::{Read, Write};
 
 use serde_json::{Map, Value, json};
 
+use crate::agent::Refusal;
 use crate::agent::binding::{EXTENSION_NAME, Session};
-use crate::agent::host_key::fingerprint;
 use crate::agent::known_hosts::{HostName, KnownHosts};
 use crate::agent::message::{self, Identity, Message, read_message};
 use crate::agent::sign_content::SignContent;
 use crate::agent::text::is_showable;
 use crate::dialog::{Description, Outcome, Wait, describe};
 use crate::mute::DECLINES;
-use crate::policy::{Admission, Reason, SigningRequest, Verdict, sshsig_use};
+use crate::policy::{Admission, Reason, SigningRequest, Verdict, login_use, sshsig_use};
 use crate::record::hash_line;
 use crate::shared::{KeyInfo, Shared};
 
@@ -123,7 +123,13 @@ fn sign(shared: &Shared, program: Option<&str>, session: &Session, key_blob: &[u
         return finish(shared, &attempt, &End::Refused("key-not-offered"));
     }
     // A login must carry what SPEC.md section 3 asks; a forwarded connection is refused.
-    if let Some(refusal) = session.refusal(&content, shared.require_binding) {
+    if let Some(refusal) = session.refusal(&content, true) {
+        if refusal == Refusal::HostNotVerified {
+            // A client that does not bind cannot use pledge's keys; there is no setting for it.
+            shared.dialogs.tell(&format!(
+                "{program} asked to sign in without proving which host it is for (session-bind@openssh.com): refused. A client older than OpenSSH 8.9 cannot use pledge's keys."
+            ));
+        }
         return finish(shared, &attempt, &End::Refused(refusal.label()));
     }
     let now = u64::try_from(shared.now().unix()).unwrap_or(0);
@@ -131,22 +137,10 @@ fn sign(shared: &Shared, program: Option<&str>, session: &Session, key_blob: &[u
         return finish(shared, &attempt, &End::Refused("muted"));
     }
     let description = describe(&content, verified.as_ref(), &names);
-    let end = decide(shared, program, key.as_ref(), &content, &names, &description, key_blob, data);
+    let verified_fingerprint = verified.as_ref().map(|binding| binding.host_key.fingerprint());
+    let end =
+        decide(shared, program, key.as_ref(), &content, verified_fingerprint.as_deref(), &description, key_blob, data);
     finish(shared, &attempt, &end)
-}
-
-/// The uses a signing request could be matched to a key's purpose under: a
-/// login names its host as `known_hosts` does, and a host can have several
-/// names.
-fn uses(content: &SignContent, names: &HostName, verified_fingerprint: Option<&str>) -> Vec<String> {
-    match content {
-        SignContent::Sshsig(signature) => vec![sshsig_use(&signature.namespace)],
-        SignContent::Userauth(login) => match (names, verified_fingerprint) {
-            (HostName::Named(names), _) => names.iter().map(|name| format!("login {}@{name}", login.user)).collect(),
-            (_, Some(fingerprint)) => vec![format!("login {}@{fingerprint}", login.user)],
-            (_, None) => vec![format!("login {}@?", login.user)],
-        },
-    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -155,34 +149,21 @@ fn decide(
     program: &str,
     key: Option<&KeyInfo>,
     content: &SignContent,
-    names: &HostName,
+    verified_host: Option<&str>,
     description: &Description,
     key_blob: &[u8],
     data: &[u8],
 ) -> End {
-    let verified_fingerprint = match content {
-        SignContent::Userauth(login) => login.host_key.as_deref().map(fingerprint),
-        SignContent::Sshsig(_) => None,
+    // What the request is, for the key's purpose: a login is for a user on a host KEY.
+    let use_ = match (content, verified_host) {
+        (SignContent::Sshsig(signature), _) => sshsig_use(&signature.namespace),
+        (SignContent::Userauth(login), Some(fingerprint)) => login_use(&login.user, fingerprint),
+        (SignContent::Userauth(_), None) => return End::Refused("host-not-verified"),
     };
     let key_name = key.map_or("?", |key| key.fingerprint.as_str());
     let verdict = {
         let Ok(policy) = shared.policy.lock() else { return End::Refused("unavailable") };
-        let verdicts: Vec<Verdict> = uses(content, names, verified_fingerprint.as_deref())
-            .into_iter()
-            .map(|use_| {
-                policy.decide(&SigningRequest {
-                    program: program.to_owned(),
-                    key: key_name.to_owned(),
-                    use_: Some(use_),
-                })
-            })
-            .collect();
-        verdicts
-            .iter()
-            .find(|verdict| !matches!(verdict, Verdict::Refuse(Reason::KeyNotOffered)))
-            .or(verdicts.first())
-            .copied()
-            .unwrap_or(Verdict::Refuse(Reason::NotUnderstood))
+        policy.decide(&SigningRequest { program: program.to_owned(), key: key_name.to_owned(), use_: Some(use_) })
     };
     let wait = Wait::up_to(shared.dialog_timeout);
     let presence = |shared: &Shared| match shared.dialogs.presence(program, description, &wait) {
@@ -229,7 +210,8 @@ fn admission(shared: &Shared, program: &str, answer: Admission) -> Option<End> {
     }
     match (goes_on, answer) {
         (true, _) => None,
-        (false, Admission::Block) => Some(End::Refused("blocked")),
+        // The person said no to this signing request: it is a decline; the block is an event.
+        (false, Admission::Block) => Some(End::Declined),
         (false, _) => Some(declined(shared, program)),
     }
 }
@@ -325,6 +307,7 @@ mod tests {
     use crate::agent::testing::{SESSION_ID, TestKey, UserauthData, bind_body, ed25519_key, known_hosts_line, sshsig};
     use crate::agent::wire::{Reader, strings};
     use crate::dialog::Answer;
+    use crate::policy::login_use;
     use crate::record::Record;
     use crate::shared::KeyMeta;
     use crate::testing::Rig;
@@ -456,7 +439,7 @@ mod tests {
         assert_eq!(rig.shown().len(), shown, "no second dialog");
         let record = rig.record();
         let reasons: Vec<_> = record.iter().filter(|e| e["type"] == "signing-request").map(result_of).collect();
-        assert_eq!(reasons, [("refused", Some("blocked")), ("refused", Some("blocked"))]);
+        assert_eq!(reasons, [("declined", None), ("refused", Some("blocked"))]);
     }
 
     #[test]
@@ -514,13 +497,14 @@ mod tests {
         // Unbound: refused at once.
         assert_eq!(exchange(&mut rig.connect("/usr/bin/ssh"), &sign_message(&key, &login)).0, message::FAILURE);
         assert_eq!(result_of(&rig.record()[0]), ("refused", Some("host-not-verified")));
-        assert!(rig.shown().is_empty());
+        assert!(rig.shown().iter().all(|s| s.starts_with("tell ")), "no dialog: {:?}", rig.shown());
+        assert!(rig.shown()[0].contains("session-bind@openssh.com"), "the person is told why: {:?}", rig.shown());
         // Bound to the host: asked, shows the host's name, signs.
         let mut conn = bound_connection(&rig, "/usr/bin/ssh", &host, "backup.example.org");
         let (kind, body) = exchange(&mut conn, &sign_message(&key, &login));
         assert_eq!(kind, SIGN_RESPONSE);
         assert!(verifies(&key, &login, &body));
-        let shown = rig.shown();
+        let shown: Vec<String> = rig.shown().into_iter().filter(|s| !s.starts_with("tell ")).collect();
         assert!(shown[0].contains("host: backup.example.org (SHA256:") && shown[0].contains("user: jan"), "{shown:?}");
         let entry = rig.record().into_iter().rfind(|e| e["type"] == "signing-request").expect("entry");
         assert_eq!(
@@ -539,7 +523,10 @@ mod tests {
         let bound = rig.key(KeyMeta {
             purpose: "bound".into(),
             program: Some("/opt/preserve".into()),
-            use_: Some("login jan@backup.example.org".into()),
+            use_: Some(login_use(
+                "jan",
+                &crate::agent::host_key::HostKey::parse(&ed25519_key(62).blob).expect("key").fingerprint(),
+            )),
             comment: "bound".into(),
             key_type: String::new(),
             created: String::new(),

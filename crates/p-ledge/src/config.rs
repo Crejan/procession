@@ -18,9 +18,6 @@ use crate::error::{Error, Result};
 pub const DEFAULT_MAX_WAITING: usize = 5;
 /// The call deadline an agent is told to use, by default, in seconds.
 pub const DEFAULT_DEADLINE_SECONDS: u32 = 120;
-/// The most a call's deadline may be ahead, in seconds (R7), and the most
-/// `deadline_seconds` may be.
-pub const MAX_DEADLINE_SECONDS: u32 = 600;
 
 /// A host and the key that certifies its services' keys.
 #[derive(Debug, Clone, Deserialize)]
@@ -119,8 +116,11 @@ impl Config {
                 ));
             }
         }
-        if self.deadline_seconds.is_some_and(|d| !(1..=MAX_DEADLINE_SECONDS).contains(&d)) {
-            return Err(format!("deadline_seconds must be 1 to {MAX_DEADLINE_SECONDS}"));
+        if self
+            .deadline_seconds
+            .is_some_and(|d| !(1..=p_act::limits::MAX_DEADLINE_AHEAD_SECONDS).contains(&i64::from(d)))
+        {
+            return Err(format!("deadline_seconds must be 1 to {}", p_act::limits::MAX_DEADLINE_AHEAD_SECONDS));
         }
         if self.max_waiting == Some(0) {
             return Err("max_waiting must be at least 1".into());

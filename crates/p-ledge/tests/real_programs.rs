@@ -169,9 +169,18 @@ fn a_blocked_program_stays_blocked_and_a_second_pledge_serve_is_refused() {
         .expect("run");
     assert_eq!(second.status.code(), Some(3), "{}", text(&second));
     assert!(text(&second).contains("in use"), "{}", text(&second));
-    let reasons: Vec<String> =
-        server.history().iter().filter_map(|e| e["reason"].as_str().map(str::to_owned)).collect();
-    assert_eq!(reasons, ["blocked", "blocked"], "the block itself, then the refusal without a dialog");
+    let history = server.history();
+    let results: Vec<(String, String)> = history
+        .iter()
+        .filter(|e| e["type"] == "signing-request")
+        .map(|e| (e["result"].as_str().unwrap_or("").to_owned(), e["reason"].as_str().unwrap_or("").to_owned()))
+        .collect();
+    assert_eq!(
+        results,
+        [("declined".to_owned(), String::new()), ("refused".to_owned(), "blocked".to_owned())],
+        "the block is a decline of that signing request, later ones are refused: blocked"
+    );
+    assert!(history.iter().any(|e| e["event"] == "program-blocked"), "and the block itself is an event");
 }
 
 /// A login with the real `ssh` against a local `sshd`. It needs to bind a TCP

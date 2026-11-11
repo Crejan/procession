@@ -31,8 +31,8 @@ use serde_json::{Map, Value, json};
 
 use crate::agent::text::is_showable;
 use crate::answers::{Answers, Stored};
-use crate::config::{Config, MAX_DEADLINE_SECONDS};
-use crate::delegations::{Delegations, RatingWords, State};
+use crate::config::Config;
+use crate::delegations::{Delegations, RatingWords};
 use crate::dialog::{Description, Outcome as Dialog, Wait};
 use crate::mute::Muter;
 use crate::shared::{KeyInfo, Shared};
@@ -41,7 +41,7 @@ use crate::sshsig;
 /// The namespace of an approval.
 pub const APPROVAL_NAMESPACE: &str = "approval-v1@procession";
 /// The tolerated clock difference, which applies only to "more than ten minutes ahead".
-pub const TOLERANCE_SECONDS: i64 = 60;
+pub const TOLERANCE_SECONDS: i64 = p_act::limits::CLOCK_TOLERANCE_SECONDS;
 
 /// Where an answer goes: one connection's writer.
 pub type Send = Arc<dyn Fn(&Answer) + std::marker::Send + Sync>;
@@ -165,7 +165,7 @@ struct Facts {
 /// Seconds from `now` that a stored entry is kept: to the call's deadline, but
 /// not past the longest a deadline may be.
 fn expiry(now: i64, deadline: Option<Timestamp>) -> i64 {
-    let cap = now + i64::from(MAX_DEADLINE_SECONDS) + TOLERANCE_SECONDS;
+    let cap = now + p_act::limits::MAX_DEADLINE_AHEAD_SECONDS + TOLERANCE_SECONDS;
     deadline.map_or(cap, |d| d.unix().min(cap))
 }
 
@@ -306,10 +306,7 @@ fn process(shared: &Shared, submit: &Submit, hash: &str, cancelled: &Arc<AtomicB
     let Some(delegation) = approvals.delegations.get(agent.delegation.as_str()) else {
         return refuse(PledgeReason::UnknownDelegation);
     };
-    if approvals.config.person.as_deref() != Some(agent.person.as_str())
-        || delegation.person != agent.person
-        || delegation.state == State::Pending
-    {
+    if approvals.config.person.as_deref() != Some(agent.person.as_str()) || delegation.person != agent.person {
         return refuse(PledgeReason::UnknownDelegation);
     }
     if delegation.withdrawn.is_some() {
@@ -336,7 +333,7 @@ fn process(shared: &Shared, submit: &Submit, hash: &str, cancelled: &Arc<AtomicB
     if deadline <= now {
         return refuse(PledgeReason::DeadlinePast);
     }
-    if deadline.unix() - now.unix() > i64::from(MAX_DEADLINE_SECONDS) + TOLERANCE_SECONDS {
+    if deadline.unix() - now.unix() > p_act::limits::MAX_DEADLINE_AHEAD_SECONDS + TOLERANCE_SECONDS {
         return refuse(PledgeReason::DeadlineTooFar);
     }
     // The identifier: used by another request?

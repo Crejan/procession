@@ -436,3 +436,105 @@ Merged `agent/p-act` (`p_act::exchange`, `verify_call_agent`,
 4. Is a delegation that was started but whose bundle was not delivered
    rightly `withdrawn` in the record (`by` `delivery-failed`), or should it
    have its own event?
+
+## Step 3, second pass: the designer's decisions A to D
+
+Merged `integration` (SPEC sections 2, 3, 4) and `agent/p-act` 64077e0.
+This replaces the parts of the step 3 report that say pledge writes a
+certificate, a key block or a bundle.
+
+**A. No writers in pledge.** `ssh-keygen -s <delegation .pub> -U` works against
+my SSH agent code on the first try, for an Ed25519 and for a P-256 delegation
+key, with `-O clear` and `-O extension:groups@procession=...`; nothing failed,
+so nothing of my own was written. The one seam is `src/issue.rs`:
+`issue(shared, work_dir, &Issuing{person, groups, label, valid_seconds, now})
+-> Issued{key: KeyBlock, agent_public, certificate, agent}`; nothing else knows
+how. Inside: `ssh-keygen -t ed25519 -N ''` into a private directory (0700), key
+read and removed at once; a private SSH agent socket in that directory,
+offering only the delegation key; `ssh-keygen -s ... -U` with `SSH_AUTH_SOCK`
+set to it; the socket and directory are gone when it exits. The reader reads
+the certificate out of the signing request (with p-act's `agent_certificate`,
+the signature field padded empty) and lets the key holder sign only if it is
+the certificate this issuing asked for: this person, exactly these groups,
+this label, validity within a few seconds of what was chosen (and at most 24 h
+plus the backdating), no critical option, no other extension, Ed25519 certified
+key (all p-act's rules, plus the comparison). The result is read again with
+`agent_certificate` and compared before it is used. The key holder still parses
+nothing. `openssh.rs`, my bundle writer and the probe call are deleted; the key
+is p-act's `KeyBlock` (prints nothing, zeroed on drop); the bundle is
+`Bundle::write`, which reads it back with `pact`'s own parser. `p_act::limits`
+replaces my copies of 600/60/8 h/24 h.
+Tests: `ssh-keygen` issues for both delegation key types; six attempts at
+other certificates (another person, other groups, no groups, a week, another
+label, no `-O clear`) each get no signature from the private agent and
+`ssh-keygen` fails; nothing is left behind in the work directory; the
+certificate against `ssh-keygen -L` and a reference made with `-O
+extension:`; the key block against `ssh-keygen -y`; calls signed by
+`ssh-keygen -Y sign` with that key and certificate verify through
+`verify_call_agent`; an agent under a P-256 delegation key is approved.
+
+**B. Delivery.** A delegation exists for pledge only from `agents.delivered`:
+until then it is held on the control connection that started it, is not in
+`delegations.json`, signs for no call (`unknown-delegation`), and a connection
+that ends first (or `agents.failed`) leaves one record entry,
+`delegation-withdrawn` by `delivery-failed`. `State::Pending` is gone. A bundle
+is never written to a terminal and there is no option (`--to-terminal` is
+removed). `agents.start` now composes the bundle in `pledge serve` and replies
+with its bytes (base64); the command line writes them once (`--output` created
+exclusively, mode 0600, or a pipe). `control-sock.md` is updated as the review
+said.
+
+**C. Services in the bundle**: `--service host/name=url` (repeatable),
+`--tls-root FILE`, `--deadline S`, overriding `config.json`'s `services`,
+`tls_root`, `deadline_seconds`; never the broker's word.
+
+**D. The SSH agent half.** (1) A login without a verified `session-bind`
+is always refused (`require_binding` is gone); the record says
+`host-not-verified` and the terminal tells the person why. (2) A bound key is
+bound to a user and a host key's fingerprint (`policy::login_use`, `keys create
+bound --program P --user U --host-key SHA256:...`); `known_hosts` names are
+shown only. (3) "Block" is recorded as `declined` for that signing request, the
+block as the event `program-blocked`, later requests are refused `blocked`; it
+does not count toward muting.
+
+`ApprovalTrust::PersonKeys` now takes the person: my tests pass `jan`.
+
+### Verified (all of step 2 and 3)
+
+`cargo test -p p-ledge --offline`: 163 unit + 3 + 6 integration tests, three
+runs in a row clean; `clippy --all-targets -D warnings`, `fmt --check` and `doc`
+clean. Earlier mutation checks stand; the new code's behaviours each have a
+failing-then-passing test (six refused certificates, the pending/delivered
+cases, bound by fingerprint, block as decline, unbound refused).
+
+### The login test against a local sshd: written, never run
+
+`tests/real_programs.rs`, test `ssh_logs_in_through_pledge_to_a_local_sshd_or_is_skipped`.
+Here binding a TCP port is refused, so it prints
+`SKIPPED ssh login test: binding a local TCP port is not allowed here` and
+returns, which cargo counts as a pass. To run it by hand on the owner's
+machine (a Mac or Linux box where `127.0.0.1` can be bound, with
+`/usr/sbin/sshd` and OpenSSH 8.9 or later):
+
+```
+cargo test -p p-ledge --test real_programs ssh_logs_in -- --nocapture
+```
+
+It counts only if no `SKIPPED` line is printed. It makes a host key and a
+`known_hosts`, starts `pledge serve` with that `known_hosts`, makes a shared
+key, starts an unprivileged `sshd -D -f <config>` (`UsePAM no`,
+`StrictModes no`, `AuthorizedKeysFile` = pledge's key) on a free port, runs
+`ssh -p PORT user@127.0.0.1 true` with `IdentityAgent` set to pledge's
+socket, admits `ssh` in the dialog (answers `g`, its path, `y` on pledge's
+standard input) and checks that the login succeeded and the record has an
+approved login with `host_verified: true` and the host's name. It has never
+executed: if it fails on first run, look at `sshd`'s own refusal first (a
+non-root `sshd` can be picky), then at the test.
+
+### Not verified (changed from the step 3 report)
+
+- The real `pact`: its parser reads what `Bundle::write` makes (that is how
+  `Bundle::write` checks), and `ssh-keygen` signs with the key and certificate
+  in it; `pact serve` itself was not run.
+- `service_group` with a group other than the user's own.
+- Everything that needs a Secure Enclave, a broker or a real `probe`.
