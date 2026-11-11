@@ -1,0 +1,18 @@
+[package]
+name = "p-reserve-gui"
+version = "0.0.0"
+edition = "2024"
+rust-version = "1.85"
+description = "Desktop app of p-reserve: the tray icon and the window onto the daemon"
+license = "MIT OR Apache-2.0"
+keywords = ["backup", "restic", "rustic", "gui"]
+categories = ["gui"]
+include = ["src/**"]
+publish = false
+
+[[bin]]
+name = "preserve-gui"
+path = "src/main.rs"
+
+[dependencies]
+p-reserve-core = { path = "../p-reserve-core", version = "0.0.0" }

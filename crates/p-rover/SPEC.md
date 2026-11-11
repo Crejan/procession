@@ -60,6 +60,7 @@ its own output and none that puts it together for one process.
 | `wake <a> <b> [--duration 10s]` | Two threads (a tid, or a comm that exactly one FIFO/RR thread carries) over the sched tracepoints: period of each, phase of b after a, who wakes b (by comm and tid), wake-to-run latency and b's runtime per activation, as histograms |
 | `clock` | Who disciplines `CLOCK_REALTIME`: chrony state and sources, ptp4l/phc2sys state, PTP hardware clocks; flags two disciplining services at once |
 | `lastboot [--boot -1]` | Freeze post-mortem: the previous boot's kernel log filtered for rcu, watchdog, stall, hung, blocked, oom, lockup, panic, `BUG:`, Oops, NMI, Call Trace, thermal, throttling; its last lines and whether they end in an orderly shutdown; the boot list; which hang detectors the RT tuning has disabled (absence of a stall report is not evidence of a clean shutdown) |
+| `hung [--all] [--duration 2s] [--stack-lines 14] [--max 50]` | Live hang triage, the running counterpart of `lastboot`: tasks in D state, sampled twice `--duration` apart so a passing D is not reported (both samples kept); per task pid, tid, comm, uid, ppid, wchan, kernel stack (root only, else marked unreadable), exe and cwd by readlink only (never stat, so no autofs or hung-NFS trigger), how long it has been in D when schedstat allows; grouped by wait class from wchan and stack: NFS/RPC server wait (`rpc_wait_bit_killable`, `nfs_wait_bit_killable`, `xprt`), local lock (`mutex_lock`, `*_lock`, `rwsem`), block I/O, other. `--all` adds tasks in S whose wchan is NFS/RPC. Also the hang detector state (`hung_task_timeout_secs`, `hung_task_warnings`) |
 | `serial` | Serial ports: which ttyS is the console, IRQ, tx/rx counters, modem lines, PCI path, `console=` on the cmdline, getty units |
 | `analyze --pid <pid>` | The flagship, below |
 
@@ -348,6 +349,7 @@ Initial rules (`analyze` unless noted):
 | `two-clock-masters` | two services discipline the clock (`clock`) | none |
 | `freeze-signature` | stall, hung-task or watchdog lines in the previous boot (`lastboot`) | none |
 | `unclean-shutdown` | the previous boot's log does not end in an orderly shutdown (`lastboot`) | none |
+| `hung-tasks` | tasks stay in D across both samples (`hung`); severity by count and wait class, NFS/RPC waits named with their mount | none |
 | `isolation-drift` | live isolated set differs from the declared one (`cmdline`; refuses every probe) | none |
 | `tick-on-isolated` | LOC rate on an isolated CPU far above `CONFIG_HZ` (`irq`) | none; points at `sched` |
 | `stale-probe` | an unrestored probe ledger exists (every subcommand) | none; names `probe restore` |
@@ -381,7 +383,7 @@ can judge how much the measurement disturbed what it measured.
 
 1. `p-roc` extracted from p-usher (see Shared base); p-usher depends on it.
 2. Static observe subcommands: `procs`, `sched`, `irq`, `cmdline`, `nic`
-   (+ `--delta`), `serial`, `clock`, `lastboot`; the JSON conventions;
+   (+ `--delta`), `serial`, `clock`, `lastboot`, `hung`; the JSON conventions;
    `analyze --static`, including the kernel-bypass detection.
 3. Tracing and packets: `wake`, `cycle`, traced `analyze` (A1-A8).
 4. Probes: `probe jitter`, `probe nic-sweep`.
@@ -395,7 +397,8 @@ site diagnostics framework (TUM AIDX lab, `tum-provisioning`,
 behaviour and heuristics (micro-sleep poller detection in `sched`, the
 filter and disabled-detector report in `lastboot`, the guards of `jitter`,
 the matrix and restore logic of `nic-sweep`, the frame decoding of `ecat`,
-the probes of `wake`, the ledger and guards in `lib/aidxdiag.py`). Port the
+the probes of `wake`, the ledger and guards in `lib/aidxdiag.py`; `hung`
+from `verbs/nfs-client/hung`, widened from NFS to every D-state wait). Port the
 behaviour, not the framework: no policy file of that framework, no
 allow-lists, no host gating, no arming file, no dispatcher; site values
 become config keys above. Not ported: the expected IRQ mask read from
@@ -435,19 +438,19 @@ allowed set from `/etc/p-usher.toml` through p-roc.
 
 ## Open decisions
 
-- **BPF toolchain vs `cargo install`.** aya needs `bpf-linker` to build the
-  BPF part; libbpf-rs needs clang. Both burden every `cargo install`.
-  Proposed: aya in userspace (pure Rust, does the CO-RE relocations
-  itself), the BPF objects built by the maintainer with `bpf-linker` in a
-  `cargo xtask` step, committed and shipped in the crate, CI checking that
-  object and source agree; tracing behind a Cargo feature so a build
-  without it still has every static subcommand.
 - **Link layer of the site's master.** Proprietary; whether it sits on a
   raw socket or bypasses the kernel (see Kernel-bypass masters) is to be
   checked on a host. It decides whether A4–A6 and `cycle` apply there or
   the report stops at A1–A3 and A7–A8.
 
 ## Resolved
+
+- **BPF toolchain** (decided 2026-11-11): aya in userspace (pure Rust, does
+  the CO-RE relocations itself); the BPF objects built by the maintainer
+  with `bpf-linker` in a `cargo xtask` step, committed and shipped in the
+  crate, CI checking that object and source agree; tracing behind a Cargo
+  feature so a build without it still has every static subcommand. So
+  `cargo install` needs neither clang nor `bpf-linker`.
 
 - **BTF on the target kernel** (Ubuntu realtime, checked 2026-10-29): present
   and usable. A bpftrace probe dereferencing `struct sk_buff` via BTF on

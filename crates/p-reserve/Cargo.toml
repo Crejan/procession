@@ -1,0 +1,18 @@
+[package]
+name = "p-reserve"
+version = "0.0.0"
+edition = "2024"
+rust-version = "1.85"
+description = "Backups of a host or a workstation into a restic-format repository: runs them, keeps them fresh, browses and restores them"
+license = "MIT OR Apache-2.0"
+keywords = ["backup", "restic", "rustic", "snapshot", "daemon"]
+categories = ["command-line-utilities", "filesystem"]
+include = ["src/**", "SPEC.md"]
+publish = false
+
+[[bin]]
+name = "preserve"
+path = "src/main.rs"
+
+[dependencies]
+p-reserve-core = { path = "../p-reserve-core", version = "0.0.0" }

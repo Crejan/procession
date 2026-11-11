@@ -1,0 +1,18 @@
+[package]
+name = "p-robe"
+version = "0.0.0"
+edition = "2024"
+rust-version = "1.85"
+description = "Diagnostics of a host as a fixed table of rated verbs, offered to agents as a service that asks before it acts"
+license = "MIT OR Apache-2.0"
+keywords = ["diagnostics", "agent", "mcp", "approval"]
+categories = ["command-line-utilities"]
+include = ["src/**", "SPEC.md"]
+publish = false
+
+[[bin]]
+name = "probe"
+path = "src/main.rs"
+
+[dependencies]
+p-ledge = { path = "../p-ledge", version = "0.0.0" }

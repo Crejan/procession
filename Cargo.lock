@@ -399,6 +399,38 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7e036b411754132fd6b74e94b74e9a13c5cf606fa93d1885c35860d3060820b1"
 
 [[package]]
+name = "p-ledge"
+version = "0.0.0"
+
+[[package]]
+name = "p-reserve"
+version = "0.0.0"
+dependencies = [
+ "p-reserve-core",
+]
+
+[[package]]
+name = "p-reserve-core"
+version = "0.0.0"
+dependencies = [
+ "serde",
+]
+
+[[package]]
+name = "p-reserve-gui"
+version = "0.0.0"
+dependencies = [
+ "p-reserve-core",
+]
+
+[[package]]
+name = "p-robe"
+version = "0.0.0"
+dependencies = [
+ "p-ledge",
+]
+
+[[package]]
 name = "p-usher"
 version = "0.1.0"
 dependencies = [

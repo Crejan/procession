@@ -1,0 +1,15 @@
+[package]
+name = "p-ledge"
+version = "0.0.0"
+edition = "2024"
+rust-version = "1.85"
+description = "Holds a person's keys on their own machine: an SSH agent with a rule per program, and the person's end of the approval system"
+license = "MIT OR Apache-2.0"
+keywords = ["ssh", "ssh-agent", "secure-enclave", "approval", "policy"]
+categories = ["command-line-utilities", "authentication"]
+include = ["src/**", "SPEC.md"]
+publish = false
+
+[[bin]]
+name = "pledge"
+path = "src/main.rs"

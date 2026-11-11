@@ -1,0 +1,14 @@
+[package]
+name = "p-reserve-core"
+version = "0.0.0"
+edition = "2024"
+rust-version = "1.85"
+description = "Library behind p-reserve: named outcomes, freshness, the ledger and the engine seam"
+license = "MIT OR Apache-2.0"
+keywords = ["backup", "restic", "rustic", "snapshot"]
+categories = ["filesystem"]
+include = ["src/**"]
+publish = false
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
