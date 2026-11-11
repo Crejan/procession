@@ -45,6 +45,8 @@ pub struct Admitted {
     pub identity: String,
     /// The rating the call was approved at (`--within`), if one was given.
     pub within: Option<Rating>,
+    /// The call's identifier (`--call`), if the service gave one.
+    pub call: Option<String>,
     pub verb: &'static Verb,
     pub args: Vec<String>,
 }
@@ -89,18 +91,39 @@ pub fn admit(caller: &Caller, argv: &[OsString]) -> Result<Admitted, Refusal> {
             None => return Err(refuse("argument is not UTF-8", who)),
         }
     }
-    // `--within <exposure>,<damage>,<disruption>` before the noun: the rating the
-    // call was approved at. It can only restrict: the call is refused if the
-    // dispatcher's own rating is above it. It is not an argument, which may not
-    // start with `-`; it is read here, in this place only.
-    let (within, words) = match words.as_slice() {
-        [flag, rating, rest @ ..] if flag == "--within" => match table::parse_rating(rating) {
-            Some(rating) => (Some(rating), rest.to_vec()),
-            None => return Err(refuse("bad --within: expected exposure,damage,disruption", who)),
-        },
-        [flag] if flag == "--within" => return Err(refuse("bad --within: expected exposure,damage,disruption", who)),
-        _ => (None, words),
-    };
+    // Flags before the noun, each at most once, in any order. `--within
+    // <exposure>,<damage>,<disruption>`: the rating the call was approved at; it
+    // can only restrict (the call is refused if the dispatcher's own rating is
+    // above it). `--call <uuid>`: the identifier of the call the service is
+    // running this for, written to every audit line so that an operator can join
+    // them to the service's own; it changes nothing else. They are not
+    // arguments, which may not start with `-`; they are read here, in this place only.
+    let (mut within, mut call, mut rest) = (None, None, words.as_slice());
+    loop {
+        match rest {
+            [flag, value, tail @ ..] if flag == "--within" && within.is_none() => {
+                within = Some(
+                    table::parse_rating(value)
+                        .ok_or_else(|| refuse("bad --within: expected exposure,damage,disruption", who))?,
+                );
+                rest = tail;
+            }
+            [flag, value, tail @ ..] if flag == "--call" && call.is_none() => {
+                call = Some(
+                    p_act::CallId::parse(value)
+                        .map_err(|_| refuse("bad --call: expected the call's identifier", who))?
+                        .as_str()
+                        .to_string(),
+                );
+                rest = tail;
+            }
+            [flag, ..] if flag == "--within" || flag == "--call" => {
+                return Err(refuse(format!("bad {flag}: a value is needed, and each once"), who));
+            }
+            _ => break,
+        }
+    }
+    let words = rest.to_vec();
     let [noun, verb, args @ ..] = words.as_slice() else {
         return Err(refuse("a noun and a verb are needed", who));
     };
@@ -130,7 +153,27 @@ pub fn admit(caller: &Caller, argv: &[OsString]) -> Result<Admitted, Refusal> {
     if matches!(row.availability, Availability::ServiceOnly) {
         return Err(refuse(format!("{} is offered by the service only", row.label()), who));
     }
-    Ok(Admitted { identity, within, verb: row, args: args.to_vec() })
+    Ok(Admitted { identity, within, call, verb: row, args: args.to_vec() })
+}
+
+/// The identifier of `--call`, if the leading flags hold a well-formed one: read
+/// before anything is checked, so that even a refusal can say which call it was.
+fn scan_call(argv: &[OsString]) -> Option<String> {
+    let mut rest = argv;
+    while let [flag, value, tail @ ..] = rest {
+        match flag.to_str() {
+            Some("--call") => return p_act::CallId::parse(value.to_str()?).ok().map(|id| id.as_str().to_string()),
+            Some("--within") => rest = tail,
+            _ => return None,
+        }
+    }
+    None
+}
+
+/// Where a call came from, for the audit lines.
+struct Origin<'a> {
+    from: &'a str,
+    call_id: Option<&'a str>,
 }
 
 /// What the dispatcher is wired to.
@@ -167,9 +210,10 @@ impl<'a> Dispatcher<'a> {
         let from =
             caller.from.as_deref().filter(|ip| ip.chars().all(|c| c.is_ascii_hexdigit() || c == '.' || c == ':'));
         let from = from.unwrap_or("-");
-        match self.try_run(caller, argv, from, out) {
+        let call_id = scan_call(argv);
+        match self.try_run(caller, argv, from, call_id.as_deref(), out) {
             Ok(rc) => rc,
-            Err(stop) => self.stopped(stop, caller, argv, from, out, err),
+            Err(stop) => self.stopped(stop, caller, argv, &Origin { from, call_id: call_id.as_deref() }, out, err),
         }
     }
 
@@ -178,10 +222,11 @@ impl<'a> Dispatcher<'a> {
         stop: Stop,
         caller: &Caller,
         argv: &[OsString],
-        from: &str,
+        origin: &Origin<'_>,
         out: &mut dyn Write,
         err: &mut dyn Write,
     ) -> u8 {
+        let (from, call_id) = (origin.from, origin.call_id);
         let who = caller.sudo_user.as_deref().map_or_else(|| "-".to_string(), |user| audit::clip(user, CLIP));
         let (code, event, reason, identity) = match stop {
             Stop::NoAudit(why) => {
@@ -193,8 +238,9 @@ impl<'a> Dispatcher<'a> {
             Stop::Unavailable(reason) => (RC_UNAVAILABLE, "unavailable", reason, who),
         };
         let cmd = audit::clip(&argv.iter().map(|w| w.to_string_lossy()).collect::<Vec<_>>().join(" "), CLIP);
-        let fields =
-            [("reason", reason.as_str()), ("identity", identity.as_str()), ("from", from), ("cmd", cmd.as_str())];
+        let mut fields =
+            vec![("reason", reason.as_str()), ("identity", identity.as_str()), ("from", from), ("cmd", cmd.as_str())];
+        fields.extend(call_id.map(|id| ("call", id)));
         if let Err(Stop::NoAudit(why)) = self.log(event, &fields) {
             let _ = writeln!(err, "probe: unavailable: cannot write the audit line ({})", audit::clip(&why, CLIP));
             return RC_UNAVAILABLE;
@@ -210,7 +256,14 @@ impl<'a> Dispatcher<'a> {
         code
     }
 
-    fn try_run(&self, caller: &Caller, argv: &[OsString], from: &str, out: &mut dyn Write) -> Result<u8, Stop> {
+    fn try_run(
+        &self,
+        caller: &Caller,
+        argv: &[OsString],
+        from: &str,
+        call_id: Option<&str>,
+        out: &mut dyn Write,
+    ) -> Result<u8, Stop> {
         let call = admit(caller, argv).map_err(Stop::Refused)?;
         let label = call.verb.label();
         let run = match call.verb.availability {
@@ -233,13 +286,14 @@ impl<'a> Dispatcher<'a> {
         }
         let identity = call.identity.as_str();
         let args = call.args.join(" ");
-        let fields = [
+        let mut fields = vec![
             ("noun", call.verb.noun),
             ("verb", call.verb.verb),
             ("args", args.as_str()),
             ("identity", identity),
             ("from", from),
         ];
+        fields.extend(call_id.map(|id| ("call", id)));
         let _lock = match lock::take(&self.lock_dir, identity) {
             Ok(Taken::Held(file)) => Some(file),
             Ok(Taken::NoDirectory) => {
@@ -590,6 +644,54 @@ mod tests {
         // The flag does not make a refused call run.
         assert_eq!(call(&sudo("jan"), &["--within", "secret,lasting,outage", "run", "command"]).rc, RC_REFUSED);
         assert_eq!(call(&sudo("jan"), &["--within", "secret,lasting,outage", "rt", "irq"]).rc, RC_UNAVAILABLE);
+    }
+
+    const CALL: &str = "3f2b6c1e-8a57-4d0e-9b1a-5c2e7d9f0a11";
+
+    #[test]
+    fn call_is_read_with_within_in_either_order_once_each_and_only_before_the_noun() {
+        for argv in [
+            &["--call", CALL, "sys", "kit"][..],
+            &["--call", CALL, "--within", "open,none,none", "sys", "kit"],
+            &["--within", "open,none,none", "--call", CALL, "sys", "kit"],
+        ] {
+            let call = admit(&sudo("jan"), &words(argv)).unwrap();
+            assert_eq!(call.call.as_deref(), Some(CALL), "{argv:?}");
+            assert_eq!(call.verb.label(), "sys kit");
+        }
+        for bad in [
+            &["--call"][..],
+            &["--call", "sys", "kit"],
+            &["--call", "not-a-uuid", "sys", "kit"],
+            &["--call", CALL, "--call", CALL, "sys", "kit"],
+            &["sys", "kit", "--call", CALL],
+        ] {
+            assert!(admit(&sudo("jan"), &words(bad)).is_err(), "{bad:?}");
+        }
+    }
+
+    #[test]
+    fn every_audit_line_of_a_call_carries_its_identifier_a_refusal_too() {
+        let ok = call(&sudo("jan"), &["--call", CALL, "sys", "kit"]);
+        assert_eq!(ok.rc, 0);
+        assert!(ok.lines.iter().all(|l| l.contains(&format!(" call={CALL}"))), "{:?}", ok.lines);
+        assert_eq!(ok.lines.len(), 2);
+        // Refused (an unknown verb), unavailable (not built), busy (lock held): the line says which call.
+        for argv in [&["--call", CALL, "sys", "nope"][..], &["--call", CALL, "rt", "irq"]] {
+            let outcome = call(&sudo("jan"), argv);
+            assert!(
+                outcome.lines.iter().all(|l| l.contains(&format!(" call={CALL}"))),
+                "{argv:?}: {:?}",
+                outcome.lines
+            );
+        }
+        let dir = crate::testdir::new("locks");
+        let _held = lock::take(&dir, "jan").unwrap();
+        let busy = call_with(&Memory::default(), &dir, &sudo("jan"), &["--call", CALL, "sys", "kit"]);
+        assert_eq!(busy.rc, RC_BUSY);
+        assert!(busy.lines[0].contains(&format!(" call={CALL}")), "{:?}", busy.lines);
+        // A call without the flag has no such field.
+        assert!(!call(&sudo("jan"), &["sys", "kit"]).lines.iter().any(|l| l.contains(" call=")));
     }
 
     #[cfg(feature = "test-verbs")]

@@ -263,3 +263,27 @@ checks; the service holds no rule about who may what.
 3. `_meta` and client libraries (section 3): whether any SDK the site would
    use for a non-`pact` client lets a caller set `_meta` on a call. `pact` is
    the only client in the sandbox by decision, so this is not needed now.
+
+## 9. Where an operator finds what ran
+
+The person's record says `approved`: **this machine signed**. It does not say
+that anything ran (the dispatcher may refuse above what was approved, a verb
+may fail, the service may be killed). What ran is in the service's own log, which
+is syslog on the host (tag `probe`, facility `auth`, level `info`), and **the
+call's identifier joins the lines**:
+
+- the service writes one line per call that reached its checks:
+  `call id=<uuid> hash=sha256:... person=... action=... outcome=... exact=...`
+  (`exact` is the exact code, never shown to an agent);
+- the dispatcher, run by the service through `sudo -n probe --within <rating>
+  --call <uuid> <noun> <verb> ...`, writes its lines (`nolock`, `start`, `done`,
+  `refused`, `busy`, `unavailable`) with `call=<uuid>`, also for a refusal by
+  `--within` (`event=refused reason=above-approved ...`). A call a person runs by
+  hand has no `call=` field.
+
+So `journalctl -t probe | grep <uuid>` (or the same on the syslog file) shows the
+service's decision and, if the verb was started, `start` and `done` with its exit
+code, or the refusal. The identifier is the one in pledge's record
+(`pledge history`). `--call` changes nothing about what runs; the site's sudo
+rule for the service's account names `probe --within * --call * ...` next to the
+form without `--call`.

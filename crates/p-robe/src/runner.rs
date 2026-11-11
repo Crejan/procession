@@ -32,17 +32,19 @@ pub struct RunOutput {
 
 /// How an approved call is run.
 pub trait Runner: Send + Sync {
-    /// Runs `action` (`noun verb`) with `params`, refusing above `within`.
+    /// Runs `action` (`noun verb`) with `params`, refusing above `within`. `call_id` is
+    /// the call's identifier, which every audit line of the dispatcher then carries.
     ///
     /// # Errors
     /// Why it could not be started or read, in words.
-    fn run(&self, within: Rating, action: &str, params: &[String]) -> Result<RunOutput, String>;
+    fn run(&self, within: Rating, call_id: &str, action: &str, params: &[String]) -> Result<RunOutput, String>;
 }
 
 /// The argument vector after `sudo -n --`.
 #[must_use]
-pub fn argv(probe: &std::path::Path, within: Rating, action: &str, params: &[String]) -> Vec<String> {
-    let mut argv = vec![probe.display().to_string(), "--within".into(), format_rating(within)];
+pub fn argv(probe: &std::path::Path, within: Rating, call_id: &str, action: &str, params: &[String]) -> Vec<String> {
+    let mut argv =
+        vec![probe.display().to_string(), "--within".into(), format_rating(within), "--call".into(), call_id.into()];
     argv.extend(action.split(' ').map(String::from));
     argv.extend(params.iter().cloned());
     argv
@@ -57,10 +59,10 @@ pub struct SudoRunner {
 }
 
 impl Runner for SudoRunner {
-    fn run(&self, within: Rating, action: &str, params: &[String]) -> Result<RunOutput, String> {
+    fn run(&self, within: Rating, call_id: &str, action: &str, params: &[String]) -> Result<RunOutput, String> {
         let mut child = Command::new(&self.sudo)
             .args(["-n", "--"])
-            .args(argv(&self.probe, within, action, params))
+            .args(argv(&self.probe, within, call_id, action, params))
             .env_clear()
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
@@ -117,12 +119,13 @@ pub struct InProcess {
 
 #[cfg(any(test, feature = "test-verbs"))]
 impl Runner for InProcess {
-    fn run(&self, within: Rating, action: &str, params: &[String]) -> Result<RunOutput, String> {
+    fn run(&self, within: Rating, call_id: &str, action: &str, params: &[String]) -> Result<RunOutput, String> {
         use std::ffi::OsString;
         if let Some(before) = &self.before {
             before();
         }
-        let mut words: Vec<OsString> = vec!["--within".into(), format_rating(within).into()];
+        let mut words: Vec<OsString> =
+            vec!["--within".into(), format_rating(within).into(), "--call".into(), call_id.into()];
         words.extend(action.split(' ').map(OsString::from));
         words.extend(params.iter().map(OsString::from));
         let audit = crate::audit::FileAudit(self.audit_file.clone());
@@ -139,12 +142,14 @@ mod tests {
     use super::*;
     use p_act::rating::{Damage, Disruption, Exposure};
 
+    const ID: &str = "3f2b6c1e-8a57-4d0e-9b1a-5c2e7d9f0a11";
+
     #[test]
     fn the_command_is_the_dispatcher_with_the_signed_rating_before_the_words() {
         let within = Rating::new(Exposure::Internal, Damage::None, Disruption::Brief);
         assert_eq!(
-            argv(std::path::Path::new("/usr/local/bin/probe"), within, "rt procs", &["pid=4711".into()]),
-            ["/usr/local/bin/probe", "--within", "internal,none,brief", "rt", "procs", "pid=4711"]
+            argv(std::path::Path::new("/usr/local/bin/probe"), within, ID, "rt procs", &["pid=4711".into()]),
+            ["/usr/local/bin/probe", "--within", "internal,none,brief", "--call", ID, "rt", "procs", "pid=4711"]
         );
     }
 }

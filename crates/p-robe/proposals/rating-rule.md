@@ -173,8 +173,11 @@ above 2. So the dispatcher rates again, itself, at the point where it opens
 the file, and the approved rating is a limit on it, never a licence:
 
 ```
-sudo -n probe --within <exposure>,<damage>,<disruption> <noun> <verb> [args]
+sudo -n probe --within <exposure>,<damage>,<disruption> [--call <uuid>] <noun> <verb> [args]
 ```
+
+(`--call` names the call for the audit lines and changes nothing else; see
+`agent-to-service.md`, section 9.)
 
 - The dispatcher opens (section 2), rates with `rate` (`Mode::Open`), and
   refuses (exit 64, audit line `event=refused reason=above-approved: rated

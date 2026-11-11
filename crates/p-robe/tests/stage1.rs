@@ -643,6 +643,14 @@ fn the_real_parts_against_each_other() {
     assert_eq!(events.iter().filter(|(e, _)| e == "delegation-withdrawn").count(), 1, "{events:?}");
     let record = fs::read_to_string(pledge.state.join("record.jsonl")).unwrap();
     assert!(!record.contains("PRIVATE KEY"));
+    // What ran is in the logs, joined by the call's identifier: every line the dispatcher wrote
+    // for a call that came through the service carries it, the `--within` refusal's too.
+    let dispatcher_log = fs::read_to_string(dir.join("dispatcher.log")).unwrap();
+    assert!(dispatcher_log.lines().all(|l| l.contains(" call=")), "{dispatcher_log}");
+    assert!(
+        dispatcher_log.lines().any(|l| l.starts_with("event=refused ") && l.contains("above-approved")),
+        "{dispatcher_log}"
+    );
     // What the service logged for each call, with the exact code.
     eprintln!("{}", log.lock().unwrap().join("\n"));
     let _ = fs::remove_dir_all(&dir);

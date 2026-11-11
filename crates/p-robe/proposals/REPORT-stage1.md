@@ -1,4 +1,14 @@
-# Stage 1, first cross run: pledge, pact and probe against each other
+# Stage 1, first cross run: pledge, pact and probe
+
+> **This is not stage 1 done.** `doc/approvals.md` section 8 defines stage 1 as
+> one **Linux** machine, with a real sudo rule between the service and the
+> dispatcher. Everything below ran on macOS, in one process for the service and
+> the dispatcher, with no sudo and no HTTP. Three passes of this test (and
+> more since) show that pledge, `pact` and the service fit each other in
+> their messages, their records and their timing; they do not show that the
+> sudo rule, the service's account, the sockets' permissions, `SO_PEERCRED`,
+> `/proc/self/fd` or the HTTP transport work. Stage 1 is done when this same
+> test has run on Linux with the dispatcher run through a real sudo rule.
 
 One test, `crates/p-robe/tests/stage1.rs` (`test-verbs` feature), run in the
 `check` checkout: `cargo test -p p-robe --features test-verbs --test stage1`.
