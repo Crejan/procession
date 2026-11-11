@@ -1,230 +1,222 @@
-# Proposal: the protocol on `service.sock`
+# Proposal: `service.sock`, pledge's Unix-socket transport
 
-Status: a proposal by the p-ledge agent, for review by the p-robe agent and
-then the designer. Nothing is built on it. Terms are those of
-`doc/approvals.md`, section 1. Nothing here changes a signed format
-(`doc/approval-formats.md`); it is the unsigned message around them.
+Status: a proposal by the p-ledge agent, revised after the p-robe review and
+the orchestrator's reconciliation with the p-age agent's connections
+proposal. Terms are those of `doc/approvals.md`, section 1. Nothing is built
+on it.
 
-## 1. What it is for
+## 1. What this document is, and is not
 
-A service on the person's machine (stage 1: `probe serve`; it has no broker)
-hands pledge a request and gets back one of: an approval, a decline, a
-refusal with its reason, or "expired". That is all `service.sock` does.
+`service.sock` is where a service on the person's machine (stage 1:
+`probe serve`, which has no broker) hands pledge a request. The exchange
+itself, **`submit`** and **`answer`** with their members, the hash that
+correlates them, the `by` of a refusal and the base64 rule, is defined once,
+in the connections document (p-age's proposal, section 3, to become
+`doc/approval-connections.md`). This document does not define those messages
+again. It specifies:
+
+1. the transport: framing parameters and who may connect (sections 2, 3);
+2. what pledge does with a submitted request (section 4);
+3. pledge's refusal reasons (section 5);
+4. the two points where the shared exchange needs pledge to hold state
+   (section 6).
+
 Delegations, keys, programs and the record are on `control.sock`
-(`control-sock.md`).
+(`control-sock.md`), not here.
 
-## 2. One protocol for every hop that carries a request
+## 2. Transport parameters
 
-`doc/approvals.md`, section 6, has three hops that carry a request or its
-answer: service to pledge (stage 1), service to broker, broker to pledge
-(stage 2). They are the same exchange, so they use the same two messages,
-`ask` and `answer`, and stage 2 needs no second protocol:
+The framing is the shared exchange's: one JSON object per line, UTF-8, `\n`,
+`schema_version` and `type` on every message, no unknown members, signatures
+and documents as the base64 of their exact bytes, no free text anywhere. The
+parameters of this transport:
 
-| Stage | Hop | Sends `ask` | Sends `answer` | Who connects |
-|---|---|---|---|---|
-| 1 | service to pledge, `service.sock` | the service | pledge | the service |
-| 2 | service to broker | the service | the broker, with the clearance added | the service |
-| 2 | broker to pledge, the connection pledge holds | the broker | pledge | pledge |
+| Parameter | Value |
+|---|---|
+| Stream | a Unix stream socket, blocking I/O, one reader and one writer per connection |
+| Line | at most 96 KiB, the same on every transport. A line that is longer, or does not end within 10 seconds of its first byte, ends the connection |
+| Requests open per connection | 16. This is a parameter of the transport: a connection of the broker carries more |
+| `error` | a protocol violation (`malformed-line`, `line-too-long`, `unsupported-version`, `unknown-type`, `too-many-submits`) is answered with one `error` and the connection is closed. It names no request |
 
-The messages do not depend on who connected: a connection carries `ask`s one
-way and `answer`s the other, whichever side opened it. What the broker
-connection will carry beyond these (pledge's sign-in, delegations,
-withdrawals, blocks, certificates, group names) are further message types in
-the same envelope, specified with that connection and signed where trust
-needs it. pledge's `answer` is the same bytes on `service.sock` and toward
-the broker; only the broker's `answer` to a service has two more members
-(section 4).
+Everything else about the messages (members, `result`, `by`, correlation)
+is the connections document's. pledge sends `answer` with `by` `pledge` on
+`refused` and `expired`; it never sends `clearance` or `clearance_sig`.
 
-## 3. Framing, shared with `control.sock`
+**Stage 1 refuses clearance members; stage 2 requires them.** Which stage a
+service is in is a setting fixed at its start, never read from what arrives.
+In stage 1 an `approved` answer with `clearance` members is a protocol error
+by the sender (pledge never sends them; the decoder refuses them). In stage
+2 the service requires them on every `approved` and refuses one without. That
+is the service's side; it is stated here because this is where stage 1 lives
+(p-robe review, B). It needs two answer shapes in `p-act` (pledge's, and the
+broker's with the clearance), so that the decoder enforces it.
 
-- A Unix stream socket. One JSON object per line, UTF-8, no byte order mark,
-  `\n` ends a line. The workspace convention for machine output.
-- Every object has `schema_version` (a number, `1`) and `type`. A reader
-  refuses a `schema_version` it does not know. This is not the signed
-  documents' `v`: those are signed and versioned with their namespace.
-- A line is at most 128 KiB (a request is at most 32 KiB, which is 44 KiB in
-  base64). A line that does not end within 10 seconds of its first byte, or
-  is longer, ends the connection.
-- Unknown members make a message invalid, as in the signed formats.
-- Strings carry no control characters or bidirectional marks
-  (`approval-formats.md`, section 2). A document or signature carried in a
-  message is always the base64 (standard, padded) of its exact bytes, so
-  signatures have no line breaks in the line.
-- Blocking I/O, one reader and one writer per connection; no runtime is
-  needed.
+## 3. Who may connect
 
-A line that fails these is answered with one `error` and the connection is
-closed:
+- **Directory and socket.** The socket is in a directory the person owns.
+  Without a group setting: directory 0700, socket 0600. With a group setting
+  for services that run under their own account (probe's does): directory
+  **0710** (the group may search, not list) and socket **0660**, group set to
+  that group. A group cannot pass a 0700 directory (p-robe review, C).
+  `pledge serve` checks at start: owner is the person, mode is as above, no
+  symlink on the path.
+- **It is only a door.** Connecting grants nothing: every submitted request
+  is checked against pledge's own delegations and host keys (R8). pledge
+  records the peer's user and process (`SO_PEERCRED`, `LOCAL_PEERPID`) as
+  information and decides nothing by them.
+- **The service checks the other end too**, before it sends a request: the
+  directory and the socket belong to the configured person's uid, neither is
+  a symlink, and the connection's peer credentials are that uid. An
+  impostor on the path cannot sign an approval, but could be handed a signed
+  request and the call's bytes, or talk the service into refusing
+  everything. That check is the service's; this document only says it is
+  expected.
+- **Reachability test.** A connect followed by an immediate close is a
+  test that pledge is there (`sys kit`). pledge treats it as nothing and
+  logs nothing beyond a counter.
 
-```json
-{"schema_version":1,"type":"error","error":"malformed-line"}
-```
+## 4. What pledge does with a submitted request
 
-`error` codes: `malformed-line`, `line-too-long`, `unsupported-version`,
-`unknown-type`, `duplicate-ref`, `too-many-asks`. Nothing else is said about
-the bytes received.
+In the order of `SPEC.md`, section 4: decode and parse request and call
+(`p_act`), check the call under the delegations pledge issued, check the
+request against the host keys it knows, check that every field is showable,
+apply the limits, derive the mode, sign or ask, then **sign, record, send**.
+The record entry is flushed before the `answer` leaves; if it cannot be
+written the answer is `refused` / `unavailable` and nothing is signed (no
+record, no approval, `record.md`). A used call identifier is stored before
+the approval is signed. That is pledge's guarantee, and it is not a reason
+for a service to skip its own store: the two are separate by design.
 
-## 4. The messages
+- Requests that arrive together are normal: the person sees one dialog at a
+  time, the rest wait, each until its own deadline, then `expired`.
+- Correlation is by the request's hash, `sha256:` over the decoded bytes,
+  which needs no parsing. A second `submit` of the same bytes is recognised by
+  it (section 6). There is no `ref` and so no `duplicate-ref`.
+- **`cancel`** (by hash, from the sender) closes the dialog of an open
+  request and is answered with nothing. A connection that closes cancels all
+  its open requests. The record has the request as `cancelled`. A `cancel`
+  for a hash pledge does not hold, or whose answer was sent, **is ignored
+  and logged**, not an error; so is an `answer` toward a service for a hash
+  it does not hold (that is the service's rule, and it is stated in the
+  connections document). A `cancel` that arrives after pledge signed does not
+  undo it: the entry already says `approved`.
+- The service's own deadline: pledge watches the deadline itself and sends
+  `expired` (`by` `pledge`) at it. A service answers its agent "expired" at
+  the deadline without waiting for that.
 
-**`ask`**, from whoever hands over a request:
+## 5. pledge's refusal reasons
 
-```json
-{"schema_version":1,"type":"ask","ref":"7","request":"<base64 of the request's bytes>","request_sig":"<base64 of the armoured SSHSIG>"}
-```
-
-- `ref`: chosen by the sender, 1 to 64 characters of `[A-Za-z0-9._-]`, unique
-  on the connection among its unanswered asks. It only matches an `answer` to
-  its `ask`; it is not the call's identifier and means nothing outside the
-  connection.
-- `request`: the request's bytes, base64, exactly as the service signed
-  them. `request_sig`: its armoured SSHSIG, base64 (standard, padded) of its exact bytes, namespace `request-v1@procession`. Both are
-  carried, never rebuilt (`approval-formats.md`, section 1).
-- The sender may have any number of asks open up to 16 per connection; the
-  seventeenth is answered with an `error`, `too-many-asks`. pledge's own
-  limits per agent (`doc/approvals.md`, section 7) are separate and are
-  answered with a refusal.
-
-**`answer`**, from pledge, exactly once per `ask` that pledge did not see
-cancelled, in any order:
-
-```json
-{"schema_version":1,"type":"answer","ref":"7","result":"approved","approval":"<base64 of the armoured SSHSIG>"}
-{"schema_version":1,"type":"answer","ref":"7","result":"declined"}
-{"schema_version":1,"type":"answer","ref":"7","result":"refused","reason":"call-used"}
-{"schema_version":1,"type":"answer","ref":"7","result":"expired"}
-```
-
-| `result` | Members | Meaning |
-|---|---|---|
-| `approved` | `approval` | base64 of the armoured SSHSIG over the request's bytes, namespace `approval-v1@procession`, by the confirmed or the automatic approval key. Which one is in its certificate; the answer does not say, because nothing may act on the answer's word for it |
-| `declined` | none | the person said no in a dialog. Nothing else is said, so that an agent learns nothing from how |
-| `refused` | `reason` | pledge said no without asking, or could not ask |
-| `expired` | none | the call's deadline passed with no approval. Sent at the deadline, by pledge's own clock |
-
-`reason` is a code from a closed list, never free text: an agent will read
-what a service passes on, and pledge does not put anything it received into
-what it sends.
+`reason` is a code from a closed list, never text; pledge puts nothing it
+received into what it sends. A reader treats a code it does not know as a
+refusal and nothing more.
 
 | `reason` | Check that failed (`SPEC.md`, section 4) |
 |---|---|
-| `malformed` | the request or the call in it does not parse (`p-act` refused it) |
-| `unknown-delegation` | the call is not signed under a delegation this pledge issued |
+| `malformed` | the request or the call in it does not parse |
+| `unknown-delegation` | the call is not signed under a delegation this pledge issued (this includes a call for another person) |
 | `delegation-ended` | its delegation's validity has passed |
 | `delegation-withdrawn` | its delegation was withdrawn |
-| `deadline-past` | the call's deadline has passed (with the tolerated clock difference of `doc/approvals.md`, section 7, if the designer applies it here: Open questions, 6) |
+| `deadline-past` | the call's deadline has passed |
 | `deadline-too-far` | more than 10 minutes ahead |
-| `call-used` | pledge already signed for this identifier, or has an ask open for it |
+| `call-used` | pledge already signed for this call's identifier (section 6) |
 | `service-mismatch` | the request is not signed by a service key that a host pledge knows certified, or host and service are not the ones the call names |
 | `not-showable` | a field is too long or holds a control character or a bidirectional mark |
 | `limit` | too many requests of this agent are waiting |
 | `muted` | the person declined this agent three times within ten minutes |
 | `ceiling` | the rating is above the delegation's ask ceiling (mode `refuse`) |
-| `unavailable` | pledge could not ask (no terminal, no dialog possible), or could not write the record: no record, no approval |
+| `unavailable` | pledge could not ask (no terminal, no dialog possible) or could not write the record |
 
-The broker will add reasons of its own (blocked, not entitled, person not
-enabled); they belong to the broker's specification. A reader treats a
-`reason` it does not know as `refused` and nothing more.
+p-age's first set for pledge (`not-mine`, `replayed`, `bad-call`,
+`above-ceiling`, `blocked`) differs in names, and p-robe has adopted the
+names above in its agent-facing list; the two lists are to be made one by
+the reconciliation. `blocked` is the broker's (a person or key blocked);
+pledge has no such check on a request. In `p-act` the list is a closed enum
+with an `Unknown` for what a reader does not know, with its wire string.
 
-**`cancel`**, from the sender, optional:
+## 6. Where the shared exchange needs pledge to hold state
 
-```json
-{"schema_version":1,"type":"cancel","ref":"7"}
-```
+The connections document needs pledge to be idempotent for a request it
+already knows by hash, because a request can be submitted again after a
+reconnect: if it was answered, send the same answer again until the
+deadline; if its dialog is open, do nothing. It reads R5's refusal
+("a call that comes a second time gets a refusal") as being for a
+**different** request under the same call identifier. That is a design
+question for the designer. This section is written so either answer fits;
+what pledge keeps is the difference.
 
-Withdraws an ask that is still open: pledge closes its dialog and sends no
-`answer`. A connection that closes cancels all its open asks. pledge
-records a cancelled ask (see Open questions, 1).
+Pledge keeps, on disk, until each call's deadline (as R5 and section 7 of
+`doc/approvals.md` already say):
 
-The broker's `answer` to a service adds `clearance` (the clearance document,
-base64, as signed) and `clearance_sig` (its armoured SSHSIG), both base64 next to `approval`. pledge
-never sends them and never accepts them. On `service.sock` nobody sends
-them, and a service in stage 1 checks none.
+| Entry | Under reading **A** (idempotent by hash) | Under reading **B** (R5 as written: a second time is refused) |
+|---|---|---|
+| the call's identifier, marked used when pledge signs | yes | yes |
+| the hash of the request it was signed for | yes | not needed |
+| the answer sent (for `approved`, the approval's bytes; for the others, the result and reason) | yes, so it can be sent again. It is a signature over a request, not a secret | no |
 
-## 5. What pledge does with an `ask`
+- **Reading A.** A `submit` of bytes pledge knows: answered, so the same
+  answer is sent again (pledge does not sign again: it signs once);
+  dialog open, so nothing is done; open but already `cancelled` by a lost
+  connection, so it is a new request (the old dialog was closed). A
+  `submit` of different bytes for a used call identifier is refused
+  `call-used`. After the deadline the entry is forgotten and a submit is
+  refused `deadline-past`. The answer entry is written with the record
+  entry, before the first send (sign, record, store, send), so that a crash
+  between them still lets the resubmission get the answer.
+- **Reading B.** Any second `submit` for a used identifier, same bytes or
+  not, is refused `call-used`. A lost connection after pledge signed costs
+  the person a second dialog that pledge cannot ask for; the service is
+  the one that can resubmit never, which is why p-robe's store (it records
+  the identifier before it asks) matters under this reading.
+- A declined or expired call is not signed for, so under both readings its
+  identifier is not used by pledge; resubmitting it is allowed until the
+  deadline and counts toward muting.
+- Either way a `cancel` or a closed connection of a request whose dialog was
+  open ends it, and the record says `cancelled`.
 
-In the order of `SPEC.md`, section 4: parse and check call and request, show
-nothing that cannot be shown as it is, apply the limits, derive the mode,
-sign or ask, then **sign, record, send**. The record entry is written and
-flushed before the `answer` leaves; if it cannot be written, the answer is
-`refused` / `unavailable` and nothing is signed (`record.md`). A used call
-identifier is stored before the approval is signed.
+Pledge's recommendation: **A**, because it is the one that makes a lost
+connection harmless, at the price of one more small store; B needs nothing
+new and is what R5 says in so many words.
 
-- Concurrent `ask`s are normal: the person sees one dialog at a time, the
-  others wait, each until its own deadline, then `expired`.
-- An ask whose request is byte for byte one already open on the connection
-  is answered `refused` / `call-used`, not queued twice.
-- After a decline the same call may be asked again until its deadline; each
-  decline counts toward the muting limit. (Open question, 2.)
+## 7. The p-robe review, point by point
 
-## 6. Who may connect
+| Point | Decision |
+|---|---|
+| A. The service records the identifier before it submits | Noted; it is the service's own store. Makes "a declined call asked again" moot for this service; pledge's muting stays for other senders |
+| B. Stage is a setting, never "if present"; stage 1 refuses clearance members | Adopted (section 2) |
+| C. The door: 0710 / 0660 with a group, the service checks the other end | Adopted (section 3) |
+| D. An unknown reference is ignored and logged | Adopted for `cancel` and `answer`, and no `error` is sent for them (section 4); with correlation by hash it is the hash that is unknown |
+| `shown` message | Not adopted now. It adds a state and a message that nothing in correctness needs; an agent waiting without knowing whether the dialog is on screen is a user-interface matter. Open for the designer (question 4) |
+| `ping` | Not adopted: connect-and-close is the test (section 3) |
+| Reasons: one vocabulary, passed through unchanged, closed list | Adopted (section 5); p-robe adopts pledge's names, which is the direction the reconciliation should keep |
+| `service-mismatch` and `unavailable` shortened for the agent | The service's choice; pledge's codes stay as they are |
+| Two `answer` shapes in `p-act` | Adopted (section 2) |
+| 16 open requests a transport parameter | Adopted (section 2) |
+| `Reason` a closed enum with `Unknown` in `p-act` | Adopted (section 5) |
+| A line reader in `p-act` with the limits built in and a clock it is given | Adopted: 96 KiB, 10 seconds from the first byte, unknown members, control characters. It also lets the transport be tested without a socket |
+| `error` carries no reference and ends the connection | Adopted (section 2) |
+| A record entry for a cancel after an approval | An approval already answered is recorded `approved`; the cancel is ignored and logged (section 4). A cancel before the approval is `cancelled` |
+| Open question 4 (`ref` against the call's id) | Settled by the reconciliation: correlation by the request's hash |
+| Open question 6 (clock tolerance) | As proposed: none for pledge's own sign or refuse; 60 seconds only for "too far ahead" |
 
-The socket is in a directory only the person owns (mode 0700, checked at
-start: owner, mode, not a symlink), the socket mode 0600; a setting adds one
-group for services that run under their own account (probe's does). That is
-only a door: connecting grants nothing, because every `ask` is checked
-against pledge's own delegations and host keys (R8). pledge records the
-peer's user and process (`SO_PEERCRED`, `LOCAL_PEERPID`) as information and
-decides nothing by them. The service is the one that signed the request.
+## 8. Open questions for the designer
 
-## 7. A session, for the p-robe agent
+1. **A fifth outcome** (`doc/approvals.md` R12): a request cancelled while
+   its dialog is open. *Proposal:* record it as `cancelled`.
+2. **R5 against idempotence** (section 6): A or B. *Proposal:* A.
+3. **A declined call asked again**: allowed until the deadline, each decline
+   counting toward muting. *Proposal:* keep.
+4. **A `shown` message** so a service can tell its agent that the dialog is
+   on screen. *Proposal:* not in the first version.
+5. **Reasons given to the agent**: is a list this fine an oracle?
+   *Proposal:* keep, for the person's own agent.
+6. **The tolerated clock difference** and which way it tilts for a
+   deadline. *Proposal:* as in section 7.
+7. **The socket's group** (section 3): a setting with no default. *Proposal:*
+   no group unless the person sets one; `probe`'s installation says to.
 
-```
-service                                   pledge
-  connect ─────────────────────────────────▶
-  {"type":"ask","ref":"1","request":..} ───▶   checks, dialog
-  ... the person says yes ...
-  ◀──── {"type":"answer","ref":"1","result":"approved","approval":..}
-  (the service now checks the approval itself, `approval-formats.md` 7,
-   then the deadline and its own used identifiers, and acts)
-```
+## 9. Separable from its transport
 
-The service watches the deadline itself and answers its agent "expired"
-without waiting for pledge's `expired`. If the person's machine is off, or
-pledge is not running, `connect` fails and the service refuses the call:
-"when in doubt, no".
-
-## 8. Where it lives in code
-
-The codec (these messages, the framing, `reason`) is small and shared by
-three programs. *Proposal:* it belongs in `p-act`, next to the signed
-documents, as `Ask` and `Answer` types with a line reader and writer.
-`approval-formats.md`, section 9, already gives `p-act` the formats; this
-adds the unsigned envelope. Until then p-ledge writes it in
-`crates/p-ledge/src/` and moves it.
-
-## 9. Open questions for the designer
-
-1. **A fifth outcome.** `doc/approvals.md` R12 lists approved, declined,
-   refused, expired. A service that gives up (closes the connection, or
-   sends `cancel`) while a dialog is open is none of them. *Proposal:* record
-   it as `cancelled` and close the dialog; it is not an answer to anybody.
-2. **A declined call asked again.** R5 says an identifier is signed for once,
-   which a decline does not break. *Proposal:* allowed until the deadline;
-   each decline counts toward muting, so it cannot be used to wear a person
-   down.
-3. **The reasons given to the agent.** The service passes `reason` on to an
-   agent, which is untrusted. A list this fine tells it which of its checks
-   fail. *Proposal:* keep it, because the agent is the person's own and
-   needs to know it was too late and not too much; coarsen it if the
-   designer sees an oracle.
-4. **`ref` against the call's identifier.** The call's `id` could serve as
-   the reference and save a member, but pledge would have to parse before it
-   can refuse, and the broker would need its own for a call it has not
-   parsed. *Proposal:* keep `ref`.
-5. **Base64 for the request inside the line.** Needed so the bytes are the
-   bytes; costs a third. *Proposal:* keep.
-6. **The tolerated clock difference** (60 seconds, "all"). It is not said
-   which way it tilts for a deadline. *Proposal:* none for pledge's own
-   decision to sign or refuse, which uses its own clock and the deadline as
-   written, and 60 seconds only when it judges a call's deadline "too far
-   ahead".
-
-## 10. Separable from its transport
-
-`ask`, `answer`, `cancel`, `ref` and the reasons (sections 4 and 5) say
-nothing about sockets; only section 3 (line framing) and 6 (who may
-connect) are specific to a Unix stream. Another transport (the broker's TLS
-connection) can carry the same objects with its own framing, and the p-age
-agent's connection messages can share the envelope (`schema_version`,
-`type`) and these shapes. Section 3's limits are the transport's, the
-members are not.
+Sections 4 to 6 say nothing about sockets. Only section 2's parameters and
+section 3 are particular to this transport. The broker connection carries
+the same `submit` and `answer` with its own framing parameters, which is why
+the exchange has one home.

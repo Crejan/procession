@@ -97,7 +97,7 @@ reserved for every key; messages with trailing bytes are malformed.
 9. Name of the connection key's namespace (reserved as part of the
    `@procession` family meanwhile).
 
-## Update: rating moved to p-act
+## Update: rating moved to p-act (done)
 
 Merged `agent/p-act` (Cargo.lock conflict resolved by taking theirs and
 letting cargo add p-ledge's deps). `p-ledge` depends on `p-act` by path;
@@ -105,3 +105,23 @@ nothing in p-ledge used `rating` besides its own module, so
 `src/rating.rs` and its export are deleted (no re-export). Tests: 65 pass
 (73 minus the 8 rating tests, which live in p-act), clippy `-D warnings`
 and fmt clean. Not started: step 2, the `ask`/`answer` codec.
+
+## Update: `service-sock.md` revised after the review and reconciliation
+
+Rewritten as the Unix-socket transport only: it refers to p-age's shared
+exchange for `submit`/`answer` instead of defining them. Changes: `ask`
+became `submit`; correlation by the request's hash, no `ref`, no
+`duplicate-ref`; `by` on `refused`/`expired`; line limit 96 KiB; 16 open
+requests as a transport parameter; door fixed (0710/0660 with a group, else
+0700/0600; the service checks the other end); stage 1 refuses clearance
+members, stage 2 requires them by configuration; unknown hash in `cancel` or
+`answer` is ignored and logged. Section 7 lists each p-robe point and
+whether I adopt it (not adopted: `shown`, `ping`). Section 6 states what
+pledge keeps under either reading of R5 (A idempotent by hash, B refuse any
+second submit); I recommend A.
+Notes for the reconciliation: p-age uses `v`, the orchestrator keeps
+`schema_version`; p-age's pledge reasons (`not-mine`, `replayed`,
+`bad-call`, `above-ceiling`) differ from mine and p-robe adopted mine;
+`detail` is dropped (no free text). `record.md` is unchanged: its
+`cancelled` result and `request_hash` already fit; the "ask" wording
+there is not used for messages. Seven questions remain in section 8.
