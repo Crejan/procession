@@ -40,8 +40,9 @@ and `tests/stage1.rs` uses the library, so the unit tests run once.
 | 5 | the identical `tools/call` posted again | refused / invalid (exact `call-used`, our store) | no new entry |
 | 6 | a signed call that went nowhere, its request submitted twice by hand | (unavailable: held) | one entry, **the same approval bytes** for both submissions |
 | 7 | second delegation withdrawn with `agents withdraw`, then a call | refused / not-allowed (`pledge:delegation-withdrawn`) | refused, `delegation-withdrawn`; event `delegation-withdrawn` by `person` |
-| 8 | a delegation issued by `agents.start` on the control socket and never delivered, then a call | refused / not-allowed (`pledge:unknown-delegation`) | refused, `unknown-delegation`; event `delegation-withdrawn` by `delivery-failed` when the connection ends |
+| 8 | a delegation issued by `agents.start` on the control socket and never delivered, then a call | refused / not-allowed (`pledge:unknown-delegation`) | refused, `unknown-delegation` (a pending delegation is not one this pledge answers for); event `delegation-not-delivered` when the connection ends (never `delegation-issued`, never `delegation-withdrawn`: the designer's decision after the first run) |
 | 9 | deadline 3 s, dialog open, nobody answers | expired (`expired-by-pledge`) | expired |
+| 12 | five parameters of 450 bytes: each within 512, together over 2000 characters | refused / invalid (`pledge:not-showable`) | refused, `not-showable` |
 | 10 | the agent goes away (the model's cancel) while the dialog is open | nothing: no answer is written to a client that left | **cancelled**; the verb did not run |
 | 11 | `pledge serve` killed and started again while a request is open | unavailable (`no-route`), not submitted again | **no entry** for the open request; after the restart the same bytes submitted by hand are asked about again and approved; the same call through the service is `call-used` (our store); a new call is done |
 

@@ -612,6 +612,15 @@ fn the_real_parts_against_each_other() {
     expected.push(("approved", None));
     assert!(log.lock().unwrap().iter().any(|l| l.contains("no-route:")), "{:?}", log.lock().unwrap());
 
+    // 12. Parameters shown whole: 512 bytes each, all together at most 2000 characters (connections 3.7).
+    //     Each is within the service's own limit; pledge refuses the call as not showable, the agent is told invalid.
+    let long = "x".repeat(450);
+    let five: Vec<&str> = std::iter::repeat_n(long.as_str(), 5).collect();
+    let too_long = call(&agent, "test_echo", &five);
+    assert!(is(&too_long, "refused", Some("invalid")), "{too_long:?}");
+    assert!(log.lock().unwrap().iter().any(|l| l.contains("pledge:not-showable")), "{:?}", log.lock().unwrap());
+    expected.push(("refused", Some("not-showable")));
+
     // The record, against what the agent was told. `--verify` checks the chain (it fails the command if broken).
     std::thread::sleep(Duration::from_millis(300));
     let history = pledge.history();
@@ -628,7 +637,10 @@ fn the_real_parts_against_each_other() {
         .filter_map(|e| e["event"].as_str().map(|ev| (ev.to_owned(), e["by"].as_str().unwrap_or("").to_owned())))
         .collect();
     assert!(events.contains(&("delegation-withdrawn".into(), "person".into())), "{events:?}");
-    assert!(events.contains(&("delegation-withdrawn".into(), "delivery-failed".into())), "{events:?}");
+    // A delegation never delivered never was one: `delegation-not-delivered`, and never "withdrawn" nor "issued".
+    assert!(events.iter().any(|(e, _)| e == "delegation-not-delivered"), "{events:?}");
+    assert_eq!(events.iter().filter(|(e, _)| e == "delegation-issued").count(), 2, "{events:?}");
+    assert_eq!(events.iter().filter(|(e, _)| e == "delegation-withdrawn").count(), 1, "{events:?}");
     let record = fs::read_to_string(pledge.state.join("record.jsonl")).unwrap();
     assert!(!record.contains("PRIVATE KEY"));
     // What the service logged for each call, with the exact code.
