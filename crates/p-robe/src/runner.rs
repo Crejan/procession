@@ -11,6 +11,11 @@ use p_act::rating::Rating;
 
 use crate::table::format_rating;
 
+/// How long a verb may run before it is killed. The deadline bounds the start of
+/// an action, not its run (`doc/approvals.md`, R7), so the service bounds the run
+/// itself; a limit per verb in the table is not built.
+pub const RUN_LIMIT: std::time::Duration = std::time::Duration::from_secs(600);
+
 /// More than a verb's answer can be (the dispatcher caps it at 1 MiB).
 const OUTPUT_LIMIT: u64 = 3 << 20;
 
@@ -19,6 +24,8 @@ const OUTPUT_LIMIT: u64 = 3 << 20;
 pub struct RunOutput {
     /// Its exit code (see `dispatch.rs`).
     pub rc: u8,
+    /// It was killed at [`RUN_LIMIT`].
+    pub timed_out: bool,
     /// What it wrote: one JSON object per line.
     pub stdout: String,
 }
@@ -60,18 +67,38 @@ impl Runner for SudoRunner {
             .stderr(Stdio::null())
             .spawn()
             .map_err(|e| format!("cannot start sudo: {e}"))?;
+        // A watchdog kills it at the limit; the read then ends with the pipe.
+        let finished = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let timed_out = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let watchdog = {
+            let (finished, timed_out, pid) = (finished.clone(), timed_out.clone(), child.id());
+            std::thread::spawn(move || {
+                let started = std::time::Instant::now();
+                while !finished.load(std::sync::atomic::Ordering::SeqCst) {
+                    if started.elapsed() >= RUN_LIMIT {
+                        timed_out.store(true, std::sync::atomic::Ordering::SeqCst);
+                        // SAFETY: a signal to a child this function started and has not yet waited for.
+                        unsafe { libc::kill(i32::try_from(pid).unwrap_or(0), libc::SIGKILL) };
+                        return;
+                    }
+                    std::thread::sleep(std::time::Duration::from_millis(200));
+                }
+            })
+        };
         let mut text = String::new();
-        child
-            .stdout
-            .take()
-            .ok_or("no stdout")?
-            .take(OUTPUT_LIMIT)
-            .read_to_string(&mut text)
-            .map_err(|e| e.to_string())?;
-        let status = child.wait().map_err(|e| e.to_string())?;
+        let read = child.stdout.take().ok_or("no stdout")?.take(OUTPUT_LIMIT).read_to_string(&mut text);
+        let status = child.wait();
+        finished.store(true, std::sync::atomic::Ordering::SeqCst);
+        let _ = watchdog.join();
+        read.map_err(|e| e.to_string())?;
+        let status = status.map_err(|e| e.to_string())?;
         // sudo's own failure (no rule, no password) is 1: a code a verb could also give;
         // the answer's absence tells them apart for a person reading the log.
-        Ok(RunOutput { rc: u8::try_from(status.code().unwrap_or(255)).unwrap_or(255), stdout: text })
+        Ok(RunOutput {
+            rc: u8::try_from(status.code().unwrap_or(255)).unwrap_or(255),
+            timed_out: timed_out.load(std::sync::atomic::Ordering::SeqCst),
+            stdout: text,
+        })
     }
 }
 
@@ -103,7 +130,7 @@ impl Runner for InProcess {
         let (mut out, mut err) = (Vec::new(), Vec::new());
         let rc =
             crate::dispatch::Dispatcher::new(&audit, self.lock_dir.clone()).run(&caller, &words, &mut out, &mut err);
-        Ok(RunOutput { rc, stdout: String::from_utf8_lossy(&out).into_owned() })
+        Ok(RunOutput { rc, timed_out: false, stdout: String::from_utf8_lossy(&out).into_owned() })
     }
 }
 

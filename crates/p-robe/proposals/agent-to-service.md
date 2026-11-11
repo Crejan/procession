@@ -186,13 +186,24 @@ call may need your person's approval and waits for it until its deadline;
 
 ## 7. Waiting, cancelling, dropping
 
-- The service holds the request open until the call is decided or its
-  deadline passes. If the client sent a `progressToken` (in `_meta`), the
-  response is an SSE stream with `notifications/progress` at two steps ("handed
-  to your person's machine", "approved, running") and a comment line every 15
-  seconds so that nothing in between closes an idle connection. Without a token
-  the response is plain JSON, once. *(decided)* There is no notice that a dialog
-  is on screen.
+- **The stream** *(built, tested in-process; `pact.md` section 7 depends on it)*.
+  If the client sent a `progressToken` in `_meta`, the response is an SSE stream
+  whose **head is sent as soon as the service has accepted the call**: its first
+  checks passed and it has a place to wait, before the identifier is recorded,
+  before pledge is asked. From then a comment line (`: keepalive`) goes out at
+  least every 15 seconds, while the person is asked **and while the verb runs**,
+  so that a client that reads silence as a dead connection (`pact`: 45 seconds)
+  does not. Two `notifications/progress` carry fixed words ("handed to your
+  person's machine", "approved, running"; no dialog notice). The last event is
+  the JSON-RPC response. A call refused before it is accepted (`invalid`, a
+  protocol error, `503`) is plain JSON with no stream. Without a token the
+  response is plain JSON, once, when the call is decided, with nothing written
+  in between. A write that fails (the client is gone) cancels the call, as does
+  the transport's own cancel flag. The final message is at most 4 MiB (`pact`'s
+  limit): the dispatcher caps a verb's answer at 1 MiB, wrapping at most doubles
+  it, and a compile-time assertion keeps it so. A verb is killed after 10
+  minutes (`RUN_LIMIT`), which is `unavailable`; a limit per verb in the table
+  is not built.
 - **A cancelled or dropped call is not run.** `notifications/cancelled`, or the
   connection closing, before the verb started: the service closes its
   connection to pledge or the broker (which cancels the request there), keeps

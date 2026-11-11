@@ -876,7 +876,7 @@ mod with_test_verbs {
         use serde_json::{Value, json};
         let rig = Rig::new(Plan::Silent);
         rig.pledge.set(Plan::Approve(rig.pki.automatic.clone()));
-        let mcp = Mcp { service: &rig.service };
+        let mcp = Mcp::new(&rig.service);
         let post = |body: Value| HttpRequest {
             method: "POST".into(),
             path: "/mcp".into(),
@@ -935,7 +935,7 @@ mod with_test_verbs {
 fn the_mcp_layer_refuses_what_a_browser_or_a_wrong_client_would_send() {
     use crate::mcp::{HttpRequest, Mcp};
     let rig = Rig::new(Plan::Decline);
-    let mcp = Mcp { service: &rig.service };
+    let mcp = Mcp::new(&rig.service);
     let base = HttpRequest {
         method: "POST".into(),
         path: "/mcp".into(),
@@ -987,4 +987,204 @@ fn the_mcp_layer_refuses_what_a_browser_or_a_wrong_client_would_send() {
         &AtomicBool::new(false),
     );
     assert_eq!(listed.status, 200);
+}
+
+// ---- the stream: what `pact` needs from the service while it waits ---------------------
+
+mod streaming {
+    use super::*;
+    use crate::mcp::{HttpRequest, Mcp, ResponseWriter};
+    use serde_json::{Value, json};
+
+    type Head = (Duration, u16, Vec<(String, String)>);
+
+    /// Records what is written, and when. `fail_after_head` makes a body write fail: the client is gone.
+    struct Recorder {
+        started: Instant,
+        head: Option<Head>,
+        chunks: Vec<(Duration, String)>,
+        fail_after_head: bool,
+    }
+
+    impl Recorder {
+        fn new() -> Recorder {
+            Recorder { started: Instant::now(), head: None, chunks: Vec::new(), fail_after_head: false }
+        }
+
+        fn comments(&self) -> usize {
+            self.chunks.iter().filter(|(_, c)| c.starts_with(": keepalive")).count()
+        }
+
+        fn messages(&self) -> Vec<Value> {
+            self.chunks
+                .iter()
+                .filter_map(|(_, c)| c.strip_prefix("event: message\ndata: "))
+                .map(|data| serde_json::from_str(data.trim_end()).unwrap())
+                .collect()
+        }
+    }
+
+    impl ResponseWriter for Recorder {
+        fn head(&mut self, status: u16, headers: &[(String, String)]) -> std::io::Result<()> {
+            assert!(self.head.is_none(), "one head");
+            self.head = Some((self.started.elapsed(), status, headers.to_vec()));
+            Ok(())
+        }
+
+        fn body(&mut self, bytes: &[u8]) -> std::io::Result<()> {
+            assert!(self.head.is_some(), "a body before the head");
+            if self.fail_after_head {
+                return Err(std::io::ErrorKind::BrokenPipe.into());
+            }
+            self.chunks.push((self.started.elapsed(), String::from_utf8(bytes.to_vec()).unwrap()));
+            Ok(())
+        }
+    }
+
+    fn request(sent: &Sent, token: Option<Value>) -> HttpRequest {
+        let mut meta = json!({"procession/call": sent.call, "procession/call_sig": sent.call_sig});
+        if let Some(token) = token {
+            meta["progressToken"] = token;
+        }
+        HttpRequest {
+            method: "POST".into(),
+            path: "/mcp".into(),
+            headers: vec![("Accept".into(), "application/json, text/event-stream".into()), ("Content-Type".into(), "application/json".into())],
+            body: json!({"jsonrpc": "2.0", "id": 9, "method": "tools/call", "params": {"name": sent.name, "arguments": {"params": sent.params}, "_meta": meta}})
+                .to_string()
+                .into_bytes(),
+        }
+    }
+
+    fn content_type(r: &Recorder) -> String {
+        r.head.as_ref().unwrap().2.iter().find(|(k, _)| k == "Content-Type").unwrap().1.clone()
+    }
+
+    #[test]
+    fn the_head_comes_when_the_call_is_accepted_then_comments_while_the_person_is_asked_then_the_answer() {
+        let rig = Rig::new(Plan::Silent);
+        rig.pledge.set(Plan::ApproveAfter(Duration::from_millis(1200), rig.pki.confirmed.clone()));
+        let mut mcp = Mcp::new(&rig.service);
+        mcp.keepalive = Duration::from_millis(100);
+        let mut out = Recorder::new();
+        mcp.serve(&request(&rig.jan("sys kit", &[]), Some(json!("tok"))), &AtomicBool::new(false), &mut out);
+
+        let (at, status, _) = out.head.clone().unwrap();
+        assert_eq!(status, 200);
+        assert_eq!(content_type(&out), "text/event-stream");
+        assert!(at < Duration::from_millis(600), "the head came at {at:?}, long before the approval");
+        assert!(out.comments() >= 5, "{} comments while waiting for the person", out.comments());
+        let messages = out.messages();
+        let texts: Vec<&str> = messages.iter().filter_map(|m| m["params"]["message"].as_str()).collect();
+        assert_eq!(texts, ["handed to your person's machine", "approved, running"]);
+        assert_eq!(messages[0]["params"]["progressToken"], "tok");
+        assert_eq!(messages[0]["params"]["progress"], 1);
+        assert_eq!(messages[1]["params"]["progress"], 2);
+        let last = messages.last().unwrap();
+        assert_eq!(last["id"], 9);
+        assert!(last["result"]["content"][0]["text"].as_str().unwrap().contains("\"outcome\":\"done\""));
+        let first_note_at = out.chunks.iter().find(|(_, c)| c.contains("handed to")).unwrap().0;
+        assert!(first_note_at < Duration::from_millis(600), "{first_note_at:?}");
+        // No silence longer than a few keepalives anywhere in the stream.
+        let mut times = vec![at];
+        times.extend(out.chunks.iter().map(|(t, _)| *t));
+        assert!(times.windows(2).all(|w| w[1] - w[0] < Duration::from_millis(500)), "{times:?}");
+    }
+
+    #[test]
+    fn something_is_written_while_a_verb_runs_too() {
+        let rig = Rig::new(Plan::Silent);
+        rig.pledge.set(confirmed(&rig));
+        // The dispatcher is held up for a while just before it runs the verb.
+        let runner = InProcess {
+            audit_file: rig.audit.clone(),
+            lock_dir: rig.dispatcher_dir.path().join("locks"),
+            user: "probe".into(),
+            before: Some(Box::new(|| std::thread::sleep(Duration::from_millis(900)))),
+        };
+        let (service, _) = make_service(&rig.pki, rig.pledge.link(), &rig.used, runner, 16);
+        let mut mcp = Mcp::new(&service);
+        mcp.keepalive = Duration::from_millis(100);
+        let mut out = Recorder::new();
+        mcp.serve(&request(&rig.jan("sys kit", &[]), Some(json!(1))), &AtomicBool::new(false), &mut out);
+        let running = out.chunks.iter().find(|(_, c)| c.contains("approved, running")).unwrap().0;
+        let after_running = out.chunks.iter().filter(|(t, c)| *t > running && c.starts_with(": keepalive")).count();
+        assert!(after_running >= 5, "{after_running} comments while the verb ran");
+        assert!(
+            out.messages().last().unwrap()["result"]["content"][0]["text"]
+                .as_str()
+                .unwrap()
+                .contains("\"outcome\":\"done\"")
+        );
+    }
+
+    #[test]
+    fn a_call_refused_before_it_is_accepted_is_plain_json_even_with_a_token() {
+        let rig = Rig::new(Plan::Decline);
+        let mcp = Mcp::new(&rig.service);
+        let wrong = sign(&CallSpec { host: "elsewhere", ..spec(&rig.pki.jan_agent, "sys kit", &[]) });
+        let mut out = Recorder::new();
+        mcp.serve(&request(&wrong, Some(json!("t"))), &AtomicBool::new(false), &mut out);
+        assert_eq!(content_type(&out), "application/json");
+        assert_eq!(out.comments(), 0);
+        assert!(out.chunks[0].1.contains("invalid"), "{:?}", out.chunks);
+        // Busy is a plain 503 as well.
+        let busy = Rig::with(Plan::Silent, 0, None);
+        let mut out = Recorder::new();
+        Mcp::new(&busy.service).serve(
+            &request(&busy.jan("sys kit", &[]), Some(json!("t"))),
+            &AtomicBool::new(false),
+            &mut out,
+        );
+        assert_eq!(out.head.unwrap().1, 503);
+    }
+
+    #[test]
+    fn without_a_progress_token_the_answer_is_plain_json_when_it_is_decided() {
+        let rig = Rig::new(Plan::Silent);
+        rig.pledge.set(Plan::ApproveAfter(Duration::from_millis(400), rig.pki.confirmed.clone()));
+        let mut mcp = Mcp::new(&rig.service);
+        mcp.keepalive = Duration::from_millis(50);
+        let mut out = Recorder::new();
+        mcp.serve(&request(&rig.jan("sys kit", &[]), None), &AtomicBool::new(false), &mut out);
+        assert_eq!(content_type(&out), "application/json");
+        assert!(out.head.as_ref().unwrap().0 >= Duration::from_millis(300), "the head waits for the answer");
+        assert_eq!(out.comments(), 0);
+        assert_eq!(out.chunks.len(), 1);
+    }
+
+    #[test]
+    fn a_client_that_is_gone_when_a_write_fails_cancels_the_call_and_nothing_runs() {
+        let rig = Rig::new(Plan::Silent);
+        let mut mcp = Mcp::new(&rig.service);
+        mcp.keepalive = Duration::from_millis(50);
+        let mut out = Recorder::new();
+        out.fail_after_head = true;
+        let sent = rig.jan("sys kit", &[]);
+        mcp.serve(&request(&sent, Some(json!("t"))), &AtomicBool::new(false), &mut out);
+        rig.pledge.wait_for("cancel");
+        assert!(rig.ran().is_empty());
+        assert_eq!(rig.service.waiting(), 0);
+        assert_eq!(word(&rig.outcome(&sent)), "refused/invalid", "the identifier stays spent");
+    }
+
+    #[test]
+    fn the_transports_cancel_flag_does_the_same() {
+        let rig = Arc::new(Rig::new(Plan::Silent));
+        let cancel = Arc::new(AtomicBool::new(false));
+        let sent = rig.jan("sys kit", &[]);
+        let worker = {
+            let (rig, cancel) = (rig.clone(), cancel.clone());
+            std::thread::spawn(move || {
+                let mut out = Recorder::new();
+                Mcp::new(&rig.service).serve(&request(&sent, Some(json!("t"))), &cancel, &mut out);
+                out.chunks.len()
+            })
+        };
+        rig.pledge.wait_for("submit");
+        cancel.store(true, Ordering::SeqCst);
+        worker.join().unwrap();
+        rig.pledge.wait_for("cancel");
+        assert!(rig.ran().is_empty());
+    }
 }

@@ -294,3 +294,40 @@ size); `probe setup`.
 The HTTP decision above. From p-act: nothing new. From pledge's side: the
 fake in `service_tests.rs` is what stands in for it until pledge's development
 form exists; it speaks exactly `p_act::exchange`.
+
+---
+
+## Update: the stream `pact` needs (`pact.md` section 7, commit 32ea5dc)
+
+**Confirmed, and built into the MCP layer** (`mcp.rs`, `service.rs`): when a call
+carries a `progressToken`, the response head (`text/event-stream`) is written as
+soon as the service has **accepted** the call (first checks passed, a place to
+wait reserved), not at the first notification; then a `: keepalive` comment at
+least every 15 seconds while the person is asked and while the verb runs;
+two fixed-text progress notifications; the JSON-RPC response as the last event.
+Refused before acceptance (`invalid`, protocol error, `503`) is plain JSON.
+Without a token: plain JSON when decided. A failed write, or the transport's
+cancel flag, cancels the call. The final message is at most 4 MiB (asserted at
+compile time against the dispatcher's 1 MiB cap); notifications and comments
+stay far below `pact`'s 64 KiB. The MCP layer now writes through a
+`ResponseWriter` (`head`, `body`, each written at once), which is all a transport
+has to implement; `Mcp::handle` collects a response whole for tests.
+
+Also: a verb is killed after 10 minutes (`RUN_LIMIT`, `unavailable`); a limit per
+verb in the table is not built.
+
+**Tested** (in-process with a recording writer and a fake pledge): the head at
+acceptance, long before an approval that takes 1.2 s; at least 5 comments while
+waiting, none of the gaps in the stream above 0.5 s with a 100 ms keepalive; the
+two notifications in order with the token and increasing `progress`; comments
+while a verb runs (the dispatcher held up 0.9 s); plain JSON for a call refused
+before acceptance and for `503`, and without a token; a client that is gone
+cancels the call and nothing runs. `cargo test -p p-robe`: 114 unit + 3 CLI;
+with `--features test-verbs`: 119 unit + 18 CLI; clippy clean.
+
+**Does not fit, to say rather than choose silently:** nothing in how the service
+is served. One point: the 15-second keepalive and the head-at-acceptance need a
+transport that **writes and flushes each piece at once** and notices a closed
+connection on write (or sets the cancel flag); `hyper` can (a streaming body
+with a channel), a hand-written server could. That is a requirement on the
+transport, which still is not built (see the blocker above).

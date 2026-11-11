@@ -75,6 +75,29 @@ pub enum Handled {
     BadParams(&'static str),
 }
 
+/// What a waiting call has reached, for the stream the agent reads.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Event {
+    /// The first checks passed and there is a place to wait: from here the call is going to be decided.
+    Accepted,
+    /// The request is with the person's machine.
+    Submitted,
+    /// The approval verified; the verb is about to run.
+    Approved,
+}
+
+impl Event {
+    /// The words for a progress notification, if it has any. Fixed text: nothing received is in it.
+    #[must_use]
+    pub fn message(self) -> Option<&'static str> {
+        match self {
+            Event::Accepted => None,
+            Event::Submitted => Some("handed to your person's machine"),
+            Event::Approved => Some("approved, running"),
+        }
+    }
+}
+
 /// The service.
 pub struct Service {
     pub settings: Settings,
@@ -135,6 +158,11 @@ impl Service {
     /// Handles one tool call to its end. `cancel` is set when the agent's
     /// connection goes away.
     pub fn handle(&self, tool: &ToolCall<'_>, cancel: &AtomicBool) -> Handled {
+        self.handle_with(tool, cancel, &|_| {})
+    }
+
+    /// As [`Service::handle`], telling `events` what the call has reached.
+    pub fn handle_with(&self, tool: &ToolCall<'_>, cancel: &AtomicBool, events: &dyn Fn(Event)) -> Handled {
         let Ok(call_bytes) = STANDARD.decode(tool.call) else {
             return Handled::BadParams("procession/call is not base64");
         };
@@ -154,7 +182,7 @@ impl Service {
             }
         };
         let id = call.id().as_str().to_string();
-        let (outcome, exact, hash) = match self.decide(tool, &call, &armoured, cancel) {
+        let (outcome, exact, hash) = match self.decide(tool, &call, &armoured, cancel, events) {
             Ok(done) => done,
             Err(Stop::Busy) => return Handled::Busy,
             Err(Stop::Cancelled(hash)) => {
@@ -184,6 +212,7 @@ impl Service {
         call: &Call,
         armoured: &str,
         cancel: &AtomicBool,
+        events: &dyn Fn(Event),
     ) -> Result<(Outcome, String, String), Stop> {
         let early = |(outcome, exact): Ended| Stop::Ended(outcome, exact, String::new());
         // 1. The call names this host and this service, has not ended, names a verb of the table
@@ -232,6 +261,7 @@ impl Service {
             return Err(Stop::Busy);
         }
         let _slot = Slot(&self.waiting);
+        events(Event::Accepted);
         match self.store.record(call.id(), deadline) {
             Ok(()) => {}
             Err(StoreError::Used) => return Err(ended(invalid("call-used"))),
@@ -243,6 +273,7 @@ impl Service {
         let note = |text: &str| {
             (self.log)(&format!("call id={} hash={hash} note={}", call.id().as_str(), crate::audit::quote(text)))
         };
+        events(Event::Submitted);
         let approval = match self.pledge.submit_and_wait(&submit, deadline, cancel, &note) {
             Waited::Cancelled => return Err(Stop::Cancelled(hash.clone())),
             Waited::Deadline => return Err(ended((Outcome::Expired, "deadline".into()))),
@@ -270,6 +301,7 @@ impl Service {
             return Err(Stop::Cancelled(hash.clone()));
         }
         // 5. Run the dispatcher, refusing above what was approved.
+        events(Event::Approved);
         let (outcome, exact) = self.run(rating, call.action(), call.params());
         Ok((outcome, format!("{exact} approval={}", ApprovalKindWord(kind)), hash.clone()))
     }
@@ -291,6 +323,7 @@ impl Service {
         let _one_at_a_time = self.run_lock.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         match self.runner.run(within, action, params) {
             Err(why) => unavailable(format!("run:{why}")),
+            Ok(out) if out.timed_out => unavailable("run-limit"),
             Ok(out) => match out.rc {
                 crate::dispatch::RC_REFUSED => (Outcome::Refused(Why::NotAllowed), "dispatcher-refused".into()),
                 crate::dispatch::RC_UNAVAILABLE => unavailable("dispatcher-unavailable"),
