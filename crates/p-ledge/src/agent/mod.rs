@@ -18,7 +18,7 @@ pub mod text;
 pub mod wire;
 
 #[cfg(test)]
-mod testing;
+pub(crate) mod testing;
 
 use std::fmt;
 

@@ -24,3 +24,9 @@ p-act = { path = "../p-act" }
 ring = "0.17"
 # known_hosts keys and fingerprints.
 base64 = "0.23"
+# Records, control messages and state files are JSON lines.
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+# Peer credentials of a socket, flock, isatty, proc_pidpath.
+libc = "0.2"
+thiserror = "2"

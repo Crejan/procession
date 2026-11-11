@@ -1,0 +1,351 @@
+//! The command line: `pledge serve`, `keys`, `programs`, `history`, and the
+//! hidden `key-holder`. Exit codes: 0 done, 2 usage, 3 failed, 4 refused (a
+//! rule or the person said no).
+
+use std::io::{self, BufRead, Write};
+use std::path::PathBuf;
+use std::process::ExitCode;
+use std::sync::Arc;
+
+use serde_json::{Value, json};
+
+use crate::agent::text::escape_unshowable;
+use crate::control::{Client, ClientError};
+use crate::dialog::Terminal;
+use crate::error::{Error, Result};
+use crate::holder::{KeyStore, serve_holder};
+use crate::paths::Paths;
+use crate::record::read_and_verify;
+use crate::serve::{self, Config};
+
+/// One verb of the command line.
+pub struct Verb {
+    /// What is typed.
+    pub name: &'static str,
+    /// One line for the help.
+    pub summary: &'static str,
+}
+
+/// The verbs, in the help's order. `key-holder` is not listed: `pledge serve`
+/// starts it.
+pub const VERBS: &[Verb] = &[
+    Verb { name: "serve", summary: "run pledge: the SSH agent socket, the dialogs, the record (keys in files)" },
+    Verb { name: "keys", summary: "list the keys, make one (shared, bound), retire one" },
+    Verb { name: "programs", summary: "list the local programs and admit, block or forget one" },
+    Verb { name: "agents", summary: "start an agent with a delegation, list the running ones, withdraw one" },
+    Verb { name: "history", summary: "every signing request, with who asked; --verify checks the chain" },
+];
+
+/// The help text.
+#[must_use]
+pub fn usage() -> String {
+    let mut text = String::from("usage: pledge <verb> [args]\n\nverbs:\n");
+    for verb in VERBS {
+        text.push_str(&format!("  {:<10} {}\n", verb.name, verb.summary));
+    }
+    text.push_str(
+        "\nserve    [--state-dir D] [--socket-dir D] [--known-hosts FILE]...\n\
+         keys     list | create shared [--type T] | create bound --program P --user U --host H [--type T] | retire FINGERPRINT\n\
+         programs list | admit PROGRAM | block PROGRAM | forget PROGRAM\n\
+         history  [--type T] [--result R] [--format json] [--verify]\n\
+         \nall but serve take [--state-dir D] [--socket-dir D]; types: ed25519 (default), ecdsa-p256\n",
+    );
+    text
+}
+
+/// Removes `--name value` from `args`.
+fn take_value(args: &mut Vec<String>, name: &str) -> Option<String> {
+    let at = args.iter().position(|a| a == name)?;
+    (at + 1 < args.len()).then(|| {
+        args.remove(at);
+        args.remove(at)
+    })
+}
+
+/// Removes every `--name value`.
+fn take_values(args: &mut Vec<String>, name: &str) -> Vec<String> {
+    std::iter::from_fn(|| take_value(args, name)).collect()
+}
+
+fn take_switch(args: &mut Vec<String>, name: &str) -> bool {
+    args.iter().position(|a| a == name).map(|at| args.remove(at)).is_some()
+}
+
+/// Runs the command line.
+#[must_use]
+pub fn main(mut args: Vec<String>) -> ExitCode {
+    if args.is_empty() || matches!(args[0].as_str(), "help" | "--help" | "-h") {
+        print!("{}", usage());
+        return ExitCode::SUCCESS;
+    }
+    if matches!(args[0].as_str(), "--version" | "-V") {
+        println!("pledge {}", env!("CARGO_PKG_VERSION"));
+        return ExitCode::SUCCESS;
+    }
+    let verb = args.remove(0);
+    let result = match verb.as_str() {
+        "serve" => serve_verb(args),
+        "key-holder" => holder_verb(args),
+        "keys" => keys_verb(args),
+        "programs" => programs_verb(args),
+        "history" => history_verb(args),
+        "agents" => {
+            eprintln!("pledge agents: not implemented yet");
+            return ExitCode::from(2);
+        }
+        other => {
+            eprintln!("pledge: unknown verb '{other}'\n\n{}", usage());
+            return ExitCode::from(2);
+        }
+    };
+    match result {
+        Ok(code) => ExitCode::from(code),
+        Err(Failure::Usage(message)) => {
+            eprintln!("pledge {verb}: {message}\n\n{}", usage());
+            ExitCode::from(2)
+        }
+        Err(Failure::Refused(message)) => {
+            eprintln!("pledge {verb}: {message}");
+            ExitCode::from(4)
+        }
+        Err(Failure::Failed(message)) => {
+            eprintln!("pledge {verb}: {message}");
+            ExitCode::from(3)
+        }
+    }
+}
+
+enum Failure {
+    Usage(String),
+    Refused(String),
+    Failed(String),
+}
+
+impl From<Error> for Failure {
+    fn from(error: Error) -> Self {
+        Self::Failed(error.to_string())
+    }
+}
+
+impl From<ClientError> for Failure {
+    fn from(error: ClientError) -> Self {
+        match error {
+            ClientError::Refused(code) => Self::Refused(code),
+            ClientError::Io(e)
+                if e.kind() == io::ErrorKind::NotFound || e.kind() == io::ErrorKind::ConnectionRefused =>
+            {
+                Self::Failed("pledge serve is not running (no answer on its control socket)".into())
+            }
+            other => Self::Failed(other.to_string()),
+        }
+    }
+}
+
+type Done = std::result::Result<u8, Failure>;
+
+fn paths(args: &mut Vec<String>) -> Result<Paths> {
+    let state = take_value(args, "--state-dir").map(PathBuf::from);
+    let sockets = take_value(args, "--socket-dir").map(PathBuf::from);
+    Paths::resolve(state, sockets)
+}
+
+fn no_more(args: &[String]) -> std::result::Result<(), Failure> {
+    args.first().map_or(Ok(()), |extra| Err(Failure::Usage(format!("unexpected '{extra}'"))))
+}
+
+fn serve_verb(mut args: Vec<String>) -> Done {
+    let paths = paths(&mut args)?;
+    let mut known_hosts: Vec<PathBuf> =
+        take_values(&mut args, "--known-hosts").into_iter().map(PathBuf::from).collect();
+    if known_hosts.is_empty() {
+        known_hosts = serve::default_known_hosts();
+    }
+    no_more(&args)?;
+    let holder_program = std::env::current_exe().map_err(Error::io("finding the pledge program"))?;
+    serve::run(Config { paths, holder_program, known_hosts, dialogs: Arc::new(Terminal::stdio()) })?;
+    Ok(0)
+}
+
+fn holder_verb(mut args: Vec<String>) -> Done {
+    let dir = take_value(&mut args, "--keys-dir").ok_or_else(|| Failure::Usage("--keys-dir is needed".into()))?;
+    no_more(&args)?;
+    let store = KeyStore::open(&PathBuf::from(dir))?;
+    serve_holder(store, io::stdin().lock(), io::stdout().lock())?;
+    Ok(0)
+}
+
+fn client(paths: &Paths) -> std::result::Result<Client, Failure> {
+    Ok(Client::connect(&paths.control_socket())?)
+}
+
+fn keys_verb(mut args: Vec<String>) -> Done {
+    let paths = paths(&mut args)?;
+    let json_out = take_value(&mut args, "--format").as_deref() == Some("json");
+    let key_type = take_value(&mut args, "--type");
+    let (program, user, host) =
+        (take_value(&mut args, "--program"), take_value(&mut args, "--user"), take_value(&mut args, "--host"));
+    let mut words = args.iter().map(String::as_str);
+    match (words.next(), words.next(), words.next()) {
+        (Some("list"), None, None) => {
+            let data = client(&paths)?.call("keys.list", json!({}))?;
+            if json_out {
+                println!("{data}");
+            } else {
+                for key in data["keys"].as_array().into_iter().flatten() {
+                    let show = |name: &str| escape_unshowable(key[name].as_str().unwrap_or(""));
+                    println!("{:<7} {}  {}", show("purpose"), show("fingerprint"), show("public"));
+                }
+            }
+            Ok(0)
+        }
+        (Some("create"), Some(purpose @ ("shared" | "bound")), None) => {
+            let mut create = json!({"purpose": purpose});
+            for (name, value) in [("key_type", key_type), ("program", program), ("user", user), ("host", host)] {
+                if let Some(value) = value {
+                    create[name] = Value::String(value);
+                }
+            }
+            let data = client(&paths)?.call("keys.create", create)?;
+            println!("{}", data["public"].as_str().map(escape_unshowable).unwrap_or_default());
+            Ok(0)
+        }
+        (Some("retire"), Some(fingerprint), None) => {
+            client(&paths)?.call("keys.retire", json!({"fingerprint": fingerprint}))?;
+            Ok(0)
+        }
+        _ => Err(Failure::Usage("keys list | create shared|bound ... | retire FINGERPRINT".into())),
+    }
+}
+
+fn programs_verb(mut args: Vec<String>) -> Done {
+    let paths = paths(&mut args)?;
+    let json_out = take_value(&mut args, "--format").as_deref() == Some("json");
+    let mut words = args.iter().map(String::as_str);
+    match (words.next(), words.next(), words.next()) {
+        (Some("list"), None, None) => {
+            let data = client(&paths)?.call("programs.list", json!({}))?;
+            if json_out {
+                println!("{data}");
+            } else {
+                for entry in data["programs"].as_array().into_iter().flatten() {
+                    println!(
+                        "{:<8} {}",
+                        entry["state"].as_str().unwrap_or("?"),
+                        escape_unshowable(entry["program"].as_str().unwrap_or(""))
+                    );
+                }
+            }
+            Ok(0)
+        }
+        (Some("admit"), Some(program), None) => {
+            // Admitting generally asks for the program's name to be typed, not for a click.
+            // SAFETY: isatty only reads the descriptor's type.
+            if unsafe { libc::isatty(0) } != 1 {
+                return Err(Failure::Refused(
+                    "admitting a program asks for its name to be typed, and there is no terminal".into(),
+                ));
+            }
+            print!("Type the program's name to admit it generally ({}): ", escape_unshowable(program));
+            io::stdout().flush().map_err(Error::io("writing"))?;
+            let mut typed = String::new();
+            io::stdin().lock().read_line(&mut typed).map_err(Error::io("reading"))?;
+            if typed.trim_end_matches(['\n', '\r']) != program {
+                return Err(Failure::Refused("the name typed is not the program's".into()));
+            }
+            client(&paths)?.call("programs.admit", json!({"program": program, "scope": "generally"}))?;
+            Ok(0)
+        }
+        (Some(command @ ("block" | "forget")), Some(program), None) => {
+            client(&paths)?.call(&format!("programs.{command}"), json!({"program": program}))?;
+            Ok(0)
+        }
+        _ => Err(Failure::Usage("programs list | admit PROGRAM | block PROGRAM | forget PROGRAM".into())),
+    }
+}
+
+/// One line of `pledge history` for an entry.
+#[must_use]
+pub fn history_line(entry: &Value) -> String {
+    let text = |name: &str| entry[name].as_str().map(escape_unshowable);
+    let mut line =
+        format!("{} #{} {}", text("time").unwrap_or_default(), entry["seq"], text("type").unwrap_or_default());
+    let mut add = |label: &str, value: Option<String>| {
+        if let Some(value) = value {
+            line.push_str(&format!(" {label}{value}"));
+        }
+    };
+    match entry["type"].as_str() {
+        Some("signing-request") => {
+            add("", text("result"));
+            add("(", text("reason").map(|r| format!("{r})")));
+            add("program=", text("program").or_else(|| text("program_hash")));
+            add("", text("use"));
+            add("user=", text("user"));
+            add("host=", text("host").or_else(|| text("host_fingerprint")));
+            add("namespace=", text("namespace"));
+            add("key=", text("key_fingerprint"));
+        }
+        Some("event") => {
+            add("", text("event"));
+            for name in ["program", "purpose", "key_fingerprint", "count"] {
+                add(&format!("{name}="), text(name));
+            }
+        }
+        _ => {}
+    }
+    line
+}
+
+fn history_verb(mut args: Vec<String>) -> Done {
+    let paths = paths(&mut args)?;
+    let json_out = take_value(&mut args, "--format").as_deref() == Some("json");
+    let (entry_type, result) = (take_value(&mut args, "--type"), take_value(&mut args, "--result"));
+    let verify = take_switch(&mut args, "--verify");
+    no_more(&args)?;
+    let report = read_and_verify(&paths.record())?;
+    if let Some(seq) = report.starts_at {
+        eprintln!("pledge: earlier entries were removed; the record starts at #{seq}");
+    }
+    for entry in &report.entries {
+        if entry_type.as_deref().is_some_and(|t| entry["type"] != t)
+            || result.as_deref().is_some_and(|r| entry["result"] != r)
+        {
+            continue;
+        }
+        if json_out {
+            println!("{entry}");
+        } else {
+            println!("{}", history_line(entry));
+        }
+    }
+    for broken in &report.breaks {
+        eprintln!("pledge: the record breaks at line {}: {}", broken.line, broken.problem);
+    }
+    Ok(if verify && !report.breaks.is_empty() { 3 } else { 0 })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_history_line_names_who_asked_and_what_without_raw_control_characters() {
+        let entry = json!({"time":"2026-11-11T15:04:05Z","seq":7,"type":"signing-request","result":"refused","reason":"blocked",
+            "program":"/usr/bin/curl\u{1B}[2J","use":"login","user":"jan","host":"a.example"});
+        let line = history_line(&entry);
+        assert!(line.contains("refused (blocked)"), "{line}");
+        assert!(line.contains("program=/usr/bin/curl\\u{001B}[2J"), "{line}");
+        assert!(!line.contains('\u{1B}'));
+        assert!(line.contains("user=jan host=a.example"), "{line}");
+    }
+
+    #[test]
+    fn options_are_taken_out_of_the_arguments() {
+        let mut args: Vec<String> = ["list", "--state-dir", "/s", "--x"].map(String::from).to_vec();
+        assert_eq!(take_value(&mut args, "--state-dir").as_deref(), Some("/s"));
+        assert!(take_switch(&mut args, "--x"));
+        assert_eq!(args, ["list"]);
+        let mut dangling: Vec<String> = vec!["--state-dir".into()];
+        assert_eq!(take_value(&mut dangling, "--state-dir"), None);
+    }
+}
