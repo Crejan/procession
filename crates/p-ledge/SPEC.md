@@ -47,8 +47,10 @@ One key per purpose. A key is used for its purpose and nothing else.
 | delegation | an agent's certificate | never | each signature |
 | connection | pledge's sign-in to the broker | never | none |
 
-The SSH agent socket refuses a signature in any namespace the four lower
-keys use, whichever key is named.
+Every SSHSIG namespace ending in `@procession` is reserved for the approval
+system (`doc/approval-formats.md`, section 1). The SSH agent socket refuses
+a signature in any of them, whichever key is named. The connection key signs
+in the namespace `connection-v1@procession`.
 
 - Keys are made in the machine's key hardware and never leave it.
 - **How a key becomes known elsewhere.** `pledge keys` prints public parts.
@@ -130,7 +132,9 @@ What pledge does with a request, which arrives from the broker or, in stage
 1. It checks the call inside the request: signed under a delegation pledge
    issued itself, not ended, not withdrawn; the call's deadline has not
    passed and is not further away than the longest allowed; pledge has not
-   signed for this call's identifier before.
+   decided on this call's identifier before (`doc/approvals.md`, R5: the
+   same request again gets the same answer again, from a store on disk; a
+   different request under a used identifier is refused).
 2. It checks the request: signed by a service key that a host it knows
    certified; that host and the service's name are the ones the call names.
    The request holds the call as the bytes the agent signed, so action,
@@ -147,9 +151,11 @@ What pledge does with a request, which arrives from the broker or, in stage
    - `automatic`: it signs with the automatic approval key;
    - `ask`: it asks. If the person agrees: a presence check, and it signs
      with the confirmed approval key. If the person declines, it answers no.
-7. It keeps the call's identifier as used until the call's end, and records
-   the request, the answer (approved, declined, refused, expired), the key
-   and the agent.
+7. It keeps the call's identifier as used until the call's end, from the
+   moment it approved or the person declined, and records the request, the
+   answer (approved, declined, refused, expired; or cancelled, when the
+   service gave up first), the key and the agent. Without a record entry
+   there is no approval.
 
 A request rated at the top of any scale (`secret`, `lasting`, `outage`) is
 never signed with the automatic approval key: pledge does not let an automatic ceiling be set that high and
