@@ -17,8 +17,9 @@ isolated CPUs the same thread only competes with its owner's own work.
 ## Scope
 
 - Enforces where RT threads may run. It does not cure starvation (that is
-  stalld's job), does not throttle, never kills. It demotes a thread only
-  when the watchdog's `demote` is switched on (see Watchdog).
+  stalld's job), does not throttle, never kills. Demotion is the last
+  resort, when moving did not help and a housekeeping CPU stays starved
+  (see Watchdog).
 - Watches the housekeeping CPUs for starvation that affinity enforcement
   cannot prevent: exempt threads, failed moves, IRQ floods.
 - One host, one daemon, no network dependency for enforcement.
@@ -132,12 +133,19 @@ when an IRQ thread on H floods. The watchdog notices the result instead:
 a housekeeping CPU that no longer runs ordinary work. Ported from
 clockwork's watchdog, with the changes noted below.
 
-**Canaries.** One thread per housekeeping CPU, pinned there, `SCHED_OTHER`
+**Canaries.** One thread per watched CPU, pinned there, `SCHED_OTHER`
 at nice 0 (the class of `ksoftirqd` and the kworkers it stands in for),
 waking every `canary_interval` and stamping a monotonic time.
-- Only on H. On the isolated CPUs an RT thread owns its CPU by design; a
-  starved canary there is the normal case. (clockwork ran canaries on every
-  CPU and would demote the user's own cyclic thread on an isolated CPU.)
+- Watched CPUs come from `canary_cpus`: `"housekeeping"` (default, H),
+  `"all"`, or a CPU list (`"0-3,9"`). Default only H: on the isolated CPUs
+  an RT thread owns its CPU by design and a starved canary there is the
+  normal case. (clockwork ran canaries on every CPU and would demote the
+  user's own cyclic thread on an isolated CPU.)
+- Canaries on isolated CPUs are opt-in, for diagnosis (does the cyclic
+  thread ever yield?). There they only report: `starvation` and
+  `recovered` events and the staleness gauge, never an action.
+- Start and stop at runtime over the control socket (see Control); the
+  config sets the state at start.
 - Nice 0, not 19: a nice-19 canary falls behind under ordinary load and
   raises false alarms.
 
@@ -155,7 +163,12 @@ own housekeeping CPU, every `check_interval`:
   starved by a thread above `[self] priority`; with one housekeeping CPU the
   watchdog says so at start.
 
-**Actions**, each off by default, so the watchdog reports first:
+**Actions.** `demote` is on by default: it only fires when affinity
+enforcement could not help (move failed, thread re-pins itself) and the
+CPU stays starved past `starvation_act`; without it the host stays dead.
+`irq_move` is off by default: IRQ affinity is host-wide, can fight
+irqbalance or deliberate NIC tuning, and a false alarm could put the
+network IRQ on an unsuitable CPU.
 
 | Switch | When | What |
 |---|---|---|
@@ -164,7 +177,7 @@ own housekeeping CPU, every `check_interval`:
 
 At most one action per CPU per `cooldown`. `mode = "report"` applies here
 too: actions are evaluated and notified with `enforced = false`. Kernel
-threads are never acted on.
+threads are never acted on, and nothing is acted on for a CPU in A.
 
 **Relation to stalld.** stalld cures starvation by briefly boosting the
 starved thread; the watchdog names the culprit and tells its owner. Both
@@ -204,6 +217,25 @@ mode, allowed and housekeeping sets, the watchdog's staleness per CPU, the
 last 100 events. Read by p-layer; nothing else depends on it. p-usher has
 no network API.
 
+## Control
+
+Unix socket `/run/p-usher/control.sock`, mode 0600 root (group
+configurable via `control_group`), one JSON request and reply per line.
+The same binary is the client:
+
+```
+p-usher canary status
+p-usher canary start <cpus|housekeeping|all>
+p-usher canary stop  <cpus|housekeeping|all>
+```
+
+`start` adds CPUs to the watched set, `stop` removes them and drops their
+staleness from the status file and the gauge. Runtime changes are not
+written back to the config; a restart returns to `canary_cpus`. Each
+change is logged with the caller's uid (`SO_PEERCRED`). A CPU that goes
+offline loses its canary; one that comes back gets it again only if it is
+still in the watched set.
+
 ## Configuration
 
 `/etc/p-usher.toml`, every key optional:
@@ -232,6 +264,7 @@ retain = "15m"
 
 [watchdog]
 enabled = false
+canary_cpus = "housekeeping"  # or "all", or a CPU list like "0-3,9"
 canary_interval = "100ms"
 check_interval = "500ms"
 starvation_warn = "2s"
@@ -239,7 +272,7 @@ starvation_act = "5s"
 irq_warn_percent = 60
 irq_act_percent = 80
 cooldown = "5s"
-demote = false
+demote = true
 irq_move = false
 # irq_target = 0               # default: least-loaded housekeeping CPU
 
@@ -272,8 +305,11 @@ irq_move = false
   `CAP_SYS_NICE`, skipped otherwise.
 - Watchdog with a fake clock and synthetic thread tables: warn, act and
   recover thresholds; one event per episode; cooldown; attribution order;
-  exempt and kernel threads never acted on; no canary on an isolated CPU;
+  exempt and kernel threads never acted on; by default no canary on an
+  isolated CPU; an opted-in isolated canary reports but never acts;
   report mode yields the same events with `enforced = false`.
+- Control: start/stop changes the watched set and the status file; a
+  non-permitted peer is refused; restart returns to `canary_cpus`.
 - Status file: content and atomic replace.
 
 ## Shared code
