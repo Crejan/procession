@@ -538,3 +538,24 @@ non-root `sshd` can be picky), then at the test.
   in it; `pact serve` itself was not run.
 - `service_group` with a group other than the user's own.
 - Everything that needs a Secure Enclave, a broker or a real `probe`.
+
+## Step 3, third pass: the designer's reading of the 18 choices
+
+Merged `integration`. Changes:
+1. `deadline-past`, `call-used`, `expired`, `cancelled`: not stored (as built).
+2. `unknown-delegation` split: a call that is not a valid call (a certificate
+   breaking formats 3.1, a signature that does not verify, none) is `malformed`; a
+   well-formed call not under a delegation pledge answers for (unknown fingerprint,
+   another person's certificate, issuing key gone) is `unknown-delegation`;
+   ceilings in words that are not the scales give `unavailable`, not kept, and the
+   event `delegation-unusable` in the record. (A pending delegation no longer
+   exists: it is not stored before delivery.)
+3. A dialog shows a field whole: `action` and `claim` as p-act limits them, each
+   parameter up to 512 bytes; all parameters together over 2000 characters, or any
+   control or bidirectional mark, is `not-showable`. A 300-character parameter is
+   shown whole (tested); five of 450 are refused.
+4. A delegation started and not delivered: the event `delegation-not-delivered`,
+   never `delegation-withdrawn`.
+The 11-minute cap on kept verdicts is written next to `expiry()` as the 10 minutes
+of `MAX_DEADLINE_AHEAD_SECONDS` plus the 1 minute of `CLOCK_TOLERANCE_SECONDS`.
+Tests: 164 unit + 9 integration pass twice; clippy and fmt clean.

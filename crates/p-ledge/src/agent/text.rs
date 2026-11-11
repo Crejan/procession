@@ -27,6 +27,13 @@ pub fn escape_unshowable(text: &str) -> String {
         .collect()
 }
 
+/// Whether `text` holds no control character and no bidirectional mark (its length is
+/// the caller's limit, which differs by field).
+#[must_use]
+pub fn is_clean(text: &str) -> bool {
+    !text.chars().any(|c| is_control(c) || is_bidi(c))
+}
+
 /// Whether `text` can be shown as it is: at most [`MAX_FIELD_CHARS`]
 /// characters, none a control character or a bidirectional mark.
 #[must_use]

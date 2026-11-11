@@ -637,7 +637,11 @@ fn a_call_under_another_pledges_delegation_is_refused() {
     let loose = Agent { id: String::new(), signer: Signer::plain(plain.dir.path().join("loose")) };
     let (call, call_sig) = mine.call_with_id(&loose, &uuid(900), &[], 120);
     let (request, sig) = mine.request(&call, &call_sig, Rating::HARMLESS, "svc");
-    assert_eq!(refusal(&mine.connect().ask(&request, &sig)), PledgeReason::UnknownDelegation);
+    assert_eq!(
+        refusal(&mine.connect().ask(&request, &sig)),
+        PledgeReason::Malformed,
+        "no certificate: not a valid call"
+    );
 }
 
 #[test]
@@ -656,7 +660,7 @@ fn a_call_whose_signature_is_over_other_bytes_is_refused_even_under_a_real_deleg
     };
     let altered = Call::compose(&content(&["pid=999"])).expect("call");
     let (request, sig) = lab.request(&altered, &signed_for_other_params, Rating::HARMLESS, "svc");
-    assert_eq!(refusal(&lab.connect().ask(&request, &sig)), PledgeReason::UnknownDelegation);
+    assert_eq!(refusal(&lab.connect().ask(&request, &sig)), PledgeReason::Malformed, "the signature does not verify");
     assert_eq!(dialogs(&lab), 0);
 }
 
@@ -708,9 +712,13 @@ fn a_control_connection_that_ends_before_delivery_leaves_only_a_record_entry() {
     drop(client);
     handler.join().expect("handler");
     assert!(lab.rig.shared.approvals.delegations.all().is_empty(), "it never existed");
-    assert!(lab.rig.record().iter().any(|e| e["event"] == "delegation-withdrawn"
-        && e["by"] == "delivery-failed"
-        && e["delegation"] == id.as_str()));
+    assert!(
+        lab.rig.record().iter().any(|e| e["event"] == "delegation-not-delivered" && e["delegation"] == id.as_str())
+    );
+    assert!(
+        !lab.rig.record().iter().any(|e| e["event"] == "delegation-withdrawn"),
+        "nothing that could sign was stopped"
+    );
     assert!(!lab.rig.record().iter().any(|e| e["event"] == "delegation-issued"));
 }
 
@@ -801,12 +809,20 @@ fn a_request_not_signed_by_a_service_a_known_host_certified_is_refused_service_m
 fn a_field_that_cannot_be_shown_as_it_is_is_refused_and_a_request_that_does_not_parse_is_malformed() {
     let mut lab = Lab::new();
     let agent = lab.default_agent();
-    let long = "p".repeat(300);
-    let (request, sig) = lab.make(&agent, &[&long], INTERNAL);
+    // One long parameter (up to 512) is shown whole; all parameters together over 2000 characters are not.
+    lab.rig.dialogs.push(yes());
+    lab.rig.dialogs.push(yes());
+    let long_one = "q".repeat(300);
+    let (shown_request, shown_sig) = lab.make(&agent, &[&long_one], INTERNAL);
+    approval(&lab.connect().ask(&shown_request, &shown_sig));
+    assert!(shown(&lab).join("\n").contains(&format!("parameter: {long_one}")), "shown whole, not shortened");
+    let long = "p".repeat(450);
+    let params = [long.as_str(); 5];
+    let (request, sig) = lab.make(&agent, &params, INTERNAL);
     let mut svc = lab.connect();
     assert_eq!(refusal(&svc.ask(&request, &sig)), PledgeReason::NotShowable);
     assert_eq!(refusal(&svc.ask(&request, &sig)), PledgeReason::NotShowable);
-    assert_eq!(dialogs(&lab), 0);
+    assert_eq!(dialogs(&lab), 2, "only the first request's dialog and presence check");
     // Bytes that are not a request: refused malformed, for their hash, and the connection stays.
     let bytes = b"this is not a request";
     let armour = "-----BEGIN SSH SIGNATURE-----\nAAAA\n-----END SSH SIGNATURE-----\n";
@@ -984,4 +1000,23 @@ fn a_connection_may_have_sixteen_requests_open_and_the_seventeenth_ends_it() {
         }
     }
     assert!(saw_error, "too-many-open");
+}
+
+#[test]
+fn ceilings_pledge_cannot_read_are_unavailable_an_event_and_not_kept() {
+    let mut lab = Lab::new();
+    let agent = lab.default_agent();
+    let path = lab.rig.dir.path().join("delegations.json");
+    let mut file: Value = serde_json::from_slice(&std::fs::read(&path).expect("read")).expect("json");
+    file["delegations"][0]["ask"] = json!({"exposure": "everything", "damage": "none", "disruption": "none"});
+    std::fs::write(&path, file.to_string()).expect("write");
+    lab.rig.restart();
+    let (request, sig) = lab.make(&agent, &[], Rating::HARMLESS);
+    let mut svc = lab.connect();
+    assert_eq!(refusal(&svc.ask(&request, &sig)), PledgeReason::Unavailable);
+    assert!(lab.rig.record().iter().any(|e| e["event"] == "delegation-unusable"), "the person learns of it");
+    assert!(
+        lab.rig.shared.approvals.answers.answer(&request.hash().to_string(), now()).is_none(),
+        "pledge's fault is not a verdict"
+    );
 }
