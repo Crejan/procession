@@ -134,6 +134,7 @@ mod rig {
             // Close the old record so that its lock is released.
             *self.shared.record.lock().expect("lock") = Record::failing();
             self.shared = Arc::new(Self::shared_for(&self.dir, &self.dialogs, self.live));
+            self.shared.settle_lost();
         }
 
         pub fn key(&self, meta: KeyMeta) -> Vec<u8> {

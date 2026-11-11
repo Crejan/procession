@@ -574,3 +574,22 @@ the lock before it says another `pledge serve` holds it (`open_waiting` for a
 different wait); a real second instance is still refused, after the wait.
 Result: 0 failures in 40 runs of the unit tests (before: 4 of 32 in the lead's
 runs). I did not reproduce the failure before the fix myself.
+
+## Stage-1 run: decisions 1 to 4
+
+1. `pledge history` prints a legend on standard error (and `--help` says the
+   same): `approved` means this machine signed, not that the action was done; what
+   ran is in the service's own log, joined by the call's identifier. `record.md`
+   section 9 likewise.
+2. A submitter gone at or after the deadline, or within 2 s before it
+   (`approvals::CANCEL_AS_EXPIRED_SECONDS`, local until `p_act::limits` holds it), is
+   recorded `expired`; earlier `cancelled`. Tested at 3 s before, 1 s before and after.
+3. `received` entry before a request that waits is queued or shown (no record, no
+   dialog, tested); the answer is a second entry with the same hash; one answered at
+   once keeps one entry. At start (`Shared::settle_lost`, before `started`) every
+   `received` without an answer gets `lost` (when received, last entry before the
+   start). Test with the real binary: killed with a dialog open, restarted,
+   `history --verify` exits 0 and shows `received` then `lost`.
+4. `Call::showable()` from p-act replaces my 2000-character sum; the person's name
+   stays checked by pledge.
+Unit tests 20 runs in a loop: 0 failures.

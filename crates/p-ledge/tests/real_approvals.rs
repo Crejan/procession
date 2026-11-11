@@ -18,7 +18,7 @@ use p_act::exchange::{
 };
 use p_act::rating::{Damage, Disruption, Exposure, Rating};
 use p_act::sign::{ApprovalKind, ApprovalTrust, PublicKey, Signer, sign_call, sign_request, verify_approval};
-use p_act::{Call, CallContent, CallId, Request, ServiceId, Timestamp};
+use p_act::{Call, CallContent, CallId, Document, Request, ServiceId, Timestamp};
 use serde_json::{Value, json};
 
 fn keygen(args: &[&str]) {
@@ -307,4 +307,60 @@ fn agents_start_refuses_without_services_and_a_delegation_it_could_not_deliver_n
     assert!(events.iter().any(|(e, _)| e == "delegation-not-delivered"), "{events:?}");
     assert!(!events.iter().any(|(e, _)| e == "delegation-withdrawn"));
     assert!(!events.iter().any(|(e, _)| e == "delegation-issued"));
+}
+
+#[test]
+fn a_kill_with_a_dialog_open_leaves_received_and_the_next_start_records_lost() {
+    let mut server = start("lost", true);
+    make_keys(&mut server);
+    let (agent, _) = agent(&mut server, &[]);
+    let (c, sig) = call(&agent, 20, &["pid=20"], 300);
+    let request = Request::compose(&c, &sig, INTERNAL).expect("request");
+    let mut service = Service::connect(&server);
+    let request_sig = sign_request(&service.signer, &request).expect("sign request");
+    let submit = Submit::new(request.clone(), &request_sig).expect("submit");
+    write_message(&mut service.stream, &Message::Submit(submit), ClearancePolicy::Refused).expect("write");
+    // The dialog is open: nobody answers it.
+    server.wait_for("action:");
+    let before = server.history();
+    assert!(before.iter().any(|e| e["type"] == "received"), "received is on disk before any answer");
+    assert!(!before.iter().any(|e| e["result"] == "lost"));
+    // Kill the real binary, and start it again on the same directories.
+    let (state, sockets) = (server.state.clone(), server.sockets.clone());
+    let mut child = std::mem::replace(&mut server.child, Command::new("true").spawn().expect("spawn"));
+    child.kill().expect("kill");
+    child.wait().expect("wait");
+    server.child = Command::new(common::PLEDGE)
+        .args(["serve", "--state-dir"])
+        .arg(&state)
+        .arg("--socket-dir")
+        .arg(&sockets)
+        .arg("--known-hosts")
+        .arg(server._dir.join("known_hosts"))
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("restart");
+    for _ in 0..100 {
+        if UnixStream::connect(sockets.join("service.sock")).is_ok() {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    // `history --verify` exits 0 (the chain holds) and shows received, then lost, for the same request.
+    let history = server.history();
+    let hash = request.hash().to_string();
+    let positions: Vec<(usize, &str)> = history
+        .iter()
+        .enumerate()
+        .filter(|(_, e)| e["request_hash"] == hash.as_str())
+        .map(|(i, e)| (i, if e["type"] == "received" { "received" } else { e["result"].as_str().unwrap_or("?") }))
+        .collect();
+    assert_eq!(positions.iter().map(|(_, w)| *w).collect::<Vec<_>>(), ["received", "lost"], "{positions:?}");
+    let text_output = server.ok(&["history"]);
+    assert!(text_output.contains("received") && text_output.contains("lost"), "{text_output}");
+    // The text output carries the legend on standard error.
+    let out = server.pledge(&["history"]);
+    assert!(text(&out).contains("`approved` means this machine signed"), "{}", text(&out));
 }

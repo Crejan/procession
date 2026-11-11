@@ -1020,3 +1020,105 @@ fn ceilings_pledge_cannot_read_are_unavailable_an_event_and_not_kept() {
         "pledge's fault is not a verdict"
     );
 }
+
+// ---------------------------------------------------------------------------
+// received, lost, and where a cancel becomes an expiry
+// ---------------------------------------------------------------------------
+
+fn types(lab: &Lab) -> Vec<(String, Option<String>)> {
+    lab.rig
+        .record()
+        .iter()
+        .filter(|e| e["type"] == "received" || e["type"] == "request")
+        .map(|e| (e["type"].as_str().expect("type").to_owned(), e["result"].as_str().map(str::to_owned)))
+        .collect()
+}
+
+#[test]
+fn a_request_that_waits_is_recorded_when_it_arrives_and_answered_in_a_second_entry_and_one_answered_at_once_has_one() {
+    let mut lab = Lab::new();
+    let agent = lab.default_agent();
+    // At once (automatic): a single entry.
+    let (request, sig) = lab.make(&agent, &[], Rating::HARMLESS);
+    approval(&lab.connect().ask(&request, &sig));
+    assert_eq!(types(&lab), [("request".to_owned(), Some("approved".to_owned()))]);
+    // One that waits: `received` first, while the dialog is open; the answer names the same hash.
+    lab.rig.dialogs.push(hold());
+    let (request, sig) = lab.make(&agent, &["x"], INTERNAL);
+    let mut svc = lab.connect();
+    svc.submit(&request, &sig);
+    thread::sleep(Duration::from_millis(400));
+    let entries = lab.rig.record();
+    let received = entries.iter().find(|e| e["type"] == "received").expect("received while waiting");
+    assert_eq!(received["request_hash"], request.hash().to_string());
+    assert_eq!((received["action"].as_str(), received["mode"].as_str()), (Some("rt procs"), Some("ask")));
+    assert_eq!(types(&lab).len(), 2, "no answer yet");
+    svc.cancel(&request);
+    thread::sleep(Duration::from_millis(400));
+    assert_eq!(
+        types(&lab),
+        [
+            ("request".to_owned(), Some("approved".to_owned())),
+            ("received".to_owned(), None),
+            ("request".to_owned(), Some("cancelled".to_owned()))
+        ]
+    );
+    assert_eq!(lab.entries()[1]["request_hash"], request.hash().to_string());
+}
+
+#[test]
+fn no_record_no_dialog() {
+    let mut lab = Lab::new();
+    let agent = lab.default_agent();
+    let (request, sig) = lab.make(&agent, &[], INTERNAL);
+    *lab.rig.shared.record.lock().expect("lock") = crate::record::Record::failing();
+    assert_eq!(refusal(&lab.connect().ask(&request, &sig)), PledgeReason::Unavailable);
+    assert_eq!(dialogs(&lab), 0, "the dialog was never shown");
+}
+
+#[test]
+fn a_submitter_gone_three_seconds_before_the_deadline_cancels_one_gone_one_second_before_or_after_it_expires() {
+    let mut lab = Lab::new();
+    let agent = lab.default_agent();
+    let mut results = Vec::new();
+    for (deadline_in, gone_after_ms) in [(4_i64, 300_u64), (4, 3000), (2, 3000)] {
+        lab.rig.dialogs.push(hold());
+        let (call, call_sig) = lab.call(&agent, &[], deadline_in);
+        let (request, sig) = lab.request(&call, &call_sig, INTERNAL, "svc");
+        let mut svc = lab.connect();
+        svc.submit(&request, &sig);
+        thread::sleep(Duration::from_millis(gone_after_ms));
+        drop(svc); // the connection ends: the submitter is gone
+        thread::sleep(Duration::from_millis(700));
+        results.push(lab.entries().last().expect("entry")["result"].as_str().expect("result").to_owned());
+    }
+    // 3 s before: cancelled. 1 s before: expired. 1 s after (the deadline passed with the dialog open): expired.
+    assert_eq!(results, ["cancelled", "expired", "expired"]);
+}
+
+#[test]
+fn a_request_pledge_was_holding_when_it_went_down_is_recorded_lost_at_the_next_start() {
+    let mut lab = Lab::new();
+    let agent = lab.default_agent();
+    lab.rig.dialogs.push(hold());
+    lab.rig.dialogs.push(hold());
+    let mut svc = lab.connect();
+    let (first, first_sig) = lab.make(&agent, &["one"], INTERNAL);
+    let (second, second_sig) = lab.make(&agent, &["two"], INTERNAL);
+    svc.submit(&first, &first_sig);
+    svc.submit(&second, &second_sig);
+    thread::sleep(Duration::from_millis(500));
+    lab.rig.restart();
+    let entries = lab.rig.record();
+    let lost: Vec<&Value> = entries.iter().filter(|e| e["result"] == "lost").collect();
+    assert_eq!(lost.len(), 2, "{entries:?}");
+    let hashes: Vec<&str> = lost.iter().filter_map(|e| e["request_hash"].as_str()).collect();
+    assert!(
+        hashes.contains(&first.hash().to_string().as_str()) && hashes.contains(&second.hash().to_string().as_str())
+    );
+    assert!(lost.iter().all(|e| e["received"].is_string() && e["last_entry_before_start"].is_string()));
+    // Settled once: another start finds nothing more to settle.
+    lab.rig.restart();
+    assert_eq!(lab.rig.record().iter().filter(|e| e["result"] == "lost").count(), 2);
+    drop(svc);
+}

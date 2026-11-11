@@ -18,7 +18,7 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::Mutex;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicI64, AtomicU64, Ordering};
 use std::time::Duration;
 
 use base64::Engine as _;
@@ -40,6 +40,11 @@ use crate::sshsig;
 
 /// The namespace of an approval.
 pub const APPROVAL_NAMESPACE: &str = "approval-v1@procession";
+/// A request whose submitter goes away at or after its deadline, or within this many seconds
+/// before it, is recorded `expired` and not `cancelled`: a service that gives up at its own deadline
+/// does so a moment before pledge's clock reaches it. (If `p_act::limits` should hold this number,
+/// it moves there; until then it is here.)
+pub const CANCEL_AS_EXPIRED_SECONDS: i64 = 2;
 /// The tolerated clock difference, which applies only to "more than ten minutes ahead".
 pub const TOLERANCE_SECONDS: i64 = p_act::limits::CLOCK_TOLERANCE_SECONDS;
 
@@ -59,7 +64,8 @@ pub struct Responder {
 
 struct Inflight {
     responders: Vec<Responder>,
-    cancelled: Arc<AtomicBool>,
+    /// When the last submitter went away (Unix time), 0 while one is still there.
+    cancelled: Arc<AtomicI64>,
     agent: Option<String>,
 }
 
@@ -113,14 +119,14 @@ impl Approvals {
     /// The sender no longer wants an answer. If nobody else submitted the same
     /// bytes, the dialog closes and the request is over. Ignored, and said so,
     /// for a request pledge does not hold.
-    pub fn cancel(&self, hash: &DocumentHash, responder: u64) {
+    pub fn cancel(&self, hash: &DocumentHash, responder: u64, now: i64) {
         let key = hash.to_string();
         let Ok(mut open) = self.inflight.lock() else { return };
         match open.get_mut(&key) {
             Some(entry) => {
                 entry.responders.retain(|r| r.id != responder);
                 if entry.responders.is_empty() {
-                    entry.cancelled.store(true, Ordering::SeqCst);
+                    entry.cancelled.store(now.max(1), Ordering::SeqCst);
                 }
             }
             None => eprintln!("pledge: cancel for a request it does not hold: {key}"),
@@ -128,9 +134,9 @@ impl Approvals {
     }
 
     /// Every connection that has these requests open is gone.
-    pub fn cancel_all(&self, hashes: &[DocumentHash], responder: u64) {
+    pub fn cancel_all(&self, hashes: &[DocumentHash], responder: u64, now: i64) {
         for hash in hashes {
-            self.cancel(hash, responder);
+            self.cancel(hash, responder, now);
         }
     }
 }
@@ -161,9 +167,6 @@ struct Facts {
     clamped: bool,
     peer: Option<(u32, Option<i32>)>,
 }
-
-/// The most characters all of a call's parameters may have together, to be shown whole.
-pub const MAX_PARAMS_SHOWN_CHARS: usize = 2000;
 
 /// Seconds from `now` that a stored entry is kept: to the call's deadline, but
 /// not past the longest a deadline may be.
@@ -226,7 +229,7 @@ pub fn submit(shared: &Shared, submit: &Submit, responder: Responder) {
             }
             return;
         }
-        let cancelled = Arc::new(AtomicBool::new(false));
+        let cancelled = Arc::new(AtomicI64::new(0));
         open.insert(
             key.clone(),
             Inflight { responders: vec![responder.clone()], cancelled: Arc::clone(&cancelled), agent: None },
@@ -252,7 +255,7 @@ pub fn refuse_malformed(shared: &Shared, hash: DocumentHash, responder: &Respond
     if let Ok(mut open) = shared.approvals.inflight.lock() {
         open.entry(key).or_insert_with(|| Inflight {
             responders: vec![responder.clone()],
-            cancelled: Arc::new(AtomicBool::new(false)),
+            cancelled: Arc::new(AtomicI64::new(0)),
             agent: None,
         });
     }
@@ -294,7 +297,7 @@ fn description(facts: &Facts, request: &Request) -> Description {
 }
 
 #[allow(clippy::too_many_lines)]
-fn process(shared: &Shared, submit: &Submit, hash: &str, cancelled: &Arc<AtomicBool>, facts: &mut Facts) -> Ending {
+fn process(shared: &Shared, submit: &Submit, hash: &str, cancelled: &Arc<AtomicI64>, facts: &mut Facts) -> Ending {
     let approvals = &shared.approvals;
     let request = submit.request();
     let call = request.call();
@@ -365,13 +368,13 @@ fn process(shared: &Shared, submit: &Submit, hash: &str, cancelled: &Arc<AtomicB
     }
 
     // 3. Every field can be shown as it is.
-    // A field is shown whole up to the formats' limit for it (p-act enforced those at parsing);
-    // all parameters together at most 2000 characters; nothing with a control or bidirectional mark.
-    let mut texts: Vec<&str> = vec![call.action(), &call.service().host, &call.service().name, &agent.person];
-    texts.extend(call.params().iter().map(String::as_str));
-    texts.extend(call.claim());
-    let all_params: usize = call.params().iter().map(|p| p.chars().count()).sum();
-    if all_params > MAX_PARAMS_SHOWN_CHARS || !texts.into_iter().all(is_clean) {
+    // p-act decides whether the call can be shown whole (every field to the formats' limit, all
+    // parameters together at most `MAX_PARAMS_SHOWN_CHARS`); the person's name is pledge's to check.
+    if let Err(why) = call.showable() {
+        eprintln!("pledge: a call cannot be shown: {why}");
+        return refuse(PledgeReason::NotShowable);
+    }
+    if !is_clean(&agent.person) {
         return refuse(PledgeReason::NotShowable);
     }
     facts.shown = Some((call.action().to_owned(), call.params().to_vec(), call.claim().map(str::to_owned)));
@@ -407,9 +410,13 @@ fn process(shared: &Shared, submit: &Submit, hash: &str, cancelled: &Arc<AtomicB
         }
         Mode::Ask => {
             let Some(key) = shared.key_with_purpose("confirmed") else { return refuse(PledgeReason::Unavailable) };
+            // A request that waits is recorded when it arrives, before it is queued or shown: no record, no dialog.
+            if shared.append(received_entry(hash, facts)).is_err() {
+                return refuse(PledgeReason::Unavailable);
+            }
             let what = description(facts, request);
             let left = |now: Timestamp| Duration::from_secs(u64::try_from(deadline.unix() - now.unix()).unwrap_or(0));
-            let is_cancelled = || cancelled.load(Ordering::SeqCst);
+            let is_cancelled = || cancelled.load(Ordering::SeqCst) != 0;
             let wait = Wait { timeout: left(shared.now()), cancelled: &is_cancelled };
             let agreed = shared.dialogs.ask_request(&what, &wait).and_then(|yes| {
                 if !yes {
@@ -440,11 +447,47 @@ fn process(shared: &Shared, submit: &Submit, hash: &str, cancelled: &Arc<AtomicB
                     Ending::Declined
                 }
                 Dialog::Timeout => Ending::Expired,
-                Dialog::Cancelled => Ending::Cancelled,
+                Dialog::Cancelled => {
+                    // A submitter that goes away at or within 2 seconds before the deadline is a request
+                    // that expired; earlier, one that was cancelled.
+                    let gone = cancelled.load(Ordering::SeqCst);
+                    if gone >= deadline.unix() - CANCEL_AS_EXPIRED_SECONDS {
+                        Ending::Expired
+                    } else {
+                        Ending::Cancelled
+                    }
+                }
                 Dialog::Unavailable => refuse(PledgeReason::Unavailable),
             }
         }
     }
+}
+
+fn received_entry(hash: &str, facts: &Facts) -> Value {
+    let mut entry = Map::new();
+    entry.insert("type".into(), "received".into());
+    entry.insert("request_hash".into(), hash.into());
+    for (name, value) in [
+        ("person", facts.person.clone().map(Value::from)),
+        ("delegation", facts.delegation.clone().map(Value::from)),
+        ("service", facts.service.as_ref().map(|(host, name)| json!({"host": host, "name": name}))),
+        ("call", facts.call.clone().map(Value::from)),
+        ("deadline", facts.deadline.map(|d| Value::from(d.to_string()))),
+        ("rating", facts.rating.map(|r| json!(RatingWords::of(r)))),
+        ("mode", facts.mode.map(Value::from)),
+    ] {
+        if let Some(value) = value {
+            entry.insert(name.into(), value);
+        }
+    }
+    if let Some((action, params, claim)) = &facts.shown {
+        entry.insert("action".into(), action.clone().into());
+        entry.insert("params".into(), params.clone().into());
+        if let Some(claim) = claim {
+            entry.insert("claim".into(), claim.clone().into());
+        }
+    }
+    Value::Object(entry)
 }
 
 fn entry(hash: &str, ending: &Ending, facts: &Facts) -> Value {

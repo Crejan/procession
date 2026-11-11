@@ -116,7 +116,7 @@ pub fn serve(shared: &Arc<Shared>, stream: UnixStream, peer: Option<(u32, Option
                     }
                 });
             }
-            Ok(Some(Message::Cancel(cancel))) => shared.approvals.cancel(&cancel.request, id),
+            Ok(Some(Message::Cancel(cancel))) => shared.approvals.cancel(&cancel.request, id, shared.now().unix()),
             Ok(Some(Message::Answer(answer))) => {
                 eprintln!("pledge: an answer from a service for {}: ignored", answer.request)
             }
@@ -130,7 +130,7 @@ pub fn serve(shared: &Arc<Shared>, stream: UnixStream, peer: Option<(u32, Option
             }
         }
     }
-    shared.approvals.cancel_all(&hashes, id);
+    shared.approvals.cancel_all(&hashes, id, shared.now().unix());
 }
 
 #[cfg(test)]

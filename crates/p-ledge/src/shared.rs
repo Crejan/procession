@@ -118,6 +118,7 @@ pub struct Shared {
     pub approvals: Approvals,
     /// Where private temporary directories are made (for issuing): a directory only the person can enter.
     pub work_dir: PathBuf,
+    state_dir: PathBuf,
 }
 
 /// What a caller gives [`Shared::new`].
@@ -176,6 +177,7 @@ impl Shared {
             clock: Box::new(system_clock),
             approvals,
             work_dir: parts.work_dir,
+            state_dir: parts.state_dir.clone(),
         };
         shared.load_programs()?;
         shared.reload_keys()?;
@@ -192,6 +194,32 @@ impl Shared {
     #[must_use]
     pub fn key_by_fingerprint(&self, fingerprint: &str) -> Option<KeyInfo> {
         self.keys.read().ok()?.iter().find(|key| key.fingerprint == fingerprint).cloned()
+    }
+
+    /// At start: every `received` entry without an answer is a request pledge was
+    /// holding when it went down. Each gets an entry, result `lost`, with when it
+    /// was received and the time of the last entry before this start (the latest
+    /// pledge is known to have been up). Call before the `started` event.
+    pub fn settle_lost(&self) {
+        let Ok(report) = crate::record::read_and_verify(&self.state_dir.join("record.jsonl")) else { return };
+        let answered: std::collections::HashSet<&str> = report
+            .entries
+            .iter()
+            .filter(|e| e["type"] == "request")
+            .filter_map(|e| e["request_hash"].as_str())
+            .collect();
+        let last_seen = report.entries.last().and_then(|e| e["time"].as_str()).map(str::to_owned);
+        for received in report.entries.iter().filter(|e| e["type"] == "received") {
+            let Some(hash) = received["request_hash"].as_str().filter(|h| !answered.contains(h)) else { continue };
+            let entry = json!({
+                "type": "request", "result": "lost", "request_hash": hash,
+                "received": received["time"], "last_entry_before_start": last_seen,
+                "call": received["call"], "person": received["person"], "delegation": received["delegation"], "service": received["service"],
+            });
+            if let Err(e) = self.append(entry) {
+                eprintln!("pledge: could not record a lost request: {e}");
+            }
+        }
     }
 
     /// The time now.

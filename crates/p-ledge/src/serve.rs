@@ -85,6 +85,7 @@ pub fn run(config: Config) -> Result<()> {
         state_dir: config.paths.state.clone(),
         work_dir: config.paths.sockets.clone(),
     })?);
+    shared.settle_lost();
     shared.event("started", json!({"form": "files", "version": env!("CARGO_PKG_VERSION")}));
     if let Some(bytes) = opened.repaired_bytes {
         shared.event("repaired", json!({"dropped_bytes": bytes}));
