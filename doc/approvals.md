@@ -148,8 +148,11 @@ happen:
   which directory is cleared), and what it cannot tell it rates at the top.
   Where a call may be rated lower than its action's worst case, the rule for
   that is data beside the action, not code: for a path, a list of prefixes,
-  matched after the path is resolved, with the file then opened once and
-  that same open file used, so that what was rated is what is read.
+  matched after the path is resolved. The rating is made again where the
+  action is carried out, on the object as opened there, and the action is
+  refused if that rating is higher than the one approved. Nothing is rated
+  lower under a directory that anyone but its owner or root can write to:
+  such a call keeps the action's worst rating.
 - A command (U6) is always at the top of all three.
 
 A delegation carries two ceilings, each a rating:
@@ -171,10 +174,13 @@ a host.
 
 **R5. A call is good for one request.** A call names the service, the action
 and its parameters, and carries an identifier (random, 128 bits, a UUID) and
-a deadline; all of it is under the agent's signature. pledge signs for an
-identifier once and then keeps it as used until the deadline, after which
-the call is void anyway. A call that comes a second time gets a refusal, not
-a second approval.
+a deadline; all of it is under the agent's signature. pledge decides on a
+call's identifier once: as soon as it approved, or the person declined, the
+identifier is used, and stays so until the deadline, after which the call is
+void anyway. The same request again gets the same answer again, the same
+approval, not a second one; a different request under a used identifier is
+refused. A declined call is not put to the person again: an agent that
+wants to try again makes a new call.
 
 **R6. A request cannot say something else than the call.** A request
 contains the call as the bytes the agent signed and adds only the rating;
@@ -220,8 +226,9 @@ evaluates it.
 action.
 
 **R12. Everything is recorded on the person's machine**: each request that
-reached it, the answer (approved, declined, refused, expired), the key that
-signed, the agent.
+reached it, the answer (approved, declined, refused, expired; or cancelled,
+when the service gave up before there was one), the key that signed, the
+agent.
 
 ## 4. Threat model
 
@@ -316,9 +323,12 @@ signs its clearances and everything it sends to a pledge (blocks,
 withdrawals, renewed certificates, group names), and pledge and services
 accept nothing as the broker's that it does not verify. The connections to
 the broker are TLS with a certificate from the site's own certificate
-authority, so that nobody else can stand in its place on the network. A
-service and a pledge therefore hold one trust anchor for persons and broker,
-the site CA's key.
+authority, or pinned where a site has none. A service and a pledge
+therefore hold two things, each for one purpose. The site CA's key is the
+anchor for who signed what; nothing that matters rests on anything else.
+The TLS root, or the pinned certificate, says only that a connection reaches
+the broker: it protects against delay, loss and listening, not against
+forgery.
 
 **The call.** What an agent signs, with its delegated key: the host and name
 of the service, the action and its parameters, an identifier (random, 128
@@ -466,7 +476,7 @@ over its connection. A disabled person gets none.
 | a service's certificate | valid 30 days, renewed after 20 | the host key, by the site's provisioning |
 | requests the broker keeps for a pledge that is not connected | until each one's deadline; per agent as many as the setting below, further ones are refused | broker |
 | how long used identifiers are remembered | until the call's deadline; kept on disk across restarts | service, pledge |
-| tolerated clock difference | 60 seconds | all |
+| tolerated clock difference | 60 seconds, for "more than 10 minutes ahead" and for a certificate whose validity starts in the near future. It never extends a deadline: a party refuses to sign or to act as soon as its own clock says the deadline has passed | all |
 | dialogs on screen | one | pledge |
 | requests waiting per agent | a setting, 5 by default; further ones are refused | pledge (its own setting, per person); the broker (the site's setting) |
 | declines before an agent is muted | 3 within 10 minutes; then its requests are refused without a dialog for 10 minutes and the person is told | pledge |
@@ -515,9 +525,20 @@ Each stage is usable by itself and is the test of the one before.
 Decided since the first draft, and worked in above or in the crates'
 specifications:
 
-- An agent reaches a service by MCP over HTTP, the signed call in a header
-  of each tool call. The sandbox allows connections to services and nowhere
-  else.
+- An agent reaches a service by MCP over HTTP. The call and its signature
+  travel in the tool call's `_meta`, not in HTTP headers; the tool's
+  arguments must equal the signed call. The sandbox allows connections to
+  services and nowhere else.
+- In the sandbox a small program (`pact`, of the crate p-act) holds the
+  agent's key and certificate, signs each call and is the only thing there
+  that talks to services. The model never sees the key. That program sets
+  the deadline from its own setting; the model may ask for a shorter wait,
+  never a longer one.
+- What an agent learns of a "no" is coarse: declined, expired, refused as one
+  of a few classes, unavailable. pledge and the broker give a service their
+  exact reasons, and the exact reason is in the person's record; an agent is
+  not trusted, and exact reasons would tell it where ceilings, limits and
+  delegations lie.
 - Key and certificate get into a sandbox on another host over the SSH
   connection the person starts it through, on standard input.
 - There is one broker per site. It learns of hosts and their keys with the
@@ -549,6 +570,10 @@ Open:
 - **How a command (U6) is matched against grants.** "As sudo matches" is not
   a design: it makes the broker a second sudo matcher, and gives the service
   a sudo rule as wide as every group grant on its host. Stage 4.
+- **TLS between an agent and a service on another host.** Not in stage 1.
+  For stage 2: the service presents a certificate under the site's TLS root
+  (or a pinned one), and the sandbox is given that root with the agent's
+  key.
 - **TLS for the broker on a site without a certificate authority.** The
   requirement is a certificate that pledge and services can verify: from the
   site's own where there is one, pinned otherwise. Left to the binding.
