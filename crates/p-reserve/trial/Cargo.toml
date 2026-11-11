@@ -1,0 +1,14 @@
+# Throwaway trial, NOT a workspace member (the empty table below keeps it out of
+# the procession workspace). Delete when the trial is decided.
+[workspace]
+
+[package]
+name = "p-reserve-trial"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[dependencies]
+rustic_backend = "=0.7.0"
+rustic_core = "=0.13.0"
+simplelog = "0.12"
