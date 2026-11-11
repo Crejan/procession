@@ -47,8 +47,9 @@ the broker; only the broker's `answer` to a service has two more members
   is longer, ends the connection.
 - Unknown members make a message invalid, as in the signed formats.
 - Strings carry no control characters or bidirectional marks
-  (`approval-formats.md`, section 2), except inside a signature's armour,
-  whose line breaks are JSON `\n` escapes.
+  (`approval-formats.md`, section 2). A document or signature carried in a
+  message is always the base64 (standard, padded) of its exact bytes, so
+  signatures have no line breaks in the line.
 - Blocking I/O, one reader and one writer per connection; no runtime is
   needed.
 
@@ -68,7 +69,7 @@ the bytes received.
 **`ask`**, from whoever hands over a request:
 
 ```json
-{"schema_version":1,"type":"ask","ref":"7","request":"<base64 of the request's bytes>","request_sig":"-----BEGIN SSH SIGNATURE-----\n...\n-----END SSH SIGNATURE-----\n"}
+{"schema_version":1,"type":"ask","ref":"7","request":"<base64 of the request's bytes>","request_sig":"<base64 of the armoured SSHSIG>"}
 ```
 
 - `ref`: chosen by the sender, 1 to 64 characters of `[A-Za-z0-9._-]`, unique
@@ -76,7 +77,7 @@ the bytes received.
   its `ask`; it is not the call's identifier and means nothing outside the
   connection.
 - `request`: the request's bytes, base64, exactly as the service signed
-  them. `request_sig`: its SSHSIG, namespace `request-v1@procession`. Both are
+  them. `request_sig`: its armoured SSHSIG, base64 (standard, padded) of its exact bytes, namespace `request-v1@procession`. Both are
   carried, never rebuilt (`approval-formats.md`, section 1).
 - The sender may have any number of asks open up to 16 per connection; the
   seventeenth is answered with an `error`, `too-many-asks`. pledge's own
@@ -87,7 +88,7 @@ the bytes received.
 cancelled, in any order:
 
 ```json
-{"schema_version":1,"type":"answer","ref":"7","result":"approved","approval":"-----BEGIN SSH SIGNATURE-----\n...\n-----END SSH SIGNATURE-----\n"}
+{"schema_version":1,"type":"answer","ref":"7","result":"approved","approval":"<base64 of the armoured SSHSIG>"}
 {"schema_version":1,"type":"answer","ref":"7","result":"declined"}
 {"schema_version":1,"type":"answer","ref":"7","result":"refused","reason":"call-used"}
 {"schema_version":1,"type":"answer","ref":"7","result":"expired"}
@@ -95,7 +96,7 @@ cancelled, in any order:
 
 | `result` | Members | Meaning |
 |---|---|---|
-| `approved` | `approval` | the SSHSIG over the request's bytes, namespace `approval-v1@procession`, by the confirmed or the automatic approval key. Which one is in its certificate; the answer does not say, because nothing may act on the answer's word for it |
+| `approved` | `approval` | base64 of the armoured SSHSIG over the request's bytes, namespace `approval-v1@procession`, by the confirmed or the automatic approval key. Which one is in its certificate; the answer does not say, because nothing may act on the answer's word for it |
 | `declined` | none | the person said no in a dialog. Nothing else is said, so that an agent learns nothing from how |
 | `refused` | `reason` | pledge said no without asking, or could not ask |
 | `expired` | none | the call's deadline passed with no approval. Sent at the deadline, by pledge's own clock |
@@ -135,7 +136,7 @@ Withdraws an ask that is still open: pledge closes its dialog and sends no
 records a cancelled ask (see Open questions, 1).
 
 The broker's `answer` to a service adds `clearance` (the clearance document,
-base64, as signed) and `clearance_sig` (its SSHSIG) next to `approval`. pledge
+base64, as signed) and `clearance_sig` (its armoured SSHSIG), both base64 next to `approval`. pledge
 never sends them and never accepts them. On `service.sock` nobody sends
 them, and a service in stage 1 checks none.
 
@@ -217,3 +218,13 @@ adds the unsigned envelope. Until then p-ledge writes it in
    decision to sign or refuse, which uses its own clock and the deadline as
    written, and 60 seconds only when it judges a call's deadline "too far
    ahead".
+
+## 10. Separable from its transport
+
+`ask`, `answer`, `cancel`, `ref` and the reasons (sections 4 and 5) say
+nothing about sockets; only section 3 (line framing) and 6 (who may
+connect) are specific to a Unix stream. Another transport (the broker's TLS
+connection) can carry the same objects with its own framing, and the p-age
+agent's connection messages can share the envelope (`schema_version`,
+`type`) and these shapes. Section 3's limits are the transport's, the
+members are not.
