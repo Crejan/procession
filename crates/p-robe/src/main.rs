@@ -8,13 +8,30 @@
 mod answer;
 mod audit;
 mod clock;
+mod config;
 mod dispatch;
 mod json;
 mod kit;
 mod lock;
+#[allow(dead_code, reason = "the HTTP transport that calls the MCP layer is not built")]
+mod mcp;
+#[allow(dead_code, reason = "the HTTP transport that calls the MCP layer is not built")]
+mod outcome;
+#[allow(dead_code, reason = "the HTTP transport that calls the MCP layer is not built")]
+mod pledge;
 #[allow(dead_code, reason = "no production row has parameter rules yet, and Mode::Name is the service's")]
 mod rate;
 mod rules;
+#[allow(dead_code, reason = "the HTTP transport that calls the MCP layer is not built")]
+mod runner;
+mod serve;
+#[allow(dead_code, reason = "the HTTP transport that calls the MCP layer is not built")]
+mod service;
+#[cfg(test)]
+mod service_tests;
+mod setup;
+#[allow(dead_code, reason = "the HTTP transport that calls the MCP layer is not built")]
+mod store;
 mod table;
 #[cfg(test)]
 mod testdir;
@@ -32,7 +49,8 @@ const USAGE: &str =
     "usage: sudo -n probe <noun> <verb> [args]   run one verb (arguments are words or key=value, never -flags)
        probe <noun>                        the verbs of one noun
        probe catalog [--format json]       every verb with its rating and whether it can run here
-       probe serve                         the service for agents (not built yet)
+       probe serve [--config <file>]       the service for agents (the HTTP transport is not built yet)
+       probe setup --host-key <file>       stage 1: the service's key and certificate
 ";
 
 /// What the process is, as the dispatcher needs it.
@@ -53,6 +71,7 @@ fn wiring(caller: &mut Caller) -> (Box<dyn Audit>, std::path::PathBuf) {
     #[cfg(feature = "test-verbs")]
     if let Some(dir) = std::env::var_os("PROBE_TEST_SANDBOX") {
         let dir = std::path::PathBuf::from(dir);
+        let _ = rate::SANDBOX.set(dir.clone());
         caller.euid = 0;
         return (Box::new(audit::FileAudit(dir.join("audit.log"))), dir.join("locks"));
     }
@@ -81,10 +100,8 @@ fn main() -> ExitCode {
             ExitCode::SUCCESS
         }
         ["catalog", "--format", "json"] => print_records(&table::catalog_records(None)),
-        ["serve"] => {
-            eprintln!("probe serve: not implemented yet");
-            ExitCode::from(2)
-        }
+        ["serve", rest @ ..] => ExitCode::from(serve::serve(rest)),
+        ["setup", rest @ ..] => ExitCode::from(serve::setup(rest)),
         [noun] if rules::is_token(noun) && table::has_noun(noun) => {
             print!("{}", table::catalog_text(Some(noun)));
             ExitCode::SUCCESS

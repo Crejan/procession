@@ -449,8 +449,11 @@ dependencies = [
 name = "p-robe"
 version = "0.0.0"
 dependencies = [
+ "base64",
  "libc",
  "p-act",
+ "serde_json",
+ "tempfile",
 ]
 
 [[package]]

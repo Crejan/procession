@@ -42,7 +42,8 @@ impl Entries {
         match self {
             Entries::Static(entries) => entries.iter().map(|(path, rating)| ((*path).to_string(), *rating)).collect(),
             #[cfg(feature = "test-verbs")]
-            Entries::Sandbox => std::env::var_os("PROBE_TEST_SANDBOX")
+            Entries::Sandbox => SANDBOX
+                .get()
                 .and_then(|dir| std::fs::canonicalize(dir).ok())
                 .map(|dir| vec![(format!("{}/open/", dir.display()), Rating::HARMLESS)])
                 .unwrap_or_default(),
@@ -53,6 +54,11 @@ impl Entries {
         self.list().into_iter().fold(Rating::HARMLESS, |worst, (_, rating)| worst.worst_of(rating))
     }
 }
+
+/// The directory a test build rates `<dir>/open/` harmless under: set once, by
+/// `main` from `PROBE_TEST_SANDBOX`, or by a test.
+#[cfg(feature = "test-verbs")]
+pub static SANDBOX: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
 
 /// How a path is rated.
 #[derive(Debug, Clone, Copy)]

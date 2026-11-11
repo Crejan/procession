@@ -42,6 +42,22 @@ fn the_catalogue_needs_no_sudo_and_lists_every_verb_with_its_status() {
 }
 
 #[test]
+fn serve_says_what_is_wrong_with_its_settings_and_that_its_transport_is_not_built() {
+    let missing = probe(&["serve", "--config", "/nonexistent/probe.toml"], None);
+    assert_eq!(missing.status.code(), Some(64));
+    assert!(text(&missing.stderr).contains("/nonexistent/probe.toml"), "{}", text(&missing.stderr));
+    assert_eq!(probe(&["serve", "--bogus"], None).status.code(), Some(64));
+    assert_eq!(probe(&["setup"], None).status.code(), Some(64));
+    let dir = std::env::temp_dir().join(format!("probe-cli-serve-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let file = dir.join("probe.toml");
+    std::fs::write(&file, "person = \"jan\"\n").unwrap();
+    let out = probe(&["serve", "--config", file.to_str().unwrap()], None);
+    assert_eq!(out.status.code(), Some(64));
+    assert!(text(&out.stderr).contains("confirmed_key is needed"), "{}", text(&out.stderr));
+}
+
+#[test]
 fn a_production_build_does_not_know_the_test_hook() {
     if cfg!(feature = "test-verbs") {
         return;

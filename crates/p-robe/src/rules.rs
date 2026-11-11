@@ -26,6 +26,22 @@ fn is_argument_char(c: char) -> bool {
     c.is_ascii_alphanumeric() || "]_.,:/=+@%^$*?!~|(){}<>[\\-".contains(c)
 }
 
+/// The argument class as a regular expression for a tool's schema, **derived
+/// from [`is_argument_char`]** so that the two cannot differ.
+#[must_use]
+pub fn argument_pattern() -> String {
+    let mut class = String::new();
+    for c in '!'..='~' {
+        if is_argument_char(c) {
+            if matches!(c, '\\' | ']' | '[' | '^' | '-') {
+                class.push('\\');
+            }
+            class.push(c);
+        }
+    }
+    format!("^[{class}]+$")
+}
+
 /// Why an argument is refused, or `Ok`.
 ///
 /// # Errors
@@ -82,6 +98,20 @@ mod tests {
             assert!(check_argument(bad).is_err(), "{bad}");
         }
         assert_eq!(check_argument("key=-5"), Ok(()));
+    }
+
+    #[test]
+    fn the_schema_pattern_is_the_class_and_nothing_else() {
+        let pattern = argument_pattern();
+        let class = pattern.strip_prefix("^[").and_then(|p| p.strip_suffix("]+$")).unwrap();
+        let mut members = Vec::new();
+        let mut chars = class.chars();
+        while let Some(c) = chars.next() {
+            members.push(if c == '\\' { chars.next().unwrap() } else { c });
+        }
+        for c in (0u8..=127).map(char::from) {
+            assert_eq!(members.contains(&c), is_argument_char(c) && c != ' ' && !c.is_control(), "{c:?}");
+        }
     }
 
     #[test]
