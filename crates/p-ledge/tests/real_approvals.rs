@@ -199,7 +199,8 @@ fn a_bundle_from_agents_start_signs_calls_pledge_approves_and_the_record_holds()
     assert!(matches!(answer.outcome, Outcome::Declined), "{answer:?}");
 
     // A call that cannot be shown is refused; the same bytes again are answered again.
-    let (c, s) = call(&agent, 4, &[&"x".repeat(300)], 120);
+    let long = "x".repeat(450);
+    let (c, s) = call(&agent, 4, &[long.as_str(); 5], 120);
     let (_, answer) = service.ask(&c, &s, Rating::HARMLESS);
     assert!(matches!(answer.outcome, Outcome::Refused(Refused::Pledge(PledgeReason::NotShowable))), "{answer:?}");
 
@@ -303,6 +304,7 @@ fn agents_start_refuses_without_services_and_a_delegation_it_could_not_deliver_n
         .iter()
         .filter_map(|e| e["event"].as_str().map(|ev| (ev.to_owned(), e["by"].as_str().unwrap_or("").to_owned())))
         .collect();
-    assert!(events.contains(&("delegation-withdrawn".to_owned(), "delivery-failed".to_owned())), "{events:?}");
+    assert!(events.iter().any(|(e, _)| e == "delegation-not-delivered"), "{events:?}");
+    assert!(!events.iter().any(|(e, _)| e == "delegation-withdrawn"));
     assert!(!events.iter().any(|(e, _)| e == "delegation-issued"));
 }
