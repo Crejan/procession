@@ -233,8 +233,13 @@ broker cert-authority,namespaces="clearance-v1@procession" <the site CA's public
 ```
 
 Two lines, so that a certificate under any other name verifies nowhere.
-(These two lines are not yet run; the single line `* cert-authority` with
-both namespaces is what was run on 2026-11-11.)
+Run with OpenSSH 10.2 and keys in files, on 2026-11-11. Accepted: a
+confirmed key as `<person>:confirmed` and an automatic key as
+`<person>:automatic` for an approval; the broker's key as `broker` for a
+clearance. Refused: an automatic key as `<person>:confirmed`; the broker's
+key for an approval under either name; a person's key for a clearance under
+either name; a certificate named `<person>` without an ending, under
+`<person>` and under `<person>:confirmed`.
 ```
 ssh-keygen -Y verify -f allowed -I <person>:confirmed -n approval-v1@procession -s approval.sig < request
 ssh-keygen -Y verify -f allowed -I broker -n clearance-v1@procession -s clearance.sig < clearance
