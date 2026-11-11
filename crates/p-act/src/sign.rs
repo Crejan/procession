@@ -29,7 +29,8 @@ use crate::hash::Document;
 use crate::request::Request;
 use crate::text;
 use base64::Engine as _;
-use base64::engine::general_purpose::STANDARD;
+use base64::engine::general_purpose::{STANDARD, STANDARD_NO_PAD};
+use ring::digest::{SHA256, digest};
 use std::ffi::{OsStr, OsString};
 use std::fmt;
 use std::io::{self, Write};
@@ -51,9 +52,40 @@ pub enum Namespace {
     Request,
     Approval,
     Clearance,
+    /// pledge's sign-in to the broker, with the person's connection key.
+    Connection,
+    /// What the broker says to a pledge in its own name.
+    Broker,
+    /// The list of hosts' keys (formats section 6.1).
+    Hosts,
+}
+
+/// The ending that reserves an SSHSIG namespace for this system.
+pub const RESERVED_SUFFIX: &str = "@procession";
+
+/// Whether `namespace` is reserved for this system: it ends in `@procession`.
+/// pledge's SSH agent socket refuses a signature in any such namespace, for
+/// every key. The comparison ignores ASCII case, which only makes it wider:
+/// `ssh-keygen` compares namespaces exactly, so a differently cased one is
+/// never ours, but nobody should be able to say it is allowed by being odd.
+#[must_use]
+pub fn is_reserved_namespace(namespace: &str) -> bool {
+    let (n, suffix) = (namespace.as_bytes(), RESERVED_SUFFIX.as_bytes());
+    n.len() >= suffix.len() && n[n.len() - suffix.len()..].eq_ignore_ascii_case(suffix)
 }
 
 impl Namespace {
+    /// Every namespace of the system.
+    pub const ALL: [Namespace; 7] = [
+        Namespace::Call,
+        Namespace::Request,
+        Namespace::Approval,
+        Namespace::Clearance,
+        Namespace::Connection,
+        Namespace::Broker,
+        Namespace::Hosts,
+    ];
+
     #[must_use]
     pub fn as_str(self) -> &'static str {
         match self {
@@ -61,6 +93,9 @@ impl Namespace {
             Namespace::Request => "request-v1@procession",
             Namespace::Approval => "approval-v1@procession",
             Namespace::Clearance => "clearance-v1@procession",
+            Namespace::Connection => "connection-v1@procession",
+            Namespace::Broker => "broker-v1@procession",
+            Namespace::Hosts => "hosts-v1@procession",
         }
     }
 }
@@ -86,6 +121,8 @@ pub enum SignError {
     UnknownExtension(String),
     #[error("the agent's certificate has a bad `groups@procession`: {0}")]
     BadGroups(&'static str),
+    #[error("`{0}` is not a fingerprint like SHA256:<43 base64 characters>")]
+    MalformedFingerprint(String),
     #[error("the confirmed and the automatic approval key are the same key")]
     SameApprovalKey,
     #[error("an automatic approval is not accepted for a request rated at the top of a scale")]
@@ -139,6 +176,51 @@ impl PublicKey {
 impl fmt::Display for PublicKey {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(&self.0)
+    }
+}
+
+/// A key's fingerprint as `ssh-keygen -l` prints it: `SHA256:` and the
+/// unpadded base64 of the SHA-256 of the public key's wire form. A
+/// certificate's key is fingerprinted without its certificate, so a key has
+/// one fingerprint however it is certified. A delegation is known by the
+/// fingerprint of its agent's key.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct Fingerprint(String);
+
+impl Fingerprint {
+    fn of_blob(blob: &[u8]) -> Fingerprint {
+        Fingerprint(format!("SHA256:{}", STANDARD_NO_PAD.encode(digest(&SHA256, blob))))
+    }
+
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl fmt::Display for Fingerprint {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl std::str::FromStr for Fingerprint {
+    type Err = SignError;
+
+    fn from_str(s: &str) -> Result<Self, SignError> {
+        let ok = s
+            .strip_prefix("SHA256:")
+            .is_some_and(|b| b.len() == 43 && b.bytes().all(|c| c.is_ascii_alphanumeric() || matches!(c, b'+' | b'/')));
+        if ok { Ok(Fingerprint(s.to_owned())) } else { Err(SignError::MalformedFingerprint(s.to_owned())) }
+    }
+}
+
+impl PublicKey {
+    #[must_use]
+    pub fn fingerprint(&self) -> Fingerprint {
+        // Validated at construction: `<type> <base64 of a blob>`.
+        let blob = self.0.split(' ').nth(1).and_then(|b| STANDARD.decode(b).ok()).unwrap_or_default();
+        Fingerprint::of_blob(&blob)
     }
 }
 
@@ -309,6 +391,13 @@ pub struct Certificate {
     pub critical_options: Vec<(String, Vec<u8>)>,
     /// Extensions: name and data. The data of an extension with a value is that value, unwrapped.
     pub extensions: Vec<(String, Vec<u8>)>,
+    /// Fingerprint of the certified key.
+    pub fingerprint: Fingerprint,
+}
+
+fn put_string(out: &mut Vec<u8>, s: &[u8]) {
+    out.extend_from_slice(&u32::try_from(s.len()).unwrap_or(u32::MAX).to_be_bytes());
+    out.extend_from_slice(s);
 }
 
 /// The name of the extension that carries a delegation's groups.
@@ -342,9 +431,9 @@ fn key_type(blob: &[u8]) -> Option<String> {
     String::from_utf8(Reader(blob).string()?.to_vec()).ok()
 }
 
-/// The certificate inside an armoured SSHSIG, read, not verified. The key it
-/// certifies and the key that issued it must both be of a supported type.
-pub fn signature_certificate(sig: &str) -> Result<Certificate, SignError> {
+/// The public key blob inside an armoured SSHSIG: a certificate for a
+/// certified key, else the plain key.
+fn signature_key_blob(sig: &str) -> Result<Vec<u8>, SignError> {
     let bad = || SignError::MalformedSignature;
     if !looks_armoured(sig) {
         return Err(bad());
@@ -355,7 +444,30 @@ pub fn signature_certificate(sig: &str) -> Result<Certificate, SignError> {
     if r.take(6) != Some(b"SSHSIG") || r.u32() != Some(1) {
         return Err(bad());
     }
-    let mut key = Reader(r.string().ok_or_else(bad)?);
+    Ok(r.string().ok_or_else(bad)?.to_vec())
+}
+
+/// The fingerprint of the key that made `sig`: of the certified key if the
+/// signature carries a certificate, else of the plain key. Read, not
+/// verified; only Ed25519 and ECDSA P-256 are read.
+pub fn signature_fingerprint(sig: &str) -> Result<Fingerprint, SignError> {
+    let blob = signature_key_blob(sig)?;
+    let kind = key_type(&blob).ok_or(SignError::MalformedSignature)?;
+    if kind.contains("-cert-v01@") {
+        return Ok(signature_certificate(sig)?.fingerprint);
+    }
+    if !SUPPORTED_KEYS.contains(&kind.as_str()) {
+        return Err(SignError::UnsupportedKeyType(kind));
+    }
+    Ok(Fingerprint::of_blob(&blob))
+}
+
+/// The certificate inside an armoured SSHSIG, read, not verified. The key it
+/// certifies and the key that issued it must both be of a supported type.
+pub fn signature_certificate(sig: &str) -> Result<Certificate, SignError> {
+    let bad = || SignError::MalformedSignature;
+    let blob = signature_key_blob(sig)?;
+    let mut key = Reader(&blob);
     let kind = String::from_utf8_lossy(key.string().ok_or_else(bad)?).into_owned();
     if !kind.contains("-cert-v01@") {
         return Err(SignError::NotCertified);
@@ -368,8 +480,11 @@ pub fn signature_certificate(sig: &str) -> Result<Certificate, SignError> {
     };
     // nonce, public key, serial, type, key id, principals, validity, options, extensions, reserved, issuer key.
     let _nonce = key.string().ok_or_else(bad)?;
+    // The certified key's wire form without the certificate: its plain type, then the same fields.
+    let mut plain = Vec::new();
+    put_string(&mut plain, kind.trim_end_matches("-cert-v01@openssh.com").as_bytes());
     for _ in 0..key_fields {
-        key.string().ok_or_else(bad)?;
+        put_string(&mut plain, key.string().ok_or_else(bad)?);
     }
     let _serial = key.u64().ok_or_else(bad)?;
     let _type = key.u32().ok_or_else(bad)?;
@@ -388,7 +503,8 @@ pub fn signature_certificate(sig: &str) -> Result<Certificate, SignError> {
     if !SUPPORTED_KEYS.contains(&issuer.as_str()) {
         return Err(SignError::UnsupportedKeyType(issuer));
     }
-    Ok(Certificate { key_id, principals, valid_after, valid_before, critical_options, extensions })
+    let fingerprint = Fingerprint::of_blob(&plain);
+    Ok(Certificate { key_id, principals, valid_after, valid_before, critical_options, extensions, fingerprint })
 }
 
 /// What an agent's certificate says (formats section 3.1): the person it acts
@@ -401,6 +517,8 @@ pub struct Agent {
     pub groups: Vec<String>,
     /// The certificate's free label, for dialogs and the record; never to decide on.
     pub key_id: String,
+    /// The fingerprint of the agent's key: the delegation's identifier.
+    pub delegation: Fingerprint,
 }
 
 /// The person and groups of the agent's certificate inside `sig`, if it keeps
@@ -426,7 +544,7 @@ pub fn signature_agent(sig: &str) -> Result<Agent, SignError> {
         Ok([other]) => return Err(SignError::BadPrincipal(other)),
         Err(many) => return Err(SignError::PrincipalCount { found: many.len() }),
     };
-    Ok(Agent { person, groups: groups.unwrap_or_default(), key_id: cert.key_id })
+    Ok(Agent { person, groups: groups.unwrap_or_default(), key_id: cert.key_id, delegation: cert.fingerprint })
 }
 
 fn parse_groups(value: &[u8]) -> Result<Vec<String>, SignError> {

@@ -111,6 +111,13 @@ impl Object {
         Ok(())
     }
 
+    /// `schema_version` must be 1: the version of an unsigned message (not the `v` of a signed document).
+    pub(crate) fn take_schema_version(&mut self) -> Result<(), ParseError> {
+        let raw = self.take_raw("schema_version")?;
+        let v: serde_json::Number = self.typed("schema_version", &raw, "a number")?;
+        if v.as_u64() == Some(1) { Ok(()) } else { Err(ParseError::UnsupportedVersion(v.to_string())) }
+    }
+
     /// Whatever has not been taken is unknown.
     pub(crate) fn finish(self) -> Result<(), ParseError> {
         match self.members.into_iter().next() {

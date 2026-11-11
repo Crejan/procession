@@ -4,9 +4,10 @@
 
 use p_act::rating::{Damage, Disruption, Exposure, Rating};
 use p_act::sign::{
-    ApprovalKind, ApprovalTrust, PublicKey, SignError, Signer, request_person, sign_approval, sign_call,
-    sign_clearance, sign_request, signature_agent, signature_certificate, signature_from_base64, signature_person,
-    signature_to_base64, verify_approval, verify_call, verify_call_agent, verify_clearance, verify_request,
+    ApprovalKind, ApprovalTrust, Fingerprint, Namespace, PublicKey, SignError, Signer, is_reserved_namespace,
+    request_person, sign_approval, sign_call, sign_clearance, sign_request, signature_agent, signature_certificate,
+    signature_fingerprint, signature_from_base64, signature_person, signature_to_base64, verify_approval, verify_call,
+    verify_call_agent, verify_clearance, verify_request,
 };
 use p_act::{Call, CallContent, CallId, Clearance, Document, Request, ServiceId, Timestamp};
 use std::path::{Path, PathBuf};
@@ -963,4 +964,141 @@ fn the_same_key_under_both_names_is_refused() {
     let trust = ApprovalTrust::PersonKeys { confirmed: &p256_pub, automatic: &p256_pub };
     let sig = sign_approval(&Signer::plain(&p256), &request).unwrap();
     assert!(matches!(verify_approval(&request, &sig, trust), Err(SignError::SameApprovalKey)));
+}
+
+// ---------------------------------------------------------------------------
+// Fingerprints, and the reserved namespaces
+// ---------------------------------------------------------------------------
+
+/// What `ssh-keygen -l -f <file>` prints as the fingerprint.
+fn keygen_fingerprint(file: &Path) -> String {
+    let out = Command::new("ssh-keygen").args(["-l", "-f"]).arg(file).stdin(Stdio::null()).output().unwrap();
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    let line = String::from_utf8(out.stdout).unwrap();
+    line.split_whitespace().nth(1).unwrap().to_owned()
+}
+
+fn pub_file(key: &Path) -> PathBuf {
+    PathBuf::from(format!("{}.pub", key.display()))
+}
+
+#[test]
+fn a_public_keys_fingerprint_is_what_ssh_keygen_prints() {
+    let keys = Keys::new();
+    for (label, key) in [("ed25519", keys.key("e")), ("p256", keys.ecdsa_key("p"))] {
+        let expected = keygen_fingerprint(&pub_file(&key));
+        let fingerprint = keys.public(&key).fingerprint();
+        assert_eq!(fingerprint.as_str(), expected, "{label}");
+        assert_eq!(fingerprint.to_string().parse::<Fingerprint>().unwrap(), fingerprint);
+        // The key behind a plain signature.
+        let call = Call::compose(&call_content("probe", "a.example")).unwrap();
+        let sig = sign_call(&Signer::plain(&key), &call).unwrap();
+        assert_eq!(signature_fingerprint(&sig).unwrap(), fingerprint, "{label}");
+    }
+}
+
+#[test]
+fn a_certified_keys_fingerprint_is_that_of_the_key_not_of_the_certificate() {
+    let keys = Keys::new();
+    for (label, ca, agent_key) in [
+        ("ed25519 under ed25519", keys.key("ca1"), keys.key("a1")),
+        ("ed25519 under p256", keys.ecdsa_key("ca2"), keys.key("a2")),
+        ("p256 under ed25519", keys.key("ca3"), keys.ecdsa_key("a3")),
+        ("p256 under p256", keys.ecdsa_key("ca4"), keys.ecdsa_key("a4")),
+    ] {
+        let signer = keys.certify(&agent_key, &ca, "agent", "alice");
+        let call = Call::compose(&call_content("probe", "a.example")).unwrap();
+        let sig = sign_call(&signer, &call).unwrap();
+        let expected = keygen_fingerprint(&pub_file(&agent_key));
+        assert_eq!(signature_fingerprint(&sig).unwrap().as_str(), expected, "{label}");
+        assert_eq!(signature_certificate(&sig).unwrap().fingerprint.as_str(), expected, "{label}");
+        let agent = verify_call_agent(&call, &sig, &keys.public(&ca)).unwrap();
+        assert_eq!(agent.delegation.as_str(), expected, "{label}");
+        assert_ne!(expected, keys.public(&ca).fingerprint().as_str(), "the issuer is another key");
+    }
+}
+
+#[test]
+fn a_delegation_is_known_by_its_agents_key_alone() {
+    // Two certificates for one key (two delegations over time) have one fingerprint; two keys never do.
+    let keys = Keys::new();
+    let ca = keys.key("ca");
+    let key = keys.key("agent");
+    let first = keys.certify(&key, &ca, "first", "alice");
+    let second = keys.certify(&key, &ca, "second", "alice");
+    let call = Call::compose(&call_content("probe", "a.example")).unwrap();
+    let (a, b) = (
+        signature_fingerprint(&sign_call(&first, &call).unwrap()),
+        signature_fingerprint(&sign_call(&second, &call).unwrap()),
+    );
+    assert_eq!(a.unwrap(), b.unwrap());
+    let other = keys.certify(&keys.key("other"), &ca, "x", "alice");
+    assert_ne!(
+        signature_fingerprint(&sign_call(&other, &call).unwrap()).unwrap().as_str(),
+        keygen_fingerprint(&pub_file(&key))
+    );
+}
+
+#[test]
+fn fingerprints_of_other_things_are_refused() {
+    for bad in [
+        "",
+        "SHA256:",
+        "sha256:abc",
+        "MD5:aa:bb",
+        &format!("SHA256:{}", "a".repeat(42)),
+        &format!("SHA256:{}=", "a".repeat(43)),
+        &format!("SHA256:{}", "a".repeat(44)),
+    ] {
+        assert!(matches!(bad.parse::<Fingerprint>(), Err(SignError::MalformedFingerprint(_))), "{bad:?}");
+    }
+    assert!("SHA256:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA".parse::<Fingerprint>().is_ok());
+    // A signature by another key type is refused with the type named.
+    let keys = Keys::new();
+    let rsa = keys.path("rsa");
+    keys.keygen(&["-q", "-t", "rsa", "-b", "2048", "-N", "", "-C", "", "-f", rsa.to_str().unwrap()]);
+    let call = Call::compose(&call_content("probe", "a.example")).unwrap();
+    let sig = sign_call(&Signer::plain(&rsa), &call).unwrap();
+    assert!(matches!(signature_fingerprint(&sig), Err(SignError::UnsupportedKeyType(t)) if t == "ssh-rsa"));
+    assert!(matches!(signature_fingerprint("not a signature"), Err(SignError::MalformedSignature)));
+}
+
+#[test]
+fn every_namespace_of_the_system_is_reserved_and_nothing_else_is() {
+    let names: Vec<&str> = Namespace::ALL.iter().map(|n| n.as_str()).collect();
+    assert_eq!(
+        names,
+        [
+            "call-v1@procession",
+            "request-v1@procession",
+            "approval-v1@procession",
+            "clearance-v1@procession",
+            "connection-v1@procession",
+            "broker-v1@procession",
+            "hosts-v1@procession",
+        ]
+    );
+    for name in names {
+        assert!(is_reserved_namespace(name), "{name}");
+    }
+    // A future one, and odd spellings of the ending, are reserved too.
+    for reserved in ["anything-v9@procession", "x@procession", "@procession", "call-v1@PROCESSION", "a@Procession"] {
+        assert!(is_reserved_namespace(reserved), "{reserved}");
+    }
+    for free in [
+        "",
+        "file",
+        "git",
+        "ssh",
+        "procession",
+        "call-v1@procession.example",
+        "call-v1@procession ",
+        "@procession@x",
+        "x@processio",
+        "x@procession\n",
+        "example.com",
+        "call-v1@processioN-x",
+    ] {
+        assert!(!is_reserved_namespace(free), "{free:?}");
+    }
 }
