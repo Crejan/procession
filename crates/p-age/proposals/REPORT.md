@@ -40,3 +40,15 @@ Section 9 of the proposal, G1 to G12. The ones that need the designer: G2, G3, G
 - **p-ledge**: its list of refusal reasons; the proof signature over the delegation's certificate at issuing time (before the key is handed over); G2; whether it wants `cancel`; which part of its `service.sock` proposal differs from section 3.
 - **p-robe**: that its one client speaks `submit` and `answer` and treats the answer as in section 3.
 - **orchestrator**: the designer's answers to G2, G3, G5, G6; `approvals.md` section 5 names the new namespaces; the workspace dependency entries when building starts.
+
+## Update after the designer's decisions (integration 47bb806, merged)
+
+Followed in `approval-connections.md`:
+- (a) every signature in a message is base64 of its armoured bytes (`sig`, `approval`, `clearance_sig`, `proof`); stated in section 1, examples changed.
+- (b) G6 closed: person is the only principal, groups come from `groups@procession`; registration reads person, end and groups from the certificate, refuses a certificate that breaks formats 3.1, has no group list in the message; pledge's word on groups is never used.
+- (c) Ed25519 and ECDSA P-256 only, also for the connection key.
+- (A, B) the `groups` member of the standing comes from the separately refreshed part of the broker's data; nothing scheduled or cadence-dependent; "roll-out" wording removed. (C, D) the `not-entitled` reason is now the one test. (E) `<service>` is the type's name.
+- (F) new message `carried` (section 5): the broker stores and sends, byte for byte, a document signed by the issuer (the hosts list, namespace `hosts-v1@procession`) and cannot alter it; pledge verifies against the site CA's line. Not used in stage 2. Open: the principal name under which pledge verifies it.
+- Allowed-signers lines now show the two services' lines of formats section 7.
+Still open (G6a): how group memberships reach the broker on a directory site, the issuer's name for the hosts list, how host keys reach a pledge before stage 3.
+p-act's note: do not depend on its old `call_sig` handling; the broker decodes base64 before `looks_armoured`.

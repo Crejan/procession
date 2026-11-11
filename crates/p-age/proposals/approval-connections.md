@@ -25,8 +25,13 @@ result, message by message. Numbers are proposals, like those of
 ## 1. Principles
 
 - **The same as the formats.** What is signed is bytes: a message that
-  carries a signed document carries its bytes (base64, standard alphabet,
-  padded) and the signature beside it, and nobody re-creates them. Strings,
+  carries a signed document carries its bytes and the signature beside it,
+  and nobody re-creates them. A document or a signature carried inside a
+  message is always the base64 (standard alphabet, padded) of its exact
+  bytes; for a signature, of its armoured bytes
+  (`approval-formats.md` section 2). Wherever this document says `sig`,
+  `approval`, `clearance_sig` or `proof`, that is meant. A receiver decodes
+  first, and refuses what is not base64. Strings,
   times, hashes and "unknown members make a message invalid" are the rules of
   `approval-formats.md` section 2.
 - **One JSON object per line**, UTF-8, `\n` at the end, none inside. A line is
@@ -77,7 +82,7 @@ both.
 **`submit`**, service to whoever answers (broker, or pledge in stage 1):
 
 ```json
-{"v":1,"type":"submit","request":"eyJ2IjoxLCJ0eXBl...","sig":"-----BEGIN SSH SIGNATURE-----\nU1NIU0lH...\n-----END SSH SIGNATURE-----\n"}
+{"v":1,"type":"submit","request":"eyJ2IjoxLCJ0eXBl...","sig":"LS0tLS1CRUdJTiBTU0ggU0lHTkFUVVJFLS0tLS0K..."}
 ```
 
 | Member | Meaning |
@@ -88,7 +93,7 @@ both.
 **`answer`**, back, once, for the request named by its hash:
 
 ```json
-{"v":1,"type":"answer","request":"sha256:9c2f...e1","result":"approved","approval":"-----BEGIN SSH SIGNATURE-----\n...","clearance":"eyJ2IjoxLCJ0eXBlIjoiY2xlYXJhbmNlIi...","clearance_sig":"-----BEGIN SSH SIGNATURE-----\n..."}
+{"v":1,"type":"answer","request":"sha256:9c2f...e1","result":"approved","approval":"LS0tLS1CRUdJTiBTU0ggU0lHTkFUVVJFLS0tLS0K...","clearance":"eyJ2IjoxLCJ0eXBlIjoiY2xlYXJhbmNlIi...","clearance_sig":"LS0tLS1CRUdJTiBTU0ggU0lHTkFUVVJFLS0tLS0K..."}
 {"v":1,"type":"answer","request":"sha256:9c2f...e1","result":"declined"}
 {"v":1,"type":"answer","request":"sha256:9c2f...e1","result":"refused","by":"broker","reason":"not-entitled"}
 {"v":1,"type":"answer","request":"sha256:9c2f...e1","result":"refused","by":"pledge","reason":"above-ceiling","detail":"rating secret is above the ask ceiling"}
@@ -97,7 +102,7 @@ both.
 
 | `result` | Other members | Meaning |
 |---|---|---|
-| `approved` | `approval`: the armoured SSHSIG over the request's bytes. `clearance`: the clearance's bytes, base64, and `clearance_sig`: its signature. Both only from the broker; in stage 1 there is no clearance and the two members are absent | the person's machine signed. **Information only**: see below |
+| `approved` | `approval`: the SSHSIG over the request's bytes (base64 of the armoured signature). `clearance`: the clearance's bytes, base64, and `clearance_sig`: its signature (base64 of the armoured bytes). Both only from the broker; in stage 1 there is no clearance and the two members are absent | the person's machine signed. **Information only**: see below |
 | `declined` | | the person said no in a dialog. No reason, no text |
 | `refused` | `by` (`broker` or `pledge`), `reason`, optional `detail` | a program said no without asking the person |
 | `expired` | `by` (`broker` or `pledge`) | the deadline passed before an approval came |
@@ -121,7 +126,7 @@ of `SPEC.md` is the answer):
 | `deadline` | the call's deadline is past, or further away than 10 minutes plus the tolerated difference. Not in `SPEC.md`'s list; see the report |
 | `delegation` | the call is not signed under a delegation that is registered and not ended or withdrawn (check 2). One code for all three: the agent is not told which |
 | `person` | the person is not enabled in the site project, or is blocked (check 3). One code |
-| `not-entitled` | R10 (check 4) |
+| `not-entitled` | R10 (check 4): none of the groups in the delegation's certificate is a group the person is in and that the service's binding names for this host. The groups come from the certificate and nowhere else |
 | `too-many-waiting` | the agent already has as many requests waiting as the site allows |
 | `busy` | the broker's own limits (section 4) |
 
@@ -211,7 +216,7 @@ The nonce is 32 random bytes, base64. pledge answers with a **connection
 document**, a fifth signed document in the manner of the four:
 
 ```json
-{"v":1,"type":"signin","doc":"eyJ2IjoxLCJ0eXBlIjoiY29ubmVjdGlvbiIs...","sig":"-----BEGIN SSH SIGNATURE-----\n..."}
+{"v":1,"type":"signin","doc":"eyJ2IjoxLCJ0eXBlIjoiY29ubmVjdGlvbiIs...","sig":"LS0tLS1CRUdJTiBTU0ggU0lHTkFUVVJFLS0tLS0K..."}
 ```
 
 where `doc` is the bytes of
@@ -229,7 +234,8 @@ where `doc` is the bytes of
 
 Namespace `connection-v1@procession`; the key is the person's connection key,
 a plain key, not certified (`approvals.md` section 5 certifies the two
-approval keys only). The broker verifies against the connection key the site
+approval keys only). Key types are Ed25519 and ECDSA P-256, as for every key (`approval-formats.md`
+section 3.1); the broker refuses a sign-in with another. The broker verifies against the connection key the site
 project has for `person` and checks nonce, `tls` and `at`. On success:
 
 ```json
@@ -257,7 +263,7 @@ the person's delegation key (below).
 **Requests.**
 
 ```json
-{"v":1,"type":"request","request":"eyJ2IjoxLCJ0eXBl...","sig":"-----BEGIN SSH SIGNATURE-----\n..."}
+{"v":1,"type":"request","request":"eyJ2IjoxLCJ0eXBl...","sig":"LS0tLS1CRUdJTiBTU0ggU0lHTkFUVVJFLS0tLS0K..."}
 ```
 
 The service's request, exactly as the service submitted it; no hash and
@@ -274,7 +280,7 @@ increments, so a missed message cannot leave pledge with a half view, and a
 reconnect needs nothing but sending it again.
 
 ```json
-{"v":1,"type":"notice","doc":"eyJ2IjoxLCJ0eXBlIjoic3RhbmRpbmciLCJ0byI6ImphbiIs...","sig":"-----BEGIN SSH SIGNATURE-----\n..."}
+{"v":1,"type":"notice","doc":"eyJ2IjoxLCJ0eXBlIjoic3RhbmRpbmciLCJ0byI6ImphbiIs...","sig":"LS0tLS1CRUdJTiBTU0ggU0lHTkFUVVJFLS0tLS0K..."}
 ```
 
 with `doc` the bytes of
@@ -290,8 +296,8 @@ with `doc` the bytes of
 | `blocked` | an administrator blocked the person |
 | `blocked_keys` | fingerprints of this person's keys an administrator blocked |
 | `withdrawn` | fingerprints of delegations an administrator withdrew and that have not ended. The broker forgets an ended one |
-| `certificates` | the person's current certificates for the approval keys, as the site's roll-out gave them to the broker (optional, may be empty) |
-| `groups` | the names of the person's groups (optional, may be empty) |
+| `certificates` | the person's current certificates for the approval keys, as the issuer (whoever holds the site CA's key) made them and the site's data gave them to the broker (optional, may be empty) |
+| `groups` | the names of the person's groups, from the part of the broker's data that is refreshed separately (optional, may be empty) |
 
 Namespace `broker-v1@procession`, signed with the broker's key. It is a sixth
 document type and a new namespace on purpose: the broker's key also signs
@@ -309,17 +315,40 @@ How pledge uses it:
   against the site CA's key itself, for its own key and the right name
   (`<person>:confirmed` or `<person>:automatic`). The broker's signature on the
   standing is not what makes a certificate good; the CA's is. The broker
-  does not renew or issue anything: it carries what the roll-out gave it.
+  does not renew or issue anything: it carries what it was given.
 - `groups`: only to offer them to the person when they start an agent.
   They decide nothing: R3 is enforced by the broker's R10 at every request.
-  With a directory, group memberships are not in the site project (open at
-  fundament); then `groups` is empty and nothing else changes.
+  Where they come from is the broker's data: a job beside it refreshes
+  the memberships on a timer from the site project or a directory, and the
+  broker does not know which. If a site has none, `groups` is empty and
+  nothing else changes.
 
 The broker sends a new standing whenever any of these changes (an
-administrator's block, a withdrawal, a roll-out that brought new data), and
-always at sign-in. **Nothing in it depends on the roll-out being frequent**:
+administrator's block, a withdrawal, new data, including a refresh of the group memberships), and
+always at sign-in. **Nothing in it depends on how often the site's data is converged, and nothing scheduled does**:
 what an administrator does at the broker reaches a connected pledge at once,
 and a pledge that was away gets it before its first request.
+
+**Signed documents the broker did not sign.** The connection must be able to
+carry a document that someone else signed and the broker cannot alter. The
+one that exists is the list of hosts' keys (`approval-formats.md` section
+6.1, a draft, stage 3), signed by the issuer with the site CA's key.
+
+```json
+{"v":1,"type":"carried","namespace":"hosts-v1@procession","doc":"eyJ2IjoxLCJ0eXBlIjoiaG9zdHMi...","sig":"LS0tLS1CRUdJTiBTU0ggU0lHTkFUVVJFLS0tLS0K..."}
+```
+
+The broker holds the latest one it was given, byte for byte, and sends it
+after the standing at every sign-in and whenever it gets a new one. It does
+not parse it beyond what it needs to store it, and the broker's signature is
+not on it. pledge verifies it against the site CA's line for that
+namespace, under the issuer's name (which the formats leave open for the
+list), and ignores one that does not verify or is older (`at`) than the one it
+has. A later `namespace` is not accepted unless pledge's own code knows it.
+In stage 2 pledge reads hosts from its own configuration and the broker
+carries no such document; the message exists so that stage 3 changes no
+protocol. **Tempting:** a pledge that treats a host key as good because the
+broker sent it. It is good only if the CA's signature verifies.
 
 ### What goes from pledge to the broker
 
@@ -327,7 +356,7 @@ All of these are bound to the connection; none is signed, except what is a
 signature by nature (the approval, the delegation's proof).
 
 ```json
-{"v":1,"type":"approval","request":"sha256:9c2f...e1","sig":"-----BEGIN SSH SIGNATURE-----\n..."}
+{"v":1,"type":"approval","request":"sha256:9c2f...e1","sig":"LS0tLS1CRUdJTiBTU0ggU0lHTkFUVVJFLS0tLS0K..."}
 {"v":1,"type":"decline","request":"sha256:9c2f...e1"}
 {"v":1,"type":"refuse","request":"sha256:9c2f...e1","reason":"above-ceiling","detail":"rating secret is above the ask ceiling"}
 ```
@@ -355,7 +384,7 @@ signature by nature (the approval, the delegation's proof).
 **Delegations.**
 
 ```json
-{"v":1,"type":"delegation","cert":"ssh-ed25519-cert-v01@openssh.com AAAA... jan","proof":"-----BEGIN SSH SIGNATURE-----\n..."}
+{"v":1,"type":"delegation","cert":"ssh-ed25519-cert-v01@openssh.com AAAA... jan","proof":"LS0tLS1CRUdJTiBTU0ggU0lHTkFUVVJFLS0tLS0K..."}
 ```
 
 `proof` is a signature by the agent's own (certified) key over the bytes of
@@ -364,11 +393,16 @@ key, before it handed it over. The broker verifies it with `ssh-keygen -Y verify
 against the person's delegation key from the site project, the way it
 verifies a call: that checks the certificate without the broker having a
 certificate parser, and shows that the certificate belongs to a key somebody
-holds. It then reads the delegation's fingerprint, end and groups from the
-certificate and registers them (`src/register.rs`). It refuses a validity
+holds. It then reads the delegation's fingerprint, end, the person (the
+certificate's only principal) and the groups (the extension
+`groups@procession`) from the certificate, and registers them
+(`src/register.rs`). A certificate that breaks `approval-formats.md`
+section 3.1 (more than one principal, another extension, a critical option, a
+key type other than Ed25519 or ECDSA P-256) is not registered. There is no
+`groups` member in the message: what pledge says about groups is never used. It refuses a validity
 longer than 24 hours. The answer is `{"v":1,"type":"registered","delegation":"SHA256:..."}` or
 `{"v":1,"type":"not-registered","delegation":"SHA256:...","reason":"..."}`
-(reasons: `bad-proof`, `too-long`, `not-yours`, `blocked`). Registration does
+(reasons: `bad-proof`, `bad-certificate`, `too-long`, `not-yours`, `blocked`). Registration does
 not rely on the sign-in, so the connection key alone cannot register one.
 
 **Withdrawals.**
@@ -418,11 +452,12 @@ In the manner of `approval-formats.md` section 7. `<person>`, `<service>`,
 
 | Message | Signed by | Namespace | Verified by | Under the name | Against |
 |---|---|---|---|---|---|
-| `submit` (the request) | the service's key, certified by its host's key | `request-v1@procession` | the broker, **and** pledge | `<service>@<host>`, from the call inside | the host's public key |
+| `submit` (the request) | the service's key, certified by its host's key | `request-v1@procession` | the broker, **and** pledge | `<service>@<host>`, from the call inside (`<service>` is the catalogue type's name; one of a type per host) | the host's public key |
 | `signin` (the connection document) | the person's connection key | `connection-v1@procession` | the broker | `<person>` | the person's connection key, site project |
 | `request` to pledge | the service, as above; the broker adds nothing | `request-v1@procession` | pledge | `<service>@<host>` | the host's public key |
 | `approval` | the person's confirmed or automatic approval key, certified by the site CA | `approval-v1@procession` | **the service** (the broker only reads it) | `<person>:confirmed` or `<person>:automatic` | the site CA's key |
 | `answer` with a clearance | the broker's key, certified by the site CA | `clearance-v1@procession` | the service | `broker` | the site CA's key |
+| `carried` (the list of hosts' keys, stage 3) | the issuer, with the site CA's key | `hosts-v1@procession` | pledge | the issuer's name (open) | the site CA's key |
 | `notice` (the standing) | the broker's key, certified by the site CA | `broker-v1@procession` | pledge | `broker` | the site CA's key |
 | a certificate in the standing | the site CA | (a certificate) | pledge | its own key and `<person>:confirmed` / `:automatic` | the site CA's key |
 | `delegation` (`proof`) | the agent's key, certified by the person's delegation key | `delegation-v1@procession` | the broker | `<person>` | the person's delegation key, site project |
@@ -434,6 +469,9 @@ verifying as another):
 ```
 # the broker, for a connection
 <person> namespaces="connection-v1@procession" <the person's connection public key>
+# services, for approvals and clearances (approval-formats.md section 7: two lines)
+*:confirmed,*:automatic cert-authority,namespaces="approval-v1@procession" <the site CA's public key>
+broker cert-authority,namespaces="clearance-v1@procession" <the site CA's public key>
 # pledge, for what the broker says in its own name
 broker cert-authority,namespaces="broker-v1@procession" <the site CA's public key>
 # the broker, for a delegation's proof (as for a call)
@@ -445,10 +483,11 @@ ssh-keygen -Y verify -f allowed -I broker -n broker-v1@procession -s notice.sig 
 ssh-keygen -Y verify -f allowed -I <person> -n delegation-v1@procession -s proof.sig < cert
 ```
 
-The services' line for the site CA (formats section 7) lists
-`approval-v1@procession,clearance-v1@procession` and **not** `broker-v1@procession`;
-pledge's line for the site CA lists `broker-v1@procession` and neither of those
-two. So a standing never verifies as a clearance, and the broker's key
+The services' lines for the site CA (formats section 7) list
+`approval-v1@procession` and `clearance-v1@procession` each under its own
+names and **not** `broker-v1@procession`; pledge's line for the site CA lists
+`broker-v1@procession` and neither of those two. A verifier writes only the
+namespace it is verifying. So a standing never verifies as a clearance, and the broker's key
 cannot be made to say anything to a service that it did not say as a
 clearance.
 
@@ -512,6 +551,7 @@ implementation to believe it.
 | what is the broker's word is signed by its key (pledge) | the standing, in its own namespace |
 
 ## 8. Dependencies
+
 
 Chosen conservatively; none is added yet. A line-based protocol over TLS
 needs a TLS implementation, an async runtime and a JSON parser, and nothing
@@ -589,16 +629,15 @@ Each with a proposal; none is settled here.
   check 0, `deadline`, beside parsing; it is a limit and not a trust.
 - **G5. One trust anchor** (`approvals.md` section 5), see section 8: an SSH CA
   key and a TLS root are two things. Proposal: two files.
-- **G6. The agent's certificate: principals.** `approvals.md` section 5 says
-  the delegation's certificate carries "the chosen groups as principals";
-  `approval-formats.md` section 7 and `p-act` (`signature_person`) take the
-  **one** principal as the person, and refuse more. Both cannot hold, and the
-  broker needs the delegation's groups for R10 (check 4). Proposal: principal
-  = the person only, and the groups in a certificate extension
-  (`groups@procession`) that the delegation key signs, so that the groups
-  are the person's own narrowing and the broker cannot widen them. Then
-  `delegation` needs no `groups` member. The alternative, groups in the
-  `delegation` message, makes them an unsigned claim in the broker's register.
+- **G6. Decided, followed here.** The agent's certificate has the person as
+  its only principal and the groups in `groups@procession`
+  (`approval-formats.md` section 3.1). The broker reads both from the
+  certificate and from nowhere else; `delegation` has no group list.
+- **G6a. Open with the designer, not decided here:** how group memberships
+  reach the broker on a site with a directory (the proposal assumes only that
+  they are a separately refreshed part of its data); the issuer's name for
+  the list of hosts' keys; how hosts' public keys reach a pledge before
+  stage 3 (pledge's configuration).
 - **G7. The key behind a signature.** Blocking a key (SPEC) needs the
   fingerprint of the key that signed an approval or an agent's call, read
   from its certificate; `p-act`'s `Certificate` does not give it. Proposal:
