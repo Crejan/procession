@@ -22,6 +22,8 @@ const LINE_TIMEOUT: Duration = Duration::from_secs(10);
 const WRITE_TIMEOUT: Duration = Duration::from_secs(5);
 /// How often the wait looks at the cancel flag and the clock.
 const TICK: Duration = Duration::from_millis(100);
+/// How long after the deadline pledge's own `expired` is waited for.
+const GRACE: Duration = Duration::from_secs(2);
 
 /// How a wait ended.
 #[derive(Debug)]
@@ -100,22 +102,32 @@ impl PledgeLink {
             return Waited::Broken(format!("cannot submit: {e}"));
         }
         let mut reader = LineReader::new(&stream);
+        // At the deadline the call is over for the agent, but the connection is kept for
+        // a moment: closing it at once would cancel the request in pledge, which then
+        // records `cancelled` where its own clock says `expired` (`doc/approvals.md` R7:
+        // each of the three watches the deadline itself). A late answer is worth nothing.
+        let mut grace_ends: Option<i64> = None;
         loop {
-            if cancel.load(Ordering::SeqCst) {
+            let now = now_unix();
+            let over = now >= deadline.unix();
+            if over {
+                let ends = *grace_ends.get_or_insert(deadline.unix() + GRACE.as_secs() as i64);
+                if now >= ends {
+                    return Waited::Deadline;
+                }
+            } else if cancel.load(Ordering::SeqCst) {
                 let _ = write_message(&mut &stream, &Message::Cancel(Cancel { request: hash }), POLICY);
                 return Waited::Cancelled;
             }
-            let remaining = u64::try_from(deadline.unix() - now_unix()).unwrap_or(0);
-            if now_unix() >= deadline.unix() {
-                return Waited::Deadline;
-            }
-            let wait = TICK.min(Duration::from_secs(remaining.max(1)));
-            if !readable(&stream, wait) {
+            if !readable(&stream, TICK) {
                 continue;
             }
             match reader.read_message(POLICY) {
                 Ok(Some(Message::Answer(Answer { request, outcome }))) if request == hash => match outcome {
                     Outcome::Unknown => note("an answer with a result this program does not know is no answer"),
+                    // After the deadline only pledge's own expiry is heard; an approval is too late.
+                    outcome @ Outcome::Expired(_) => return Waited::Answer(outcome),
+                    _ if over => return Waited::Deadline,
                     outcome => return Waited::Answer(outcome),
                 },
                 Ok(Some(Message::Answer(_) | Message::Cancel(_))) => note("a message for a request not held: ignored"),
