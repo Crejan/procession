@@ -29,3 +29,10 @@ base64 = "0.23"
 
 [dev-dependencies]
 tempfile = "3"
+# `pact`'s own parser, composer and in-process signer, for the stage-1 cross run.
+p-act = { path = "../p-act", version = "0.0.0", features = ["pact"] }
+
+[[test]]
+name = "stage1"
+path = "tests/stage1.rs"
+required-features = ["test-verbs"]

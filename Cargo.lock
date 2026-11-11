@@ -424,6 +424,15 @@ version = "0.0.0"
 [[package]]
 name = "p-ledge"
 version = "0.0.0"
+dependencies = [
+ "base64",
+ "libc",
+ "p-act",
+ "ring",
+ "serde",
+ "serde_json",
+ "thiserror",
+]
 
 [[package]]
 name = "p-reserve"
