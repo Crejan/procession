@@ -12,6 +12,8 @@ mod dispatch;
 mod json;
 mod kit;
 mod lock;
+#[allow(dead_code, reason = "no production row has parameter rules yet, and Mode::Name is the service's")]
+mod rate;
 mod rules;
 mod table;
 #[cfg(test)]

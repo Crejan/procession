@@ -1,256 +1,236 @@
-# How an agent reaches the service - a proposal
+# How an agent reaches the service
 
-Status: a proposal for the orchestrator and the designer, written against
-`doc/approvals.md` (its terms), `doc/approval-formats.md` and
-`crates/p-robe/SPEC.md`. Nothing here is built. It settles what
-`approval-formats.md` section 9 and `SPEC.md` ("Open") leave open for the
-first connection of the system: agent to service. Decided in principle, and
-not reopened here: MCP over HTTP, the signed call in a header of each tool
-call.
+Status: **accepted in principle by the designer** (the decisions are marked
+*(decided)*), not yet built: `probe serve` waits for the exchange codec and
+the agent-side signer in `p-act`. Written against `doc/approvals.md`,
+`doc/approval-formats.md` and `crates/p-robe/SPEC.md`. Decided before this
+document: MCP over HTTP, the signed call carried by each tool call.
 
 ## 1. Who does what on the agent's side
 
 The model that drives an agent cannot sign: the key lives in the sandbox, not
-in the model. A small piece of the agent's own runtime, here called the
-**signer**, sits between the model's tool calls and the HTTP request. For each
-tool call it builds the call (`approval-formats.md` section 3), signs it with
-the agent's delegated key, and sends it. The model sees a tool name, its
-arguments and an answer; it never sees the key, the identifier or the headers.
-The signer is not part of p-robe. It needs an owner (see "What I need").
+in the model. *(decided)* The agent-side signer is **`pact`**, a small binary
+in the crate `p-act` behind a feature. It holds the agent's key and
+certificate in the sandbox, signs each tool call, and is the only thing in the
+sandbox that talks to services. The model sees a tool name, its arguments and
+an answer; it never sees the key, the identifier or the signature. The
+interface of `pact` is the p-act agent's proposal, which p-robe reviews.
 
-The signer, not the model, sets `id` (fresh UUID per tool call, never reused,
-also not after "expired"), `deadline` (default: now + 2 minutes; the model may
-ask for another through the argument `wait_seconds`, at most 600), `service`
-(`host` from its configuration, `name` always `probe`: the name of the service's type in the catalogue, one service of a type per host, `approval-formats.md` section 3) and `claim` (the model's own words,
-passed through).
+For each tool call `pact` builds the call (`approval-formats.md` section 3):
+`id` (a fresh UUID, never reused, also not after "expired"), `service`
+(`host` from its configuration, `name` always `probe`: the name of the
+service's type, one service of a type per host), `action`, `params`, `claim`
+(the model's words, passed through), and `deadline`. *(decided)* The
+deadline is `pact`'s own setting (2 minutes by default, 10 at most). The
+model may ask for a **shorter** wait through the argument `wait_seconds`, never
+a longer one; `pact` takes the smaller. The keys it signs with are Ed25519 or
+ECDSA P-256 (`approval-formats.md` section 3.1).
 
 ## 2. One endpoint, no state
 
-- `POST /mcp`, MCP streamable HTTP, JSON-RPC 2.0 in the body. `GET /mcp` is
-  answered `405`: the service never starts a message of its own.
-- **No MCP session id.** The service keeps nothing between requests: every
-  tool call carries everything that decides it, and the limits on how much an
-  agent asks are pledge's (`approvals.md`, section 7). `initialize` answers
-  `serverInfo` (`probe`, its version), `capabilities.tools` with
-  `listChanged: false`, and `instructions` (section 5).
-- A request that carries an `Origin` header is refused with `403`. Agents are
-  not browsers, and a browser cannot sign; this closes DNS rebinding without
-  relying on it.
-- `tools/list` and `initialize` need no call: they reveal the table, which
-  every account on the host could learn anyway (`open`). `tools/call` is the
-  only method that acts, and it needs the two headers below.
+- `POST /mcp`, MCP streamable HTTP, JSON-RPC 2.0. `GET /mcp` is answered `405`:
+  the service never starts a message of its own.
+- **No MCP session id.** The service keeps nothing between requests; every
+  tool call carries what decides it. `initialize` answers `serverInfo`
+  (`probe`, its version), `capabilities.tools` with `listChanged: false`, and
+  `instructions` (section 6).
+- A request with an `Origin` header is refused `403`: agents are not browsers.
+- `initialize` and `tools/list` need no call: they show the table, which any
+  account on the host could learn (`open`). `tools/call` is the only method
+  that acts, and it needs the call in `_meta`.
+- *(decided)* Between agent and service the connection is plain in stage 1
+  (the same machine, or the sandbox's own network). TLS across hosts is open
+  for stage 2. An answer can be `secret`.
 
-## 3. The two headers
+## 3. The call travels in `_meta` *(decided: body, not headers)*
 
-| Header | Value |
-|---|---|
-| `Procession-Call` | the call's bytes, base64 (standard alphabet, padded) |
-| `Procession-Call-Signature` | the call's signature, **as armoured text, base64-encoded again** |
+The call and its signature are two members of `params._meta` of the
+`tools/call` request:
 
-The armoured SSHSIG has line breaks, which a header cannot carry. Since
-`approval-formats.md` section 1 (a signature inside another document is the
-base64 of its armoured bytes), the header value **is** the value of the
-request's `call_sig`, and `Procession-Call` is the request's `call`: the
-service copies both into the request without decoding or re-encoding them
-(it decodes a copy to read the call). The signer's keys must be Ed25519 or
-ECDSA P-256 (`approval-formats.md` section 3.1); `p-act` refuses others.
+```json
+{"jsonrpc":"2.0","id":7,"method":"tools/call","params":{
+  "name":"rt_procs","arguments":{"params":["pid=4711"],"claim":"..."},
+  "_meta":{"procession/call":"<base64 of the call's bytes>",
+           "procession/call-signature":"<base64 of the armoured SSHSIG>"}}}
+```
 
-Rules at the service, all before the call is looked at:
-
-- each header exactly once; missing, doubled or not base64: `400` with a
-  JSON-RPC error (`-32600`), because that is a bug in the signer, not a
-  decision about an action;
-- sizes: the call at most 16 KiB decoded (the format's limit), the signature
-  at most 4 KiB decoded, the body at most 64 KiB, so the headers may reach
-  about 28 KiB. **This is more than many HTTP servers and proxies accept by
-  default** (8 KiB is common). Calls of this service are small (at most 64
-  parameters of at most 512 bytes), so I propose the signer keeps them below
-  6 KiB, and `probe serve` sets its own header limit to 32 KiB; see "Open".
+- Each value is the **base64 (standard, padded) of exact bytes**
+  (`approval-formats.md` section 1), so `procession/call` is the request's
+  `call` and `procession/call-signature` is the request's `call_sig`, **copied
+  into the request without decoding or re-encoding** (the service decodes a
+  copy to read the call).
+- Each member exactly once; missing, not a string, not base64, or larger than
+  the formats allow (call 16 KiB, signature 4 KiB decoded): JSON-RPC error
+  `-32602` (a signer bug, not a decision about an action). The body is at most
+  64 KiB.
+- **Checked against the MCP specification (2025-06-18, `basic`, "General
+  fields: `_meta`") on 2026-11-11:** `_meta` is reserved by MCP "to allow
+  clients and servers to attach additional metadata to their interactions".
+  A key is an optional prefix (labels, dots, a slash) and a name; prefixes
+  whose label after the first is `mcp` or `modelcontextprotocol` are reserved
+  for MCP. `procession/call` and `procession/call-signature` are valid and
+  not reserved (name: alphanumeric at both ends, hyphens allowed inside). The
+  base `Request` type has `params._meta` with free keys, which is also how a
+  `progressToken` rides on a `tools/call`. **One caution:** in the schema of
+  that revision `CallToolRequest.params` is written as `{name, arguments?}`
+  and "overrides" the base `params`, so `_meta` is not listed on it; the
+  TypeScript and Python SDKs accept it on any request, and the server here is
+  our own, so it is received. `pact` is ours too, so it sends it. Nothing in
+  the spec forbids it; nothing guarantees an unrelated client library lets a
+  caller set it. If an SDK that must be used cannot, I report back; I do not
+  fall back to headers.
 
 ## 4. The tool call must say what the call says
 
-The body of `tools/call` repeats the action and parameters, because that is
-what an MCP client and its model understand. Repeating is a risk: a signer bug
-or an attacker could pair a signed call for one action with a body asking for
-another. So **the service acts only on the signed call, and refuses a body
-that differs from it**:
+The body repeats the action and parameters, which is what an MCP client and
+its model understand. A signer bug or an attacker could pair a signed call for
+one action with a body asking for another. So **the service acts only on the
+signed call, and refuses a body that differs**:
 
-- tool `name` = the call's `action` with each space replaced by `_`
-  (`rt procs` is `rt_procs`). Nouns and verbs are `[a-z][a-z0-9-]*`
-  (`rules.rs`) and never contain `_`, so the mapping is unambiguous both ways;
+- tool `name` = the call's `action` with each space as `_` (`rt procs` is
+  `rt_procs`). Nouns and verbs are `[a-z][a-z0-9-]*` and never hold `_`, so the
+  mapping is unambiguous;
 - `arguments.params` = the call's `params`, element by element, byte for byte;
-- `arguments.claim` = the call's `claim`, or both absent;
-- `arguments.wait_seconds` is the signer's, not signed, and not acted on (the
-  deadline is the call's).
+- `arguments.claim` = the call's `claim`, both absent or equal;
+- `arguments.wait_seconds` is `pact`'s input, not signed, and not acted on.
 
-Any difference: outcome `refused`, reason `mismatch`, nobody asked.
+Any difference: `refused`, reason `invalid`, nobody asked (exact code
+`mismatch`, in the audit line).
 
 ## 5. The tool list comes from the table
 
-`tools/list` is generated from the verb table (`src/table.rs`), the one place
-that knows the verbs; nothing is written twice.
+`tools/list` is generated from the verb table (`src/table.rs`).
 
-- A tool for every row that is `ready` in this build and not hidden by the
-  service's configuration. Rows that are `unavailable` (their tool is not
-  built) are **not listed**: an agent cannot use them, and `sys kit` names
-  them for a person. `run command` is listed only when stage 4 is switched on.
-  Test verbs appear in a test build only.
-- `name`: `<noun>_<verb>`. `title`: `<noun> <verb>`.
-- `description`: the row's summary, then one sentence with the rating in
-  words, e.g. "Rated: exposure internal, damage none, disruption none (worst
-  case). Your person may be asked; the call waits until its deadline." The
-  words come from the same function the dialog uses (`table::exposure` etc.),
-  so an agent and a person read the same.
+- A tool for each row that is `ready` in this build and not hidden by the
+  service's configuration. `unavailable` rows are **not listed** (`sys kit`
+  names them for a person). `run command` only with stage 4 switched on. Test
+  verbs in a test build only.
+- `name`: `<noun>_<verb>`; `title`: `<noun> <verb>`.
+- `description`: the row's summary, and the worst-case rating in words, from
+  the function the dialog uses, so an agent and a person read the same.
+  For a row with parameter rules (`rating-rule.md`), the rules are summarised.
 - `inputSchema`: `params` (array of strings, `maxItems` 64, each `maxLength`
-  512 and `pattern` the argument class of `rules.rs`; `maxItems: 0` for a verb
-  without arguments), `claim` (string, `maxLength` 200), `wait_seconds`
-  (integer 1 to 600); `additionalProperties: false`.
+  512 and the argument class as `pattern`; `maxItems: 0` for a verb without
+  arguments), `claim` (`maxLength` 200), `wait_seconds` (integer 1 to 600, a
+  shorter wait only); `additionalProperties: false`.
 - `annotations`: `readOnlyHint` when damage is `none`, `destructiveHint` when
-  damage is `lasting`, `openWorldHint: false`. Hints are advice for clients;
-  nothing relies on them. The exact rating is in `_meta.procession.rating`.
+  `lasting`, `openWorldHint: false`: advice for clients, nothing relies on it.
+  The exact rating is in `_meta.procession/rating` of the tool.
 - A test checks that every ready row has exactly one tool, names are unique and
   at most 64 characters, and the schema's pattern accepts what
   `rules::check_argument` accepts and nothing else.
 
-## 6. What an agent sees
+## 6. What an agent sees *(decided: a coarse closed list)*
 
-A tool call blocks until it is decided, up to its deadline. The result is a
-normal MCP tool result. What the agent can act on is the **first text
-content**, always one JSON object on one line:
+A tool call blocks until it is decided, up to its deadline. The result is an
+ordinary MCP tool result; its first text content is one JSON object on one
+line:
 
 ```json
-{"type":"outcome","outcome":"declined","id":"3f2b6c1e-8a57-4d0e-9b1a-5c2e7d9f0a11","reason":"person-declined"}
+{"type":"outcome","outcome":"refused","reason":"try-later","id":"3f2b6c1e-8a57-4d0e-9b1a-5c2e7d9f0a11"}
 ```
 
-`isError` is `true` for everything except a verb that ran and exited 0. The
-answer of a verb, one JSON object per line as the dispatcher writes it, follows
-as further text content (or none).
+`isError` is `true` for everything but a verb that ran and exited 0. A verb's
+answer (one JSON object per line, as the dispatcher writes it) follows as more
+text content.
 
-| `outcome` | Meaning | `reason` (a fixed list) | What the agent should do |
+| `outcome` | `reason` | Meaning | What the agent should do |
 |---|---|---|---|
-| `done` | the verb ran | `rc` is in the object; `isError` follows `rc != 0` | use the answer |
-| `declined` | the person saw the request and said no | `person-declined` | not repeat it unless the person asks. Said so in the text |
-| `refused` | someone said no without asking the person: the service, the broker, pledge | see below | change the call, or stop; do not repeat unchanged |
-| `expired` | the deadline passed without an approval | `no-approval` | may ask again as a new call (new identifier), and should say so to the person first |
-| `unavailable` | the service could not reach pledge or the broker, so nothing was asked; at once, not at the deadline | `no-route` | the same as `expired`: nothing was done |
+| `done` | none (`rc` in the object) | the verb ran | use the answer |
+| `declined` | **none** | the person said no in a dialog; nothing else is said | not repeat it unless the person asks |
+| `expired` | none | the deadline passed without an approval | may ask again as a new call, after telling the person |
+| `refused` | `not-allowed` | the delegation, the site's rules or the person's ceilings do not allow it | change the plan; do not repeat |
+| `refused` | `invalid` | the call itself is wrong: unknown action, arguments not accepted, a deadline in the past or too far, an identifier used before | fix the call |
+| `refused` | `try-later` | too many requests waiting, or the agent is muted for a while | wait, then ask again |
+| `unavailable` | none | nobody could be asked, or nothing was done for a reason on the service's side | the same as `expired` |
 
-Reasons for `refused`: `review-service-sock.md`, section 3, replaces the
-list that stood here. The service passes on, unchanged, the `reason` pledge
-(stage 2: the broker) sent when it is in the closed list below, and uses these
-names for what it decides itself, so an agent meets one vocabulary. A `reason`
-outside the list becomes `unknown`; the service never copies a string it
-received into what an agent reads. The list:
+**Mapping.** Pledge and the broker give the service exact codes; the service
+maps them and writes the exact one, with who said it (`by`), to its audit line.
+The agent never sees the exact code.
 
-- from the service: `invalid-call` (names another host or service, unknown
-  verb, arguments not accepted, a string that cannot be shown), `mismatch`,
-  `approval-invalid` (what came back did not verify, or was the automatic key
-  for a request rated at the top; nothing ran), `call-used`;
-- from pledge (`service-sock.md` section 4): `malformed`, `unknown-delegation`,
-  `delegation-ended`, `delegation-withdrawn`, `deadline-past`,
-  `deadline-too-far`, `call-used`, `service-mismatch` (a fault of this
-  service's installation, its key or certificate: an operator must act, and
-  the service logs it), `not-showable`, `limit`, `muted`, `ceiling`;
-- from the broker (stage 2, its own document): `not-permitted` (the person may
-  not, or the person's groups are not among the binding's `groups`) and what
-  that document adds.
+| Exact code | Agent sees |
+|---|---|
+| `ceiling`, `not-permitted` (broker), `unknown-delegation`, `delegation-ended`, `delegation-withdrawn`, and a code the service does not know (`unknown`) | `refused` / `not-allowed` |
+| `invalid-call`, `mismatch` (the body differs from the call), `malformed`, `deadline-past`, `deadline-too-far`, `call-used`, `not-showable` | `refused` / `invalid` |
+| `limit`, `muted` | `refused` / `try-later` |
+| `service-mismatch` (this service's key or certificate is wrong: an operator must act), `approval-invalid` (what came back did not verify; nothing ran), pledge's `unavailable`, no route to pledge or the broker | `unavailable` |
+| pledge's `declined` | `declined` |
+| `expired`, the service's own deadline | `expired` |
 
-Pledge's `refused`/`unavailable` (it could not ask or record) and a service
-that cannot reach pledge are both the outcome `unavailable`, with the reasons
-`pledge-unavailable` and `no-route`. The deadline checks of step 3 in section 8
-use `deadline-past` and `deadline-too-far`, not `invalid-call`.
+The mapping lives in one function with one test per exact code; a string
+received is never copied into what an agent reads. The exact lists are those
+of the connections document (p-age's, to become `doc/approval-connections.md`);
+a code that is added there and not here maps to `not-allowed` and is logged.
 
-(The earlier, coarser list, kept for the thinking behind it: `invalid-call` (names another
-host or service, ended, unknown verb, arguments not accepted),
-`mismatch`, `over-ceiling` (rating above what the delegation allows),
-`not-permitted` (the site's rules), `delegation-ended`, `muted` (declined too
-often), `limit` (too many waiting), `used` (the identifier was used before),
-`approval-invalid` (what came back did not verify; nothing ran).) The detail
-stays in the service's audit line and in pledge's record. An agent that is told
-`not-permitted` can stop wasting calls; it does not learn the site's rules.
-This list needs the answer format of the next documents (service to broker,
-pledge to broker) to carry such a code. That is a request, below.
-
-`instructions` (in `initialize`) says in plain words what the text above says:
-a call may need your person's approval and waits for it until its deadline;
-"declined" and "refused" are decisions, do not retry them unchanged;
-"expired" and "unavailable" mean nothing happened.
+`instructions` (in `initialize`) says in plain words what the table says: a
+call may need your person's approval and waits for it until its deadline;
+`declined` and `refused` are decisions, do not repeat them unchanged;
+`expired` and `unavailable` mean nothing happened.
 
 ## 7. Waiting, cancelling, dropping
 
-- The service holds the request open until the call is decided or its deadline
-  passes. If the client sent a `progressToken`, the response is an SSE stream
-  with `notifications/progress` at the steps that matter ("handed to your
-  person's machine", "approved, running"; pledge sends nothing between ask and
-  answer, so the service cannot say that a dialog is on screen), and a comment line every 15 seconds so that nothing in between
-  closes an idle connection. Without a token the response is plain JSON, sent
-  once.
+- The service holds the request open until the call is decided or its
+  deadline passes. If the client sent a `progressToken` (in `_meta`), the
+  response is an SSE stream with `notifications/progress` at two steps ("handed
+  to your person's machine", "approved, running") and a comment line every 15
+  seconds so that nothing in between closes an idle connection. Without a token
+  the response is plain JSON, once. *(decided)* There is no notice that a dialog
+  is on screen.
 - **A cancelled or dropped call is not run.** `notifications/cancelled`, or the
-  connection closing, before the verb started: the service stops waiting,
-  records the identifier as used, and runs nothing, even if an approval
-  arrives later. Nobody is left to read the answer, and an approval was for a
-  call someone was waiting on. (The request is still with pledge until its
-  deadline; asking pledge to close the dialog needs a cancel message in the
-  connection to the broker. Request below.)
-- A connection lost **after** the verb started: the verb finishes, the answer is
-  lost. The identifier is used, so the agent must make a new call, which asks
-  again. Accepted: a verb is not made repeatable to save a dialog.
+  connection closing, before the verb started: the service closes its
+  connection to pledge or the broker (which cancels the request there), keeps
+  the identifier as used, and runs nothing even if an approval arrives later.
+- A call's identifier is recorded **when it is submitted** *(decided)*, so a
+  repeated call is refused (`invalid`, exact `call-used`) by the service
+  itself. A connection lost after the verb started: the verb finishes, the
+  answer is lost, and the agent must make a new call, which asks again.
 - At most 16 calls wait in the service at once in stage 1 (a setting). The
-  exchange with pledge and the broker is one request per connection
-  (`submit`, `answer`, `cancel`, the request's hash as the correlation; the
-  home of the exchange is p-age's connections document), so this is also a
-  bound on open connections and descriptors. It is not a rule about who may
-  what; beyond that, `503`
-  with `Retry-After`, as a transport decision, no outcome.
+  exchange is one request per connection (`submit`, `answer`, `cancel`, the
+  request's hash as the correlation), so this also bounds open connections.
+  It is not a rule about who may what. Beyond it: HTTP `503` with
+  `Retry-After`, a transport decision, no outcome.
 
 ## 8. What the service does with a tool call, in order
 
-This is `SPEC.md`, "What the service does with a call", with the HTTP in
-front:
+`SPEC.md`, "What the service does with a call", with the HTTP in front:
 
-1. headers present, sizes, base64 (`400` otherwise);
-2. parse the call (the p-act crate): `v`, `type`, namespaces of what is
-   checked later, size, strings;
-3. the call names this host and this service; its deadline is neither past nor
-   more than 10 minutes away (60 seconds of clock skew allowed);
-4. the action is a ready row, the parameters are accepted by its row
-   (`rules.rs` and the row's own parameter rules, see `rating-rule.md`);
+1. `_meta` members present, sizes, base64 (`-32602` otherwise);
+2. parse the call (`p-act`: `Call::parse`): `v`, `type`, size, strings, the
+   single principal of the certificate;
+3. the call names this host and service `probe`; its deadline is neither past
+   nor more than 10 minutes away (60 seconds of clock skew);
+4. the action is a ready row; its parameters are accepted by the row
+   (`rules.rs` and `rate`);
 5. body equals call (section 4);
-6. rating, request, wait, the checks before running, the dispatcher: as in
-   `SPEC.md` steps 2 to 5.
+6. rate (`Mode::Name`), compose and sign the request (`Request::compose`,
+   `sign_request`), record the identifier, submit, wait; verify the approval
+   (`verify_approval`: over this request, by the person the call's certificate
+   names, the confirmed key for a request rated at the top), check the
+   deadline and the used identifiers again; run the dispatcher with
+   `--within <the rating that was approved>` (`rating-rule.md`, section 5).
 
-**The service does not verify the agent's certificate** (it cannot,
-`approvals.md` section 5; pledge and the broker do). So a stranger can make the
-service do steps 1 to 5 up to the signing of a request, which pledge or the
-broker then refuse. This is the reason for the bound on waiting calls, and
-for the service signing nothing until step 5 has passed.
+The service does not verify the agent's certificate (pledge and the broker do,
+`approvals.md` section 5), so a stranger can get as far as a signed request,
+which pledge or the broker refuse. That is why the bound on waiting calls
+exists, and why the service signs nothing before step 5 has passed. Which
+groups' agents may use the service is the binding's `groups`, which the broker
+checks; the service holds no rule about who may what.
 
 ## What I need
 
-- **p-act:** a function that takes the two header values and returns a call
-  (parsed, with its bytes and signature kept untouched), refusing what section
-  3 of the formats refuses. The signer's side of the same function.
-- **An owner for the signer** (the agent-side piece of section 1). It needs the
-  agent's key and certificate, which pledge gives the sandbox. Probably
-  pledge's crate or p-act, but not p-robe.
-- **From the connections documents:** the answer to a request carries a code
-  from the list of section 6; and a way to say "this call was cancelled" to
-  pledge.
+- **`pact`'s interface** (the p-act agent's proposal): how the model-facing
+  tool call reaches it, where it reads the key, how it sets `_meta`; it should
+  be able to send `_meta` on `tools/call` and read the first text content.
+- **The exchange codec** in `p-act`, for `probe serve`.
 
-## Open, for the designer
+## Open
 
-1. **Header size.** Calls in headers is decided; their size is not. If 32 KiB
-   of header is not acceptable between sandbox and service, the call has to
-   be shorter (fewer parameters), or ride in the body with only the signature
-   in a header, which changes the decision. I propose: keep it in headers
-   and set the limits above.
-2. **Confidentiality of the answer.** An answer can be `secret`. Stage 1 runs
-   the service on loopback or a socket the sandbox reaches on the same
-   machine; across hosts the connection needs TLS, and nothing here says
-   whose certificate. The signed call protects what is asked, not what comes
-   back.
-3. **`wait_seconds` not signed.** It only shapes the deadline the signer puts
-   in the call; the call's own `deadline` is what counts. Fine, but the model
-   chooses how long a person is made to wait, up to 10 minutes. Is that wanted,
-   or should the signer decide alone?
-4. **Reason codes** to an agent (section 6): how much should an agent learn
-   about why it was refused?
+1. *(for stage 2)* TLS between agent and service across hosts, and whose
+   certificate.
+2. The coarse list may be too coarse for the person who reads an agent's
+   report ("refused, not-allowed"): the exact code is in the audit line and in
+   pledge's record; whether the agent should be able to ask for it is not
+   decided and I do not propose it.
+3. `_meta` and client libraries (section 3): whether any SDK the site would
+   use for a non-`pact` client lets a caller set `_meta` on a call. `pact` is
+   the only client in the sandbox by decision, so this is not needed now.

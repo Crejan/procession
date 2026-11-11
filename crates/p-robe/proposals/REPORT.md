@@ -130,3 +130,62 @@ Deliberate differences from `diag-tools`:
   uses the names of the p-ledge proposal; it needs a re-read against the final
   connections document (`by` in particular: an agent should learn who said no
   only as far as the designer allows).
+
+---
+
+## Update: the rating rule and `--within` (designer's decisions at f4a97a7)
+
+Merged `integration` (f4a97a7).
+
+**Implemented** (`src/rate.rs`, `src/table.rs`, `src/dispatch.rs`, `src/testverbs.rs`):
+- A row's `args` is `None`, `Some` (rated at the row's worst) or
+  `Params { floor, params }`. A parameter is a `Path` (prefix list, longest
+  whole-component match, `otherwise`), `Choice`, `Number` (with steps) or
+  `Plain`, found by position or `key=`. One generic function `rate(verb, args,
+  Mode)`; `Mode::Open` (the dispatcher: open once, `fstat`, name from the
+  descriptor, device/inode cross-check, file kept and given to the verb) and
+  `Mode::Name` (the service: `canonicalize` and `stat`). A test asserts every
+  row's declared worst equals the one derived from its floor and parameters.
+- The world-writable rule: no rating below the row's worst under a directory with a
+  group or other write bit (or one that cannot be looked at), for the
+  directories from the entry's to the file's parent, and the file itself if it
+  is a directory.
+- `sudo -n probe --within e,d,dis <noun> <verb> ...`: read before the noun
+  only; the dispatcher rates again at the open and refuses (64, `refused` line
+  `above-approved`, nothing runs, no start line) if above. It only restricts.
+- `test read <path>` (test builds): rated by `<sandbox>/open/`; reads the open
+  descriptor. The catalogue prints `param` records with the rules.
+
+**Verified:** `cargo test -p p-robe`: 73 unit + 2 CLI; with `--features
+test-verbs`: 73 unit + 17 CLI. Clippy clean in both. fmt applied. Tests cover:
+prefixes by whole components, longest entry raising and lowering, links out of
+and into an open place, `..`, loose directories (0777, 0775, 0757, 1777; the
+entry directory itself; an exact entry's parent), unreadable and missing files,
+FIFO and `/dev/null` refused, relative path, a link replaced between the
+service's rating (`Mode::Name`) and the dispatcher's (`Mode::Open`) at function
+level and end to end (`--within open,none,none` refused, no start line), a
+malformed `--within`, `--within` as an argument.
+
+**Not verified:** Linux. `readlink /proc/self/fd/<n>` is written and never run
+(tests ran on macOS with `fcntl(F_GETPATH)`); the deleted-file name on Linux and
+the permission behaviour as root are reasoned, not run. Access lists and mount
+options are not looked at by the writable-directory rule. No sudo run.
+
+**MCP `_meta`** (checked on 2026-11-11 against the 2025-06-18 specification, fetched
+from modelcontextprotocol.io): `_meta` is reserved for additional metadata with
+free keys of the form `prefix/name` (reserved only for prefixes naming `mcp`
+or `modelcontextprotocol`); `procession/call` and `procession/call-signature`
+are valid. The base request type carries `params._meta`; the schema's
+`CallToolRequest.params` is written `{name, arguments?}` without it, which is
+the one thing to know (SDKs accept it; our server and `pact` are our own). I
+did not fall back to headers. Documented in `agent-to-service.md`, section 3.
+
+**Documents updated to the decisions:** `agent-to-service.md` (rewritten: `_meta`,
+the coarse list and its mapping, the signer as `pact`, deadline, no "shown",
+TLS open, identifier recorded at submit, one request per connection) and
+`rating-rule.md` (decided/implemented, the world-writable rule, `--within`,
+Linux not run).
+
+**Needs:** `pact`'s interface to review; the exchange codec (`submit`, `answer`,
+`cancel`, `Reason`) in `p-act` before `probe serve`. SPEC.md still lists the
+"first table" as in `src/main.rs`; the orchestrator owns it.
