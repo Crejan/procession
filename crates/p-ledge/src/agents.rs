@@ -166,10 +166,11 @@ pub fn delivered(shared: &Shared, delegation: Delegation) -> Result<Value, Code>
     Ok(json!({}))
 }
 
-/// A delegation whose bundle was not delivered: it never existed for pledge;
-/// the record says so.
+/// A delegation whose bundle was not delivered: it never existed for pledge, so it is not
+/// "withdrawn" (which in the record always means something that could sign was stopped);
+/// the record has an event of its own.
 pub fn abandoned(shared: &Shared, id: &str) {
-    shared.event("delegation-withdrawn", json!({"delegation": id, "by": "delivery-failed"}));
+    shared.event("delegation-not-delivered", json!({"delegation": id}));
 }
 
 /// Withdraws a delegation and records it.

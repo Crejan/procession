@@ -538,3 +538,39 @@ non-root `sshd` can be picky), then at the test.
   in it; `pact serve` itself was not run.
 - `service_group` with a group other than the user's own.
 - Everything that needs a Secure Enclave, a broker or a real `probe`.
+
+## Step 3, third pass: the designer's reading of the 18 choices
+
+Merged `integration`. Changes:
+1. `deadline-past`, `call-used`, `expired`, `cancelled`: not stored (as built).
+2. `unknown-delegation` split: a call that is not a valid call (a certificate
+   breaking formats 3.1, a signature that does not verify, none) is `malformed`; a
+   well-formed call not under a delegation pledge answers for (unknown fingerprint,
+   another person's certificate, issuing key gone) is `unknown-delegation`;
+   ceilings in words that are not the scales give `unavailable`, not kept, and the
+   event `delegation-unusable` in the record. (A pending delegation no longer
+   exists: it is not stored before delivery.)
+3. A dialog shows a field whole: `action` and `claim` as p-act limits them, each
+   parameter up to 512 bytes; all parameters together over 2000 characters, or any
+   control or bidirectional mark, is `not-showable`. A 300-character parameter is
+   shown whole (tested); five of 450 are refused.
+4. A delegation started and not delivered: the event `delegation-not-delivered`,
+   never `delegation-withdrawn`.
+The 11-minute cap on kept verdicts is written next to `expiry()` as the 10 minutes
+of `MAX_DEADLINE_AHEAD_SECONDS` plus the 1 minute of `CLOCK_TOLERANCE_SECONDS`.
+Tests: 164 unit + 9 integration pass twice; clippy and fmt clean.
+
+## The intermittent `Locked` in the unit tests
+
+Not the helper alone and not a leaked `Arc`: `Rig::restart` replaces the old
+record before reopening, so no owner of the old `Shared` can keep it. The cause
+is `flock`: the lock belongs to the open file, and a child made by `fork` holds
+it until it execs. Tests run in parallel and every `ssh-keygen` one of them
+starts forks the whole process, so another test's record file (and its lock) is
+briefly held by that child. In a real `pledge serve` the same can happen to a
+quick restart if an `ssh-keygen` of the old one (issuing) is still alive.
+Fix in pledge, not the helper: `Record::open` waits up to `LOCK_WAIT` (2 s) for
+the lock before it says another `pledge serve` holds it (`open_waiting` for a
+different wait); a real second instance is still refused, after the wait.
+Result: 0 failures in 40 runs of the unit tests (before: 4 of 32 in the lead's
+runs). I did not reproduce the failure before the fix myself.

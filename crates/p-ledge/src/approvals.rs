@@ -29,7 +29,7 @@ use p_act::sign::{PublicKey, signature_agent, verify_call_agent, verify_request}
 use p_act::{Document, DocumentHash, Request, Timestamp};
 use serde_json::{Map, Value, json};
 
-use crate::agent::text::is_showable;
+use crate::agent::text::is_clean;
 use crate::answers::{Answers, Stored};
 use crate::config::Config;
 use crate::delegations::{Delegations, RatingWords};
@@ -162,8 +162,14 @@ struct Facts {
     peer: Option<(u32, Option<i32>)>,
 }
 
+/// The most characters all of a call's parameters may have together, to be shown whole.
+pub const MAX_PARAMS_SHOWN_CHARS: usize = 2000;
+
 /// Seconds from `now` that a stored entry is kept: to the call's deadline, but
 /// not past the longest a deadline may be.
+/// The cap is 11 minutes: the longest a deadline may be ahead (10) plus the tolerated clock
+/// difference (1), both from `p_act::limits`; a verdict on a call whose deadline is further
+/// away than that is not kept longer, and such a call is refused `deadline-too-far` anyway.
 fn expiry(now: i64, deadline: Option<Timestamp>) -> i64 {
     let cap = now + p_act::limits::MAX_DEADLINE_AHEAD_SECONDS + TOLERANCE_SECONDS;
     deadline.map_or(cap, |d| d.unix().min(cap))
@@ -299,7 +305,8 @@ fn process(shared: &Shared, submit: &Submit, hash: &str, cancelled: &Arc<AtomicB
     facts.service = Some((call.service().host.clone(), call.service().name.clone()));
 
     // 1. The call, under one of pledge's own delegations.
-    let Ok(agent) = signature_agent(request.call_sig()) else { return refuse(PledgeReason::UnknownDelegation) };
+    // A certificate that breaks formats 3.1 makes the call not a valid call.
+    let Ok(agent) = signature_agent(request.call_sig()) else { return refuse(PledgeReason::Malformed) };
     facts.person = Some(agent.person.clone());
     facts.delegation = Some(agent.delegation.as_str().to_owned());
     facts.agent = Some(agent.delegation.as_str().to_owned());
@@ -322,9 +329,16 @@ fn process(shared: &Shared, submit: &Submit, hash: &str, cancelled: &Arc<AtomicB
         return refuse(PledgeReason::UnknownDelegation);
     };
     if verify_call_agent(call, request.call_sig(), &issuer_key).is_err() {
-        return refuse(PledgeReason::UnknownDelegation);
+        return refuse(PledgeReason::Malformed); // the signature does not verify
     }
-    let Some(ceilings) = delegation.ceilings() else { return refuse(PledgeReason::UnknownDelegation) };
+    let Some(ceilings) = delegation.ceilings() else {
+        // pledge's own stored data is unusable: its fault, not a verdict on the request.
+        shared.event(
+            "delegation-unusable",
+            json!({"delegation": agent.delegation.as_str(), "problem": "its ceilings are not words of the scales"}),
+        );
+        return refuse(PledgeReason::Unavailable);
+    };
     facts.clamped = delegation.automatic_was_raised();
     approvals.set_agent(hash, agent.delegation.as_str());
     let _ = approvals.delegations.touch(agent.delegation.as_str(), now.unix());
@@ -351,10 +365,13 @@ fn process(shared: &Shared, submit: &Submit, hash: &str, cancelled: &Arc<AtomicB
     }
 
     // 3. Every field can be shown as it is.
+    // A field is shown whole up to the formats' limit for it (p-act enforced those at parsing);
+    // all parameters together at most 2000 characters; nothing with a control or bidirectional mark.
     let mut texts: Vec<&str> = vec![call.action(), &call.service().host, &call.service().name, &agent.person];
     texts.extend(call.params().iter().map(String::as_str));
     texts.extend(call.claim());
-    if !texts.into_iter().all(is_showable) {
+    let all_params: usize = call.params().iter().map(|p| p.chars().count()).sum();
+    if all_params > MAX_PARAMS_SHOWN_CHARS || !texts.into_iter().all(is_clean) {
         return refuse(PledgeReason::NotShowable);
     }
     facts.shown = Some((call.action().to_owned(), call.params().to_vec(), call.claim().map(str::to_owned)));
