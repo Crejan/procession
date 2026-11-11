@@ -84,10 +84,30 @@ pub enum Admission {
     AdmitGenerally,
 }
 
+/// What the person decided about a program for good.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Standing {
+pub enum Standing {
+    /// The program may ask; each signature still gets a presence check.
     Admitted,
+    /// The program is refused without a dialog.
     Blocked,
+}
+
+/// The namespaces a shared key signs SSHSIG in (`SPEC.md`, section 3).
+pub const SHARED_NAMESPACES: [&str; 2] = ["git", "file"];
+
+/// The form of [`SigningRequest::use_`] for a login: a user and the
+/// fingerprint of the host's key. A bound key is bound to exactly this; a host's
+/// name is for showing only.
+#[must_use]
+pub fn login_use(user: &str, host_fingerprint: &str) -> String {
+    format!("login {user}@{host_fingerprint}")
+}
+
+/// The form of [`SigningRequest::use_`] for an SSHSIG signature.
+#[must_use]
+pub fn sshsig_use(namespace: &str) -> String {
+    format!("sshsig {namespace}")
 }
 
 /// The keys with their purposes, and the standing of each program.
@@ -112,6 +132,37 @@ impl Policy {
             .any(|purpose| matches!(purpose, Purpose::Bound { program: owner, .. } if owner == program))
     }
 
+    /// The keys (by the fingerprints they were declared under) offered to
+    /// `program`: its own bound keys, and the shared ones unless it has a
+    /// bound key.
+    #[must_use]
+    pub fn offered(&self, program: &str) -> Vec<&str> {
+        let has_bound = self.has_bound_key(program);
+        self.purposes
+            .iter()
+            .filter(|(_, purpose)| match purpose {
+                Purpose::Bound { program: owner, .. } => owner == program,
+                Purpose::Shared => !has_bound,
+            })
+            .map(|(key, _)| key.as_str())
+            .collect()
+    }
+
+    /// Forget a key: it is offered to nobody from now on.
+    pub fn remove_purpose(&mut self, key: &str) {
+        self.purposes.remove(key);
+    }
+
+    /// What was decided about each program, in program order.
+    pub fn programs(&self) -> impl Iterator<Item = (&str, Standing)> {
+        self.standing.iter().map(|(program, standing)| (program.as_str(), *standing))
+    }
+
+    /// Set what was decided about `program` (used when state is loaded).
+    pub fn set_standing(&mut self, program: impl Into<String>, standing: Standing) {
+        self.standing.insert(program.into(), standing);
+    }
+
     /// The verdict for `request`.
     pub fn decide(&self, request: &SigningRequest) -> Verdict {
         let Some(asked) = &request.use_ else {
@@ -130,6 +181,12 @@ impl Policy {
                 return Verdict::Refuse(Reason::KeyNotOffered);
             }
             Some(Purpose::Shared) => {}
+        }
+        // A shared key signs SSHSIG only in the namespaces it is offered for.
+        if let Some(namespace) = asked.strip_prefix("sshsig ") {
+            if !SHARED_NAMESPACES.contains(&namespace) {
+                return Verdict::Refuse(Reason::KeyNotOffered);
+            }
         }
         match self.standing.get(&request.program) {
             Some(Standing::Blocked) => Verdict::Refuse(Reason::Blocked),
@@ -180,6 +237,28 @@ mod tests {
 
     fn login(program: &str, key: &str, use_: &str) -> SigningRequest {
         SigningRequest { program: program.into(), key: key.into(), use_: Some(use_.into()) }
+    }
+
+    #[test]
+    fn a_shared_key_signs_sshsig_in_git_and_file_only() {
+        let policy = policy();
+        let mut admitted = policy;
+        admitted.admit("git", Admission::AdmitGenerally);
+        for (namespace, verdict) in [
+            ("git", Verdict::CheckPresence),
+            ("file", Verdict::CheckPresence),
+            ("other", Verdict::Refuse(Reason::KeyNotOffered)),
+            ("approval-v1@procession", Verdict::Refuse(Reason::KeyNotOffered)),
+        ] {
+            assert_eq!(admitted.decide(&login("git", SHARED_KEY, &sshsig_use(namespace))), verdict, "{namespace}");
+        }
+    }
+
+    #[test]
+    fn offered_keys_follow_the_purposes() {
+        let policy = policy();
+        assert_eq!(policy.offered("preserve"), [BACKUP_KEY]);
+        assert_eq!(policy.offered("git"), [SHARED_KEY]);
     }
 
     #[test]

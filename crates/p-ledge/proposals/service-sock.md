@@ -83,8 +83,7 @@ request against the host keys it knows, check that every field is showable,
 apply the limits, derive the mode, sign or ask, then **sign, record, send**.
 The record entry is flushed before the `answer` leaves; if it cannot be
 written the answer is `refused` / `unavailable` and nothing is signed (no
-record, no approval, `record.md`). A used call identifier is stored before
-the approval is signed. That is pledge's guarantee, and it is not a reason
+record, no approval, `record.md`). The call's identifier is stored as used before the approval is signed (section 6). That is pledge's guarantee, and it is not a reason
 for a service to skip its own store: the two are separate by design.
 
 - Requests that arrive together are normal: the person sees one dialog at a
@@ -133,49 +132,43 @@ the reconciliation. `blocked` is the broker's (a person or key blocked);
 pledge has no such check on a request. In `p-act` the list is a closed enum
 with an `Unknown` for what a reader does not know, with its wire string.
 
-## 6. Where the shared exchange needs pledge to hold state
+## 6. Pledge's answer is final until the deadline (decided)
 
-The connections document needs pledge to be idempotent for a request it
-already knows by hash, because a request can be submitted again after a
-reconnect: if it was answered, send the same answer again until the
-deadline; if its dialog is open, do nothing. It reads R5's refusal
-("a call that comes a second time gets a refusal") as being for a
-**different** request under the same call identifier. That is a design
-question for the designer. This section is written so either answer fits;
-what pledge keeps is the difference.
+Decided by the designer (`doc/approvals.md`, R5): pledge decides on a call's
+identifier once. The identifier is **used** as soon as pledge approved or
+the person declined, and stays so until the call's deadline. From then:
 
-Pledge keeps, on disk, until each call's deadline (as R5 and section 7 of
-`doc/approvals.md` already say):
+- the same request bytes again get **the same answer again**, from a store
+  on disk, without a second dialog and without a second signature: for
+  `approved` the same approval bytes (pledge signs once), for `declined` the
+  same `declined`;
+- a different request under a used identifier is refused `call-used`;
+- a declined call is not put to the person again; the decline counts toward
+  muting once.
 
-| Entry | Under reading **A** (idempotent by hash) | Under reading **B** (R5 as written: a second time is refused) |
+What is stored under the request's hash until the call's deadline, and what
+is not:
+
+| Answer | Stored, and given again | Why |
 |---|---|---|
-| the call's identifier, marked used when pledge signs | yes | yes |
-| the hash of the request it was signed for | yes | not needed |
-| the answer sent (for `approved`, the approval's bytes; for the others, the result and reason) | yes, so it can be sent again. It is a signature over a request, not a secret | no |
+| `approved` | yes, the approval's bytes | a lost connection must not cost a second dialog |
+| `declined` | yes | the person has decided |
+| `refused`, a verdict: `unknown-delegation`, `delegation-ended`, `delegation-withdrawn`, `service-mismatch`, `not-showable`, `ceiling`, `malformed`, `deadline-too-far` | yes | the same bytes would get the same verdict |
+| `refused`, a passing condition: `limit`, `muted`, `unavailable`, and `blocked` (stage 2, the broker's) | no; may be submitted again | the condition may be gone |
+| `expired` | the deadline has passed: nothing is held; a submit gets `refused` / `deadline-past`, not stored | |
+| cancelled | no: the request is over; the same bytes again are a new request | |
 
-- **Reading A.** A `submit` of bytes pledge knows: answered, so the same
-  answer is sent again (pledge does not sign again: it signs once);
-  dialog open, so nothing is done; open but already `cancelled` by a lost
-  connection, so it is a new request (the old dialog was closed). A
-  `submit` of different bytes for a used call identifier is refused
-  `call-used`. After the deadline the entry is forgotten and a submit is
-  refused `deadline-past`. The answer entry is written with the record
-  entry, before the first send (sign, record, store, send), so that a crash
-  between them still lets the resubmission get the answer.
-- **Reading B.** Any second `submit` for a used identifier, same bytes or
-  not, is refused `call-used`. A lost connection after pledge signed costs
-  the person a second dialog that pledge cannot ask for; the service is
-  the one that can resubmit never, which is why p-robe's store (it records
-  the identifier before it asks) matters under this reading.
-- A declined or expired call is not signed for, so under both readings its
-  identifier is not used by pledge; resubmitting it is allowed until the
-  deadline and counts toward muting.
-- Either way a `cancel` or a closed connection of a request whose dialog was
-  open ends it, and the record says `cancelled`.
+The store is written with the record entry, before the first send: sign,
+record, store, send. After the deadline an entry is forgotten. A request
+whose dialog is open and is submitted again is left alone (nothing is sent
+until there is an answer). `call-used` itself is a verdict for a different
+request and is not stored under that request's hash.
 
-Pledge's recommendation: **A**, because it is the one that makes a lost
-connection harmless, at the price of one more small store; B needs nothing
-new and is what R5 says in so many words.
+**Clock.** The 60 seconds of tolerance never extend a deadline: pledge
+refuses as soon as its own clock says the deadline has passed
+(`deadline-past`). The tolerance applies only to "more than 10 minutes
+ahead" (`deadline-too-far`) and to a certificate whose validity starts in the
+near future.
 
 ## 7. The p-robe review, point by point
 
@@ -198,21 +191,16 @@ new and is what R5 says in so many words.
 | Open question 4 (`ref` against the call's id) | Settled by the reconciliation: correlation by the request's hash |
 | Open question 6 (clock tolerance) | As proposed: none for pledge's own sign or refuse; 60 seconds only for "too far ahead" |
 
-## 8. Open questions for the designer
+## 8. Decisions on the earlier open questions
 
-1. **A fifth outcome** (`doc/approvals.md` R12): a request cancelled while
-   its dialog is open. *Proposal:* record it as `cancelled`.
-2. **R5 against idempotence** (section 6): A or B. *Proposal:* A.
-3. **A declined call asked again**: allowed until the deadline, each decline
-   counting toward muting. *Proposal:* keep.
-4. **A `shown` message** so a service can tell its agent that the dialog is
-   on screen. *Proposal:* not in the first version.
-5. **Reasons given to the agent**: is a list this fine an oracle?
-   *Proposal:* keep, for the person's own agent.
-6. **The tolerated clock difference** and which way it tilts for a
-   deadline. *Proposal:* as in section 7.
-7. **The socket's group** (section 3): a setting with no default. *Proposal:*
-   no group unless the person sets one; `probe`'s installation says to.
+1. `cancelled` is the fifth outcome in the record.
+2. Reading A, and one step further (section 6).
+3. A declined call is not put to the person again (R5).
+4. No `shown` notice in the first version.
+5. Exact reason codes go toward a service; what an agent learns is coarse
+   and the service's business.
+6. The tolerance is as in section 6.
+7. The socket's group is a setting with no default.
 
 ## 9. Separable from its transport
 

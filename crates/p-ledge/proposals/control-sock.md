@@ -61,13 +61,15 @@ Two types besides `error`:
 |---|---|---|---|
 | `status` | none | `version`, `form` (`files` or `hardware`), the socket paths, counts of programs, delegations and open asks | no |
 | `keys.list` | none | each key: `purpose`, `fingerprint`, `public` (the line `ssh-keygen` would print), `created`; and `block` for the four lower keys, the one block of public parts for an administrator (`SPEC.md`, section 2) | no |
-| `keys.create` | `purpose` (`bound`, `shared`, or one of the four lower ones); for `bound`, `program` and `user`, `host` | the key as in `keys.list` | yes |
+| `keys.create` | `purpose` (`bound`, `shared`, or one of the four lower ones); for `bound`, `program`, `user` and `host_key` (the host key's fingerprint; a name is for showing only) | the key as in `keys.list` | yes |
 | `keys.retire` | `fingerprint` | none | yes |
 | `programs.list` | none | programs known to pledge: identity, state (`admitted`, `blocked`), last asked | no |
 | `programs.admit` | `program`, `scope` (`generally`) | none | the name typed, by the command line |
 | `programs.block` | `program` | none | no |
 | `programs.forget` | `program` | none | no |
-| `agents.start` | `groups` (list of names), `automatic_ceiling`, `ask_ceiling` (ratings), `valid_seconds` | `delegation`, `key` (the agent's private key), `certificate`, `valid_until` | yes |
+| `agents.start` | `groups`, `automatic_ceiling`, `ask_ceiling` (ratings), `valid_seconds` (60 to 86400, default 28800), `label`, and for the bundle `services` (the person's own: host, name, url), `tls_root`, `deadline_seconds` | `delegation`, `bundle` (the base64 of the bundle's exact bytes, composed by `p_act::pact::bundle::Bundle::write`), `valid_until`. The delegation is held on this connection and does not exist for pledge yet | yes |
+| `agents.delivered` | `delegation` | none: the bundle is written; the delegation exists (is stored, signs) from now on. If the connection ends first, or `agents.failed` is sent, it never existed; the record gets `delegation-withdrawn`, `by` `delivery-failed` | no |
+| `agents.failed` | `delegation` | none | no |
 | `agents.list` | none | each delegation pledge issued: `delegation`, `groups`, both ceilings, `valid_until`, `withdrawn`, `last_asked`, `muted_until` | no |
 | `agents.withdraw` | `delegation` | none | no: it only narrows |
 
@@ -80,6 +82,7 @@ has a check of its own (R3).
   an automatic ceiling above `internal`, `recoverable`, `brief`, or one above
   the ask ceiling (`refused`): pledge does not let one be set that high
   (`SPEC.md`, section 4; `p-act` rating).
+- **As built** (`review-pact-bundle.md`, section 5, and the designer's decisions): the certificate and the key pair are made by OpenSSH (`ssh-keygen -s -U` against a private SSH agent socket, `issue.rs`); serve composes the bundle with p-act and replies with its bytes; the command line only writes them (to a file, created exclusively with mode 0600, or a pipe; never a terminal, and no option changes that), then sends `agents.delivered`.
 - **`agents.start` returns a private key** over the socket to the command
   line, which writes it to standard output or to a file only the person can
   read (`SPEC.md`, section 4). pledge keeps the ceilings and the
@@ -88,8 +91,7 @@ has a check of its own (R3).
 - **`groups`** are names; in stage 1 pledge does not check them (one person,
   no site). With the broker it takes them from the names it received
   (`doc/approvals.md`, section 6).
-- **`delegation`** is the delegation's identifier (`record.md`, open
-  question 2).
+- **`delegation`** is the delegation's identifier (`record.md`, section 8).
 
 ## 5. The presence check in the development form
 
@@ -109,7 +111,7 @@ was muted, that a delegation ended. *Proposal:* a command `subscribe`, after
 which `pledge serve` sends `event` lines on that connection (same envelope).
 Not specified now; nothing in sections 1 to 5 stands in its way.
 
-## 7. Open questions for the designer
+## 7. Decided (all three as proposed)
 
 1. **Does the command line prompt, or does `pledge serve`?** Section 5 puts
    the presence check on `serve`'s terminal so that the command line holds

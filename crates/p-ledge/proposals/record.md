@@ -73,11 +73,11 @@ Every entry has `schema_version`, `seq`, `time`, `prev`, `type`. The types:
 
 | Member | Meaning |
 |---|---|
-| `result` | `approved`, `declined`, `refused`, `expired` or `cancelled` (`service-sock.md`, open question 1) |
+| `result` | `approved`, `declined`, `refused`, `expired` or `cancelled` (`doc/approvals.md`, R12) |
 | `reason` | only with `refused`: the code of `service-sock.md`, section 4 |
 | `key` | only with `approved`: `confirmed` or `automatic`, the key that signed; `key_fingerprint` its fingerprint |
 | `mode` | `refuse`, `ask` or `automatic`; absent if the request was refused before a mode could be derived |
-| `person`, `delegation`, `agent` | from the call's certificate; `delegation` is the delegation's identifier (open question 2), `agent` the fingerprint of the agent's key |
+| `person`, `delegation`, `agent` | from the call's certificate; `delegation` is the delegation's identifier (the fingerprint of the agent's key), `agent` the fingerprint of the agent's key |
 | `service` | host and name as the call names them |
 | `call`, `deadline`, `action`, `params`, `claim` | the call's own members, exactly what the dialog showed. `claim` is the agent's claim, as in the dialog |
 | `rating` | as in the request |
@@ -151,7 +151,7 @@ says how much went and up to where.
 This departs from `SPEC.md`, section 6, in one way: the first entry kept
 does not say so itself, because changing it would change its hash and break
 the next. The reader says it from `seq`, and the chain does from the
-`trimmed` event. (Open question 1.)
+`trimmed` event. (Accepted.)
 
 ## 6. What it protects against, and what it does not
 
@@ -172,24 +172,11 @@ prints the entries as they are. In text, a string that has anything but
 printable characters is shown with those escaped: the writer keeps control
 characters out, the reader does not rely on it.
 
-## 8. Open questions for the designer
+## 8. Decided
 
-1. **The first entry kept.** `SPEC.md` says it "says so". *Proposal:* as in
-   section 5: the reader says so from `seq`, and a `trimmed` event follows.
-   The alternative, re-hashing the whole file at each trim, rewrites every
-   entry daily for no gain.
-2. **A delegation's identifier.** A human-readable one is needed in the
-   record, in `pledge agents list` and in `withdraw`. *Proposal:* the SHA-256
-   fingerprint of the agent's public key, `SHA256:...` as `ssh-keygen -l`
-   prints it. It needs nothing stored; the certificate's key id can carry the
-   person's name and a short label the person gave. Needs the formats
-   document's blessing, because the certificate is checked by others.
-3. **The whole request in the record.** The entry has the call's fields and
-   the request's hash. Keeping the request's bytes and the approval would
-   make a dispute answerable from the record alone (up to 32 KiB an entry).
-   *Proposal:* hash only; a service keeps its own copy.
-4. **Events in the record.** `SPEC.md` names two types of entry; this adds
-   `event`. *Proposal:* keep: delegations and muting are exactly what a
-   person asks about afterwards.
-5. **Anchoring the head of the chain** to catch a cut-off tail. Not now (see
-   section 6).
+All five proposals of the earlier draft were accepted, including "no record,
+no approval", hash-only entries, `cancelled` as the fifth result and the
+`trimmed` event. A delegation's identifier is the SHA-256 fingerprint of the
+agent's public key as `ssh-keygen -l` prints it. A `request` entry whose
+answer was given again from the store (`service-sock.md`, section 6) is not
+recorded a second time.

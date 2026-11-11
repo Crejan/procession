@@ -185,10 +185,7 @@ impl HostKey {
     /// the plain key, also for a certificate.
     #[must_use]
     pub fn fingerprint(&self) -> String {
-        let hash = digest::digest(&digest::SHA256, &self.plain_blob());
-        let mut text = String::from("SHA256:");
-        text.push_str(&STANDARD_NO_PAD.encode(hash.as_ref()));
-        text
+        fingerprint(&self.plain_blob())
     }
 
     /// Whether `signature_blob` (`string` type, `string` signature) is this
@@ -223,6 +220,16 @@ impl HostKey {
             }
         }
     }
+}
+
+/// `SHA256:<base64 without padding>` of a public key's wire blob, as
+/// `ssh-keygen -l` prints it.
+#[must_use]
+pub fn fingerprint(blob: &[u8]) -> String {
+    let hash = digest::digest(&digest::SHA256, blob);
+    let mut text = String::from("SHA256:");
+    text.push_str(&STANDARD_NO_PAD.encode(hash.as_ref()));
+    text
 }
 
 /// The fields after the key material, through the CA's signature. `blob` is

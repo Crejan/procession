@@ -22,7 +22,7 @@ const METHOD_PUBLICKEY: &str = "publickey";
 const METHOD_HOSTBOUND: &str = "publickey-hostbound-v00@openssh.com";
 const SSHSIG_MAGIC: &[u8] = b"SSHSIG";
 
-/// A namespace containing this (ignoring ASCII case) belongs to the approval
+/// A namespace ending in this (ignoring ASCII case) belongs to the approval
 /// system's own keys (`call-v1@procession`, `request-v1@procession`,
 /// `approval-v1@procession`, `clearance-v1@procession`, and the connection
 /// key's). No key on the SSH agent socket signs in it. The whole `@procession`
@@ -173,12 +173,12 @@ impl Sshsig {
 }
 
 /// Whether `namespace` (raw bytes, not decoded or normalised) is one the
-/// approval system's keys use. Matches the mark anywhere and ignores ASCII
-/// case, so a variant cannot slip past.
+/// approval system's keys use. Matches the mark at the end (`doc/approval-formats.md`,
+/// section 1) and ignores ASCII case, so a variant cannot slip past.
 #[must_use]
 pub fn is_reserved_namespace(namespace: &[u8]) -> bool {
     let mark = RESERVED_NAMESPACE_MARK.as_bytes();
-    namespace.windows(mark.len()).any(|window| window.eq_ignore_ascii_case(mark))
+    namespace.len() >= mark.len() && namespace[namespace.len() - mark.len()..].eq_ignore_ascii_case(mark)
 }
 
 #[cfg(test)]
@@ -299,12 +299,16 @@ mod tests {
             "@procession",
             "APPROVAL-V1@PROCESSION",
             "Approval-v1@Procession",
-            "approval-v1@procession\u{0}",
-            "approval-v1@procession ",
-            "x@procession-y",
         ];
         for namespace in names {
             assert_eq!(parse(&sshsig(namespace)), Err(Refusal::ReservedNamespace), "{namespace:?}");
+        }
+        for namespace in ["approval-v1@procession\u{0}", "x@procession-y", "@procession x"] {
+            assert_ne!(
+                parse(&sshsig(namespace)),
+                Err(Refusal::ReservedNamespace),
+                "only a namespace ending in the mark is reserved: {namespace:?}"
+            );
         }
         let sha256 = sshsig_data(b"approval-v1@procession", "sha256", &[1; 32], b"", b"");
         assert_eq!(parse(&sha256), Err(Refusal::ReservedNamespace));

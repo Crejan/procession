@@ -16,7 +16,7 @@ path = "src/main.rs"
 
 [dependencies]
 # The formats and ratings of the approval system.
-p-act = { path = "../p-act" }
+p-act = { path = "../p-act", features = ["pact"] }
 # Verifies the host's signature in session-bind@openssh.com and the CA's in a
 # host certificate (ed25519, ECDSA P-256/P-384, RSA 2048..8192 with SHA-2),
 # and hashes for fingerprints. Already in the workspace's lock file. The
@@ -24,3 +24,9 @@ p-act = { path = "../p-act" }
 ring = "0.17"
 # known_hosts keys and fingerprints.
 base64 = "0.23"
+# Records, control messages and state files are JSON lines.
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+# Peer credentials of a socket, flock, isatty, proc_pidpath.
+libc = "0.2"
+thiserror = "2"

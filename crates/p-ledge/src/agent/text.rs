@@ -17,6 +17,16 @@ fn is_bidi(c: char) -> bool {
     matches!(c, '\u{61C}' | '\u{200E}' | '\u{200F}' | '\u{202A}'..='\u{202E}' | '\u{2066}'..='\u{2069}')
 }
 
+/// `text` with every control character and bidirectional mark written as
+/// `\u{XXXX}`, for a reader that prints what it did not write itself (the
+/// record is written clean; `pledge history` does not rely on it).
+#[must_use]
+pub fn escape_unshowable(text: &str) -> String {
+    text.chars()
+        .map(|c| if is_control(c) || is_bidi(c) { format!("\\u{{{:04X}}}", u32::from(c)) } else { c.to_string() })
+        .collect()
+}
+
 /// Whether `text` can be shown as it is: at most [`MAX_FIELD_CHARS`]
 /// characters, none a control character or a bidirectional mark.
 #[must_use]
@@ -48,6 +58,12 @@ mod tests {
         for c in ['\u{61C}', '\u{200E}', '\u{200F}', '\u{202A}', '\u{202E}', '\u{2066}', '\u{2069}'] {
             assert!(!is_showable(&format!("ja{c}n")), "{c:?}");
         }
+    }
+
+    #[test]
+    fn escaping_makes_everything_printable() {
+        assert_eq!(escape_unshowable("a\u{1B}[31m\u{202E}b"), "a\\u{001B}[31m\\u{202E}b");
+        assert_eq!(escape_unshowable("plain ✓"), "plain ✓");
     }
 
     #[test]
