@@ -194,10 +194,12 @@ a call may need your person's approval and waits for it until its deadline;
 - A connection lost **after** the verb started: the verb finishes, the answer is
   lost. The identifier is used, so the agent must make a new call, which asks
   again. Accepted: a verb is not made repeatable to save a dialog.
-- At most 16 calls wait in the service at once in stage 1: the protocol's
-  limit of open asks on one connection (`service-sock.md` section 4), which the
-  service keeps itself rather than provoke `too-many-asks`. It is a bound on
-  the connection, not a rule about who may what; beyond that, `503`
+- At most 16 calls wait in the service at once in stage 1 (a setting). The
+  exchange with pledge and the broker is one request per connection
+  (`submit`, `answer`, `cancel`, the request's hash as the correlation; the
+  home of the exchange is p-age's connections document), so this is also a
+  bound on open connections and descriptors. It is not a rule about who may
+  what; beyond that, `503`
   with `Retry-After`, as a transport decision, no outcome.
 
 ## 8. What the service does with a tool call, in order

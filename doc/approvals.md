@@ -204,8 +204,11 @@ rest.
 
 **R10. What a person may have carried out is the site's answer**, not a
 second rule set. The person is enabled (`persons.yml`, `enabled`), and one of
-the delegation's groups is among the groups that the service's binding names
-for this host. That is the whole test; a group that is an entitlement passes
+the delegation's groups is a group the person is in at that moment and is
+among the groups that the service's binding names for this host. That is the
+whole test: the groups in a certificate are what the person chose when
+issuing it, and someone removed from a group loses it for agents that are
+already running; a group that is an entitlement passes
 like any other. Each fact is read where the site keeps it: persons, hosts
 and service bindings in the site project; who is in which group in the site
 project on a local site and in the directory on a directory site. Where a

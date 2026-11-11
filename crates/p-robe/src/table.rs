@@ -4,7 +4,7 @@
 
 use std::path::PathBuf;
 
-use p_ledge::rating::{Damage, Disruption, Exposure, Rating};
+use p_act::rating::{Damage, Disruption, Exposure, Rating};
 
 use crate::answer::{Answer, Full};
 use crate::json::{Record, SCHEMA_VERSION};

@@ -105,3 +105,28 @@ Deliberate differences from `diag-tools`:
 5. **How much of the reason a `refused` agent learns.** I propose a coarse fixed list.
 6. **`/tmp` and other world-writable places** in path prefix lists, where links can be planted.
 7. **Declined without a reason.** The approval format has no field for a person's note. Is `person-declined` all the agent should learn?
+
+---
+
+## Update: `rating` from `p-act`, and the reconciliation
+
+- Merged `agent/p-act` (7af0acd). `Cargo.lock` conflicted; I took p-act's side
+  and let `cargo` re-add nothing of mine (p-robe's own dependencies are
+  `p-act` and `libc`). `p-robe` now depends on `p-act` by path and no longer on
+  `p-ledge`; `rating` is imported as `p_act::rating`.
+- Verified: `cargo test -p p-robe` 53 unit + 2 CLI pass; with `--features
+  test-verbs` 53 unit + 10 CLI pass; `cargo clippy --all-targets` has no
+  warning with or without the feature; `cargo fmt` applied.
+- Not changed: `SPEC.md` still names p-ledge as the owner of the shared
+  vocabulary (lines about "The vocabulary shared with p-ledge"); the
+  orchestrator owns that text.
+- Taken on board for step 2, no code yet: `submit`/`answer`/`cancel`, the
+  request's hash as correlation (no `ref`), `refused` and `expired` carry `by`,
+  closed reason lists with `unknown`, stage 1 refuses clearance members and a
+  stage-2 service requires them by configuration, **one request per connection
+  for both stages**. In `agent-to-service.md` I changed only the paragraph on
+  how many calls wait (it was tied to 16 open asks on one connection): now a
+  setting, default 16, bounding open connections. The reason list there still
+  uses the names of the p-ledge proposal; it needs a re-read against the final
+  connections document (`by` in particular: an agent should learn who said no
+  only as far as the designer allows).

@@ -1,7 +1,7 @@
 //! Two verbs for trying the service end to end, in a build with the
 //! `test-verbs` feature only. Neither does anything to the host.
 
-use p_ledge::rating::{Damage, Disruption, Exposure, Rating};
+use p_act::rating::{Damage, Disruption, Exposure, Rating};
 
 use crate::answer::{Answer, Full, header};
 use crate::json::Record;

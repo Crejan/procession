@@ -530,11 +530,11 @@ mod tests {
     #[cfg(feature = "test-verbs")]
     #[test]
     fn the_test_verbs_exist_in_this_build_with_their_ratings() {
-        use p_ledge::rating::Rating;
+        use p_act::rating::Rating;
         let echo = table::find("test", "echo").unwrap();
         let peak = table::find("test", "peak").unwrap();
         assert_eq!(echo.rating, Rating::HARMLESS);
-        assert!(peak.rating.needs_confirmation() && peak.rating.exposure == p_ledge::rating::Exposure::Open);
+        assert!(peak.rating.needs_confirmation() && peak.rating.exposure == p_act::rating::Exposure::Open);
         let outcome = call(&sudo("jan"), &["test", "echo", "a=1", "b"]);
         assert_eq!(outcome.rc, 0);
         assert!(outcome.out.contains("\"args\":[\"a=1\",\"b\"]"), "{}", outcome.out);
