@@ -72,16 +72,29 @@ impl Sink for File {
     }
 }
 
-fn lock(file: &File, path: &Path) -> Result<()> {
-    // SAFETY: the descriptor is open for the lifetime of `file`.
-    if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } == 0 {
-        Ok(())
-    } else {
-        Err(Error::Locked(path.to_owned()))
+/// How long opening waits for the lock before it says another `pledge serve` has it.
+///
+/// A lock (`flock`) belongs to the open file, not to a process: a child started
+/// with `fork` (every `ssh-keygen` pledge runs) holds it too until it execs, and
+/// so does one started just before a stop. Waiting a moment lets those go; a real
+/// second `pledge serve` holds it for as long as it runs and is refused after the wait.
+pub const LOCK_WAIT: std::time::Duration = std::time::Duration::from_secs(2);
+
+fn lock(file: &File, path: &Path, wait: std::time::Duration) -> Result<()> {
+    let until = std::time::Instant::now() + wait;
+    loop {
+        // SAFETY: the descriptor is open for the lifetime of `file`.
+        if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } == 0 {
+            return Ok(());
+        }
+        if std::time::Instant::now() >= until {
+            return Err(Error::Locked(path.to_owned()));
+        }
+        std::thread::sleep(std::time::Duration::from_millis(10));
     }
 }
 
-fn open_locked(path: &Path) -> Result<File> {
+fn open_locked(path: &Path, wait: std::time::Duration) -> Result<File> {
     let file = OpenOptions::new()
         .read(true)
         .append(true)
@@ -89,7 +102,7 @@ fn open_locked(path: &Path) -> Result<File> {
         .mode(0o600)
         .open(path)
         .map_err(Error::io(format!("opening {}", path.display())))?;
-    lock(&file, path)?;
+    lock(&file, path, wait)?;
     Ok(file)
 }
 
@@ -107,7 +120,16 @@ impl Record {
     ///
     /// [`Error::Locked`] if another process holds it, [`Error::Io`].
     pub fn open(path: &Path, now: Timestamp) -> Result<(Self, Opened)> {
-        let mut file = open_locked(path)?;
+        Self::open_waiting(path, now, LOCK_WAIT)
+    }
+
+    /// As [`open`](Self::open), waiting at most `wait` for the lock.
+    ///
+    /// # Errors
+    ///
+    /// As [`open`](Self::open).
+    pub fn open_waiting(path: &Path, now: Timestamp, wait: std::time::Duration) -> Result<(Self, Opened)> {
+        let mut file = open_locked(path, wait)?;
         let mut bytes = Vec::new();
         file.read_to_end(&mut bytes).map_err(Error::io(format!("reading {}", path.display())))?;
         let mut opened = Opened::default();
@@ -150,7 +172,7 @@ impl Record {
             }
             out.sync_all().map_err(Error::io("trimming the record"))?;
             fs::rename(&temp, path).map_err(Error::io("trimming the record"))?;
-            file = open_locked(path)?;
+            file = open_locked(path, wait)?;
             lines.drain(..old);
         }
         let (seq, last_hash) = match lines.last() {
@@ -354,7 +376,7 @@ mod tests {
         let path = dir.path().join("record.jsonl");
         let (mut record, _) = Record::open(&path, at(NOW)).expect("open");
         record.append(at(NOW), json!({"type":"event"})).expect("append");
-        assert!(matches!(Record::open(&path, at(NOW)), Err(Error::Locked(_))));
+        assert!(matches!(Record::open_waiting(&path, at(NOW), std::time::Duration::ZERO), Err(Error::Locked(_))));
         drop(record);
         let (mut again, _) = Record::open(&path, at(NOW)).expect("reopen");
         again.append(at(NOW + 5), json!({"type":"event"})).expect("append");
@@ -405,7 +427,10 @@ mod tests {
         assert!(report.breaks.is_empty(), "{:?}", report.breaks);
         assert_eq!(report.starts_at, Some(3));
         assert_eq!(report.entries.len(), 3);
-        assert!(matches!(Record::open(&path, at(NOW)), Err(Error::Locked(_))), "the new file is locked");
+        assert!(
+            matches!(Record::open_waiting(&path, at(NOW), std::time::Duration::ZERO), Err(Error::Locked(_))),
+            "the new file is locked"
+        );
     }
 
     #[test]

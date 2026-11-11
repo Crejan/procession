@@ -559,3 +559,18 @@ Merged `integration`. Changes:
 The 11-minute cap on kept verdicts is written next to `expiry()` as the 10 minutes
 of `MAX_DEADLINE_AHEAD_SECONDS` plus the 1 minute of `CLOCK_TOLERANCE_SECONDS`.
 Tests: 164 unit + 9 integration pass twice; clippy and fmt clean.
+
+## The intermittent `Locked` in the unit tests
+
+Not the helper alone and not a leaked `Arc`: `Rig::restart` replaces the old
+record before reopening, so no owner of the old `Shared` can keep it. The cause
+is `flock`: the lock belongs to the open file, and a child made by `fork` holds
+it until it execs. Tests run in parallel and every `ssh-keygen` one of them
+starts forks the whole process, so another test's record file (and its lock) is
+briefly held by that child. In a real `pledge serve` the same can happen to a
+quick restart if an `ssh-keygen` of the old one (issuing) is still alive.
+Fix in pledge, not the helper: `Record::open` waits up to `LOCK_WAIT` (2 s) for
+the lock before it says another `pledge serve` holds it (`open_waiting` for a
+different wait); a real second instance is still refused, after the wait.
+Result: 0 failures in 40 runs of the unit tests (before: 4 of 32 in the lead's
+runs). I did not reproduce the failure before the fix myself.
