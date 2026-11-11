@@ -14,6 +14,8 @@ pub const MAX_EXCHANGE_LINE_BYTES: usize = crate::exchange::MAX_LINE;
 pub const MAX_PARAMS: usize = crate::call::MAX_PARAMS;
 /// Each parameter is at most this many bytes.
 pub const MAX_PARAM_BYTES: usize = crate::call::MAX_PARAM_BYTES;
+/// All parameters of a call together can be shown up to this many characters (not bytes): `Call::showable`.
+pub const MAX_PARAMS_SHOWN_CHARS: usize = crate::call::MAX_PARAMS_SHOWN_CHARS;
 /// A claim is at most this many characters.
 pub const MAX_CLAIM_CHARS: usize = crate::call::MAX_CLAIM_CHARS;
 

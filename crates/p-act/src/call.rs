@@ -17,6 +17,21 @@ pub const MAX_PARAM_BYTES: usize = 512;
 /// The claim is at most this many characters.
 pub const MAX_CLAIM_CHARS: usize = 200;
 
+/// All parameters of a call together are shown up to this many characters (not bytes).
+pub const MAX_PARAMS_SHOWN_CHARS: usize = 2000;
+
+/// Why a call cannot be shown to a person as it is. The reason is for the caller's log.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum NotShowable {
+    /// The parameters together are longer than [`MAX_PARAMS_SHOWN_CHARS`] characters.
+    #[error("the parameters are {chars} characters together, at most {limit} can be shown")]
+    ParamsTooLong { chars: usize, limit: usize },
+    /// A field holds a control character or a bidirectional mark. A parsed [`Call`] cannot, so this is
+    /// only a guard against a call that did not come from the parser.
+    #[error("the field `{0}` has a control or bidirectional character")]
+    Unclean(&'static str),
+}
+
 /// A UUID, version 4, lower case with hyphens, that the agent made for one call.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct CallId(String);
@@ -134,6 +149,38 @@ impl Call {
         // Serialising plain strings and numbers cannot fail.
         let bytes = serde_json::to_vec(&wire).map_err(|e| ParseError::NotJson(e.to_string()))?;
         Call::parse(bytes)
+    }
+
+    /// Whether every field of this call can be shown to a person whole, as it is (R9): the one place that
+    /// decides it, for pledge (which refuses a call that cannot be shown), for a service (which refuses
+    /// such a call itself before it asks anybody) and the broker.
+    ///
+    /// A field is shown whole up to the formats' limit for it, which parsing has enforced: `action` as
+    /// parsed, each parameter up to 512 bytes, `claim` up to 200 characters. What this adds is that all
+    /// parameters together are at most [`MAX_PARAMS_SHOWN_CHARS`] (2000) characters, counted as
+    /// characters and not bytes. A control character or a bidirectional mark is refused at parsing, so
+    /// this function cannot meet one in a parsed `Call`; it checks again all the same.
+    pub fn showable(&self) -> Result<(), NotShowable> {
+        let c = &self.content;
+        let fields: [(&'static str, &str); 4] = [
+            ("host", &c.service.host),
+            ("name", &c.service.name),
+            ("action", &c.action),
+            ("claim", c.claim.as_deref().unwrap_or("")),
+        ];
+        for (name, value) in fields {
+            if text::check(name, value).is_err() {
+                return Err(NotShowable::Unclean(name));
+            }
+        }
+        if c.params.iter().any(|p| text::check("params", p).is_err()) {
+            return Err(NotShowable::Unclean("params"));
+        }
+        let chars: usize = c.params.iter().map(|p| p.chars().count()).sum();
+        if chars > MAX_PARAMS_SHOWN_CHARS {
+            return Err(NotShowable::ParamsTooLong { chars, limit: MAX_PARAMS_SHOWN_CHARS });
+        }
+        Ok(())
     }
 
     #[must_use]
@@ -428,5 +475,61 @@ pub(crate) mod tests {
         let over = with_params(&items);
         assert!(over.len() > MAX_BYTES);
         assert_eq!(parse(&over), Err(ParseError::TooLarge { len: over.len(), limit: MAX_BYTES }));
+    }
+
+    #[test]
+    fn showable_at_the_boundaries() {
+        let with = |params: Vec<String>| {
+            Call::compose(&CallContent { params, ..parse(EXAMPLE).unwrap().content().clone() }).unwrap()
+        };
+        assert_eq!(parse(EXAMPLE).unwrap().showable(), Ok(()));
+        assert_eq!(with(vec![]).showable(), Ok(()));
+        // 2000 characters in all, however they are spread; 2001 are too many.
+        let spread = |n: usize| -> Vec<String> { (0..4).map(|i| "p".repeat(n / 4 + usize::from(i < n % 4))).collect() };
+        assert_eq!(with(spread(2000)).showable(), Ok(()));
+        assert_eq!(with(spread(2001)).showable(), Err(NotShowable::ParamsTooLong { chars: 2001, limit: 2000 }));
+        assert_eq!(with(vec!["p".repeat(512); 3]).showable(), Ok(()), "1536 characters");
+        assert_eq!(
+            with(vec!["p".repeat(512); 4]).showable(),
+            Err(NotShowable::ParamsTooLong { chars: 2048, limit: 2000 })
+        );
+        // Characters, not bytes: 2000 two-byte characters are 4000 bytes and fit; one more does not.
+        let two_byte =
+            |n: usize| -> Vec<String> { (0..8).map(|i| "\u{e9}".repeat(n / 8 + usize::from(i < n % 8))).collect() };
+        assert_eq!(with(two_byte(2000)).showable(), Ok(()));
+        assert_eq!(with(two_byte(2001)).showable(), Err(NotShowable::ParamsTooLong { chars: 2001, limit: 2000 }));
+        // Three- and four-byte characters count once as well (a parameter is at most 512 bytes: 170 and 128 of them).
+        let wide = |c: &str, n: usize| -> Vec<String> {
+            (0..16).map(|i| c.repeat(n / 16 + usize::from(i < n % 16))).collect()
+        };
+        assert_eq!(with(wide("\u{65e5}", 2000)).showable(), Ok(()));
+        assert_eq!(
+            with(wide("\u{65e5}", 2001)).showable(),
+            Err(NotShowable::ParamsTooLong { chars: 2001, limit: 2000 })
+        );
+        assert_eq!(with(wide("\u{1f600}", 2000)).showable(), Ok(()));
+        assert_eq!(
+            with(wide("\u{1f600}", 2001)).showable(),
+            Err(NotShowable::ParamsTooLong { chars: 2001, limit: 2000 })
+        );
+        // 64 parameters, the most a call may have: 2000 characters in all is shown, 2001 is not.
+        let sixty_four = |total: usize| -> Vec<String> {
+            (0..64).map(|i| "x".repeat(total / 64 + usize::from(i < total % 64))).collect()
+        };
+        assert_eq!(with(sixty_four(2000)).params().len(), 64);
+        assert_eq!(with(sixty_four(2000)).showable(), Ok(()));
+        assert_eq!(with(sixty_four(2001)).showable(), Err(NotShowable::ParamsTooLong { chars: 2001, limit: 2000 }));
+        assert_eq!(with(sixty_four(64)).showable(), Ok(()));
+        // Empty parameters count as nothing; the claim and the action are not part of the sum.
+        assert_eq!(with(vec![String::new(); 64]).showable(), Ok(()));
+        let long_claim = Call::compose(&CallContent {
+            claim: Some("c".repeat(200)),
+            params: spread(2000),
+            ..parse(EXAMPLE).unwrap().content().clone()
+        })
+        .unwrap();
+        assert_eq!(long_claim.showable(), Ok(()));
+        let message = with(spread(2001)).showable().unwrap_err().to_string();
+        assert!(message.contains("2001") && message.contains("2000"), "{message}");
     }
 }
