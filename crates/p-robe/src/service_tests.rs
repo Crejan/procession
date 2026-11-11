@@ -1075,16 +1075,10 @@ mod streaming {
         assert!(at < Duration::from_millis(600), "the head came at {at:?}, long before the approval");
         assert!(out.comments() >= 5, "{} comments while waiting for the person", out.comments());
         let messages = out.messages();
-        let texts: Vec<&str> = messages.iter().filter_map(|m| m["params"]["message"].as_str()).collect();
-        assert_eq!(texts, ["handed to your person's machine", "approved, running"]);
-        assert_eq!(messages[0]["params"]["progressToken"], "tok");
-        assert_eq!(messages[0]["params"]["progress"], 1);
-        assert_eq!(messages[1]["params"]["progress"], 2);
+        assert_eq!(messages.len(), 1, "no notice of progress: only the answer");
         let last = messages.last().unwrap();
         assert_eq!(last["id"], 9);
         assert!(last["result"]["content"][0]["text"].as_str().unwrap().contains("\"outcome\":\"done\""));
-        let first_note_at = out.chunks.iter().find(|(_, c)| c.contains("handed to")).unwrap().0;
-        assert!(first_note_at < Duration::from_millis(600), "{first_note_at:?}");
         // No silence longer than a few keepalives anywhere in the stream.
         let mut times = vec![at];
         times.extend(out.chunks.iter().map(|(t, _)| *t));
@@ -1107,9 +1101,8 @@ mod streaming {
         mcp.keepalive = Duration::from_millis(100);
         let mut out = Recorder::new();
         mcp.serve(&request(&rig.jan("sys kit", &[]), Some(json!(1))), &AtomicBool::new(false), &mut out);
-        let running = out.chunks.iter().find(|(_, c)| c.contains("approved, running")).unwrap().0;
-        let after_running = out.chunks.iter().filter(|(t, c)| *t > running && c.starts_with(": keepalive")).count();
-        assert!(after_running >= 5, "{after_running} comments while the verb ran");
+        let after_running = out.comments();
+        assert!(after_running >= 5, "{after_running} comments while the person was asked and the verb ran");
         assert!(
             out.messages().last().unwrap()["result"]["content"][0]["text"]
                 .as_str()

@@ -331,3 +331,16 @@ transport that **writes and flushes each piece at once** and notices a closed
 connection on write (or sets the cancel flag); `hyper` can (a streaming body
 with a channel), a hand-written server could. That is a requirement on the
 transport, which still is not built (see the blocker above).
+
+---
+
+## Update: the two progress notifications are gone
+
+Removed on the designer's decision: the service sends no `notifications/progress`
+(no "handed to your person's machine", no "approved, running"). Kept: the head at
+acceptance, the `: keepalive` comments, the final response. `Event` has one
+member now (`Accepted`). `agent-to-service.md` section 7 says so; the streaming
+test now asserts that the only message in the stream is the answer. Tests:
+114 unit + 3 CLI, and with `--features test-verbs` 119 unit + 18 CLI; clippy clean.
+Waiting for p-act's `PersonKeys` with the person: then I switch to it and keep my
+own `person-mismatch` test.

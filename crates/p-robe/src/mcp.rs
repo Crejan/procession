@@ -290,7 +290,7 @@ impl Mcp<'_> {
                 });
                 let _ = tx.send(Msg::Done(handled));
             });
-            let (mut streaming, mut sent, mut last) = (false, 0u64, Instant::now());
+            let (mut streaming, mut last) = (false, Instant::now());
             loop {
                 let write = |out: &mut dyn ResponseWriter, bytes: &[u8]| {
                     if out.body(bytes).is_err() {
@@ -299,7 +299,9 @@ impl Mcp<'_> {
                 };
                 match rx.recv_timeout(TICK) {
                     Ok(Msg::Event(event)) => {
-                        let Some(token) = &token else { continue };
+                        if token.is_none() {
+                            continue;
+                        }
                         if !streaming {
                             if event != Event::Accepted {
                                 continue;
@@ -312,11 +314,6 @@ impl Mcp<'_> {
                                 gone.store(true, Ordering::SeqCst);
                             }
                             streaming = true;
-                            last = Instant::now();
-                        } else if let Some(text) = event.message() {
-                            sent += 1;
-                            let note = json!({"jsonrpc": "2.0", "method": "notifications/progress", "params": {"progressToken": token, "progress": sent, "message": text}});
-                            write(out, format!("event: message\ndata: {note}\n\n").as_bytes());
                             last = Instant::now();
                         }
                     }

@@ -75,27 +75,13 @@ pub enum Handled {
     BadParams(&'static str),
 }
 
-/// What a waiting call has reached, for the stream the agent reads.
+/// What a waiting call has reached, for the stream the agent reads. Only
+/// acceptance: there is no notice of a request's progress (the designer's
+/// decision); the stream is a head and keepalive comments until the answer.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Event {
     /// The first checks passed and there is a place to wait: from here the call is going to be decided.
     Accepted,
-    /// The request is with the person's machine.
-    Submitted,
-    /// The approval verified; the verb is about to run.
-    Approved,
-}
-
-impl Event {
-    /// The words for a progress notification, if it has any. Fixed text: nothing received is in it.
-    #[must_use]
-    pub fn message(self) -> Option<&'static str> {
-        match self {
-            Event::Accepted => None,
-            Event::Submitted => Some("handed to your person's machine"),
-            Event::Approved => Some("approved, running"),
-        }
-    }
 }
 
 /// The service.
@@ -273,7 +259,6 @@ impl Service {
         let note = |text: &str| {
             (self.log)(&format!("call id={} hash={hash} note={}", call.id().as_str(), crate::audit::quote(text)))
         };
-        events(Event::Submitted);
         let approval = match self.pledge.submit_and_wait(&submit, deadline, cancel, &note) {
             Waited::Cancelled => return Err(Stop::Cancelled(hash.clone())),
             Waited::Deadline => return Err(ended((Outcome::Expired, "deadline".into()))),
@@ -301,7 +286,6 @@ impl Service {
             return Err(Stop::Cancelled(hash.clone()));
         }
         // 5. Run the dispatcher, refusing above what was approved.
-        events(Event::Approved);
         let (outcome, exact) = self.run(rating, call.action(), call.params());
         Ok((outcome, format!("{exact} approval={}", ApprovalKindWord(kind)), hash.clone()))
     }

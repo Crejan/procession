@@ -193,8 +193,9 @@ call may need your person's approval and waits for it until its deadline;
   before pledge is asked. From then a comment line (`: keepalive`) goes out at
   least every 15 seconds, while the person is asked **and while the verb runs**,
   so that a client that reads silence as a dead connection (`pact`: 45 seconds)
-  does not. Two `notifications/progress` carry fixed words ("handed to your
-  person's machine", "approved, running"; no dialog notice). The last event is
+  does not. There is **no notice of a request's progress** (the designer's decision): nothing
+  says that the person was asked or that an approval came, and the service never
+  sends a `notifications/progress`. The last event is
   the JSON-RPC response. A call refused before it is accepted (`invalid`, a
   protocol error, `503`) is plain JSON with no stream. Without a token the
   response is plain JSON, once, when the call is decided, with nothing written
