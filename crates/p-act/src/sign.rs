@@ -17,8 +17,10 @@
 //! that name succeeds: [`verify_call`] does exactly that, and the approval's
 //! verification ([`verify_approval`]) is what proves the person to a service.
 //!
-//! Only Ed25519 certificates are read: the agent's key is made by pledge, and
-//! an unknown key type is refused, not guessed at.
+//! Certificates whose subject key is Ed25519 or ECDSA P-256 are read; the key
+//! that signed a certificate is not parsed, so it may be of either type too.
+//! Any other key type is refused with [`SignError::UnsupportedKeyType`], not
+//! guessed at.
 
 use crate::call::Call;
 use crate::clearance::Clearance;
@@ -38,6 +40,8 @@ use thiserror::Error;
 const BEGIN: &str = "-----BEGIN SSH SIGNATURE-----\n";
 const END: &str = "\n-----END SSH SIGNATURE-----\n";
 const KEYGEN: &str = "ssh-keygen";
+/// The key types p-act accepts as public keys, and as the subject of a certificate it reads.
+const SUPPORTED_KEYS: [&str; 2] = ["ssh-ed25519", "ecdsa-sha2-nistp256"];
 
 /// The namespace of each signed document type. A signature for one can never
 /// verify as another.
@@ -111,6 +115,9 @@ impl PublicKey {
             kind.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || matches!(b, b'-' | b'@' | b'.'));
         if embedded != kind.as_bytes() || !name_ok || kind.contains("-cert-v01@") {
             return Err(bad());
+        }
+        if !SUPPORTED_KEYS.contains(&kind) {
+            return Err(SignError::UnsupportedKeyType(kind.to_owned()));
         }
         Ok(PublicKey(format!("{kind} {b64}")))
     }
@@ -308,12 +315,17 @@ pub fn signature_certificate(sig: &str) -> Result<Certificate, SignError> {
     if !kind.contains("-cert-v01@") {
         return Err(SignError::NotCertified);
     }
-    if kind != "ssh-ed25519-cert-v01@openssh.com" {
-        return Err(SignError::UnsupportedKeyType(kind));
-    }
-    // nonce, public key (Ed25519: one string), serial, type, key id, principals, validity.
+    // The subject key's fields differ by type: Ed25519 has one string, ECDSA a curve and a point.
+    let key_fields = match kind.as_str() {
+        "ssh-ed25519-cert-v01@openssh.com" => 1,
+        "ecdsa-sha2-nistp256-cert-v01@openssh.com" => 2,
+        _ => return Err(SignError::UnsupportedKeyType(kind)),
+    };
+    // nonce, public key, serial, type, key id, principals, validity.
     let _nonce = key.string().ok_or_else(bad)?;
-    let _public_key = key.string().ok_or_else(bad)?;
+    for _ in 0..key_fields {
+        key.string().ok_or_else(bad)?;
+    }
     let _serial = key.u64().ok_or_else(bad)?;
     let _type = key.u32().ok_or_else(bad)?;
     let key_id = String::from_utf8(key.string().ok_or_else(bad)?.to_vec()).map_err(|_| bad())?;

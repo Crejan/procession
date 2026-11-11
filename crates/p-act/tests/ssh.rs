@@ -43,6 +43,13 @@ impl Keys {
         path
     }
 
+    /// A new ECDSA P-256 key without passphrase; its private file's path.
+    fn ecdsa_key(&self, name: &str) -> PathBuf {
+        let path = self.path(name);
+        self.keygen(&["-q", "-t", "ecdsa", "-b", "256", "-N", "", "-C", "", "-f", path.to_str().unwrap()]);
+        path
+    }
+
     /// A key certified by `ca` for `principals` (comma-separated), valid as `validity`.
     fn certified(&self, name: &str, ca: &Path, principals: &str, validity: &str) -> Signer {
         let key = self.key(name);
@@ -521,4 +528,126 @@ fn ssh_keygen_is_not_asked_anything() {
     keys.keygen(&["-q", "-t", "ed25519", "-N", "secret", "-f", key.to_str().unwrap()]);
     let call = Call::compose(&call_content("probe", "a.example")).unwrap();
     assert!(sign_call(&Signer::plain(&key), &call).is_err());
+}
+
+// ---------------------------------------------------------------------------
+// ECDSA P-256: the Secure Enclave's key type, here with keys in files
+// ---------------------------------------------------------------------------
+
+impl Keys {
+    fn certify(&self, key: &Path, ca: &Path, id: &str, principals: &str) -> Signer {
+        let pub_file = format!("{}.pub", key.display());
+        self.keygen(&["-q", "-s", ca.to_str().unwrap(), "-I", id, "-n", principals, "-V", VALID, &pub_file]);
+        Signer::certified(key).unwrap()
+    }
+}
+
+#[test]
+fn an_ed25519_agent_under_a_p256_delegation_key() {
+    let keys = Keys::new();
+    let delegation = keys.ecdsa_key("delegation");
+    let agent = keys.certified("agent", &delegation, "alice", VALID);
+    let call = Call::compose(&call_content("probe", "a.example")).unwrap();
+    let sig = sign_call(&agent, &call).unwrap();
+    assert_eq!(verify_call(&call, &sig, &keys.public(&delegation)).unwrap(), "alice");
+    assert_eq!(signature_person(&sig).unwrap(), "alice");
+    let cert = signature_certificate(&sig).unwrap();
+    assert_eq!((cert.key_id.as_str(), cert.principals.as_slice()), ("agent", ["alice".to_owned()].as_slice()));
+    // The wrong P-256 key, and another call, are refused.
+    assert!(is_rejected(verify_call(&call, &sig, &keys.public(&keys.ecdsa_key("other")))));
+    let mut changed = call_content("probe", "a.example");
+    changed.action = "rt other".into();
+    assert!(is_rejected(verify_call(&Call::compose(&changed).unwrap(), &sig, &keys.public(&delegation))));
+}
+
+#[test]
+fn a_p256_agent_certificate_is_read_too() {
+    let keys = Keys::new();
+    let ca = keys.ecdsa_key("ca");
+    let agent_key = keys.ecdsa_key("agent");
+    let agent = keys.certify(&agent_key, &ca, "agent", "alice");
+    let call = Call::compose(&call_content("probe", "a.example")).unwrap();
+    let sig = sign_call(&agent, &call).unwrap();
+    assert_eq!(verify_call(&call, &sig, &keys.public(&ca)).unwrap(), "alice");
+    assert_eq!(signature_certificate(&sig).unwrap().valid_before, 4_070_908_800);
+}
+
+#[test]
+fn approvals_by_p256_keys_under_ed25519_and_p256_site_cas() {
+    let d = delegation("alice");
+    let keys = Keys::new();
+    let request = request(&d, INTERNAL);
+    assert_eq!(request_person(&request).unwrap(), "alice");
+    for (label, ca) in [("ed25519-ca", keys.key("ca-ed")), ("p256-ca", keys.ecdsa_key("ca-p256"))] {
+        let ca_pub = keys.public(&ca);
+        let trust = ApprovalTrust::SiteCa(&ca_pub);
+        let confirmed_key = keys.ecdsa_key(&format!("confirmed-{label}"));
+        let automatic_key = keys.ecdsa_key(&format!("automatic-{label}"));
+        let confirmed = keys.certify(&confirmed_key, &ca, "c", "alice:confirmed");
+        let automatic = keys.certify(&automatic_key, &ca, "a", "alice:automatic");
+
+        let sig = sign_approval(&confirmed, &request).unwrap();
+        assert_eq!(verify_approval(&request, &sig, trust).unwrap(), ApprovalKind::Confirmed, "{label}");
+        let sig = sign_approval(&automatic, &request).unwrap();
+        assert_eq!(verify_approval(&request, &sig, trust).unwrap(), ApprovalKind::Automatic, "{label}");
+        // The certificate in the approval names the person's key use, and is readable.
+        assert_eq!(signature_certificate(&sig).unwrap().principals, ["alice:automatic"]);
+        assert!(signature_person(&sig).is_err(), "a name with a ':' is not a person's name");
+
+        // Refusals as before: the top of a scale, another CA, another request.
+        let worst = self::request(&d, Rating::WORST);
+        let sig = sign_approval(&automatic, &worst).unwrap();
+        assert!(matches!(verify_approval(&worst, &sig, trust), Err(SignError::AutomaticNotAcceptable)), "{label}");
+        let other_ca = keys.public(&keys.ecdsa_key(&format!("elsewhere-{label}")));
+        let sig = sign_approval(&confirmed, &request).unwrap();
+        assert!(is_rejected(verify_approval(&request, &sig, ApprovalTrust::SiteCa(&other_ca))), "{label}");
+        assert!(is_rejected(verify_approval(&worst, &sig, trust)), "{label}");
+    }
+}
+
+#[test]
+fn a_p256_broker_and_plain_p256_anchors() {
+    let d = delegation("alice");
+    let keys = Keys::new();
+    let ca = keys.ecdsa_key("ca");
+    let broker = keys.certify(&keys.ecdsa_key("broker"), &ca, "broker", "broker");
+    let request = request(&d, INTERNAL);
+    let clearance = Clearance::compose(request.hash(), Timestamp::from_unix(1_794_409_481).unwrap()).unwrap();
+    let sig = sign_clearance(&broker, &clearance).unwrap();
+    verify_clearance(&clearance, &sig, &keys.public(&ca)).unwrap();
+
+    // Stage 1: plain P-256 approval keys listed directly.
+    let (c, a) = (keys.ecdsa_key("c"), keys.ecdsa_key("a"));
+    let (c_pub, a_pub) = (keys.public(&c), keys.public(&a));
+    let trust = ApprovalTrust::PersonKeys { confirmed: &c_pub, automatic: &a_pub };
+    let sig = sign_approval(&Signer::plain(&c), &request).unwrap();
+    assert_eq!(verify_approval(&request, &sig, trust).unwrap(), ApprovalKind::Confirmed);
+    let sig = sign_approval(&Signer::plain(&a), &request).unwrap();
+    assert_eq!(verify_approval(&request, &sig, trust).unwrap(), ApprovalKind::Automatic);
+}
+
+#[test]
+fn other_key_types_are_refused_with_their_own_error() {
+    let keys = Keys::new();
+    let rsa = keys.path("rsa");
+    keys.keygen(&["-q", "-t", "rsa", "-b", "2048", "-N", "", "-C", "", "-f", rsa.to_str().unwrap()]);
+    let line = std::fs::read_to_string(format!("{}.pub", rsa.display())).unwrap();
+    assert!(matches!(PublicKey::parse(&line), Err(SignError::UnsupportedKeyType(t)) if t == "ssh-rsa"));
+    let p384 = keys.path("p384");
+    keys.keygen(&["-q", "-t", "ecdsa", "-b", "384", "-N", "", "-C", "", "-f", p384.to_str().unwrap()]);
+    let line = std::fs::read_to_string(format!("{}.pub", p384.display())).unwrap();
+    assert!(matches!(PublicKey::parse(&line), Err(SignError::UnsupportedKeyType(t)) if t == "ecdsa-sha2-nistp384"));
+    assert!(
+        PublicKey::parse(&std::fs::read_to_string(format!("{}.pub", keys.ecdsa_key("p256").display())).unwrap())
+            .is_ok()
+    );
+
+    // A certificate whose subject key is RSA is refused when read, not mis-parsed.
+    let ca = keys.key("ca");
+    let agent = keys.certify(&rsa, &ca, "agent", "alice");
+    let call = Call::compose(&call_content("probe", "a.example")).unwrap();
+    let sig = sign_call(&agent, &call).unwrap();
+    assert!(
+        matches!(signature_person(&sig), Err(SignError::UnsupportedKeyType(t)) if t == "ssh-rsa-cert-v01@openssh.com")
+    );
 }

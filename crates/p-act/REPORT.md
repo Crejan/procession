@@ -48,3 +48,10 @@ Branch `agent/p-act`; nothing pushed, `main` untouched.
 4. Section 2 gives no clearance size limit; I chose 1 KiB.
 5. My allowed-signers lines list only the one namespace being verified; section 7 lists both on the CA line (wider than needed).
 6. The signature over a request is not part of `Request`; it travels beside it (section 1). No wrapper is defined.
+
+## 2026-11-11: ECDSA P-256 added (follow-up)
+- `signature_certificate`/`signature_person`/`request_person` now read certificates whose subject key is Ed25519 or `ecdsa-sha2-nistp256`. The key that signed a certificate is never parsed, so a CA of either type works.
+- `PublicKey::parse` accepts exactly `ssh-ed25519` and `ecdsa-sha2-nistp256`; any other type (RSA, P-384, ...) gives `SignError::UnsupportedKeyType(<type>)`, as does a certificate with another subject type. This replaces the Ed25519-only statement under "Person from the signature" above.
+- New tests (5, in `tests/ssh.rs`, real `ssh-keygen -t ecdsa -b 256` file keys): Ed25519 agent under a P-256 delegation key; P-256 agent certificate; approvals by P-256 keys under an Ed25519 and a P-256 site CA (confirmed, automatic, top-of-scale refusal, wrong CA, other request); P-256 broker clearance and stage-1 plain P-256 approval keys; RSA and P-384 refused with their own error.
+- Verified: `cargo test -p p-act --offline` 37 unit + 20 integration passed; `cargo clippy --all-targets -p p-act --offline` clean; `cargo fmt -p p-act` applied. `ring` kept.
+- Not verified: Secure Enclave keys themselves (file keys only). The six design questions above are unchanged and behaviour is as before.
