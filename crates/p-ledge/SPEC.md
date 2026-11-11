@@ -161,7 +161,9 @@ expired. It watches the deadline itself.
 
 **Delegations.** Issuing: the person picks groups and the two ceilings; a
 presence check; pledge creates the agent's key pair, issues its certificate
-with the delegation key, registers it with the broker, and writes key and
+with the delegation key (the person as its only principal, the groups in
+the extension `groups@procession`; `doc/approval-formats.md`, section 3.1),
+registers it with the broker, and writes key and
 certificate to where the person's start of the sandbox reads them (standard
 output of `pledge agents start`, for a pipe into an SSH connection, or a
 file only the person can read). pledge keeps the ceilings and the
