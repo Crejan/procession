@@ -96,3 +96,12 @@ reserved for every key; messages with trailing bytes are malformed.
 8. Which way the 60 s clock tolerance tilts for a deadline.
 9. Name of the connection key's namespace (reserved as part of the
    `@procession` family meanwhile).
+
+## Update: rating moved to p-act
+
+Merged `agent/p-act` (Cargo.lock conflict resolved by taking theirs and
+letting cargo add p-ledge's deps). `p-ledge` depends on `p-act` by path;
+nothing in p-ledge used `rating` besides its own module, so
+`src/rating.rs` and its export are deleted (no re-export). Tests: 65 pass
+(73 minus the 8 rating tests, which live in p-act), clippy `-D warnings`
+and fmt clean. Not started: step 2, the `ask`/`answer` codec.

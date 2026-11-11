@@ -1,0 +1,19 @@
+[package]
+name = "p-act"
+version = "0.0.0"
+edition = "2024"
+rust-version = "1.85"
+description = "The formats the approval system's programs share: call, request, approval, clearance, rating, and their signatures"
+license = "MIT OR Apache-2.0"
+keywords = ["ssh", "approval", "sshsig"]
+categories = ["authentication"]
+include = ["src/**"]
+publish = false
+
+[dependencies]
+base64 = "0.23"
+serde = { version = "1", features = ["derive"] }
+serde_json = { version = "1", features = ["raw_value"] }
+ring = { version = "0.17", default-features = false }
+tempfile = "3"
+thiserror = "2"

@@ -15,6 +15,8 @@ name = "pledge"
 path = "src/main.rs"
 
 [dependencies]
+# The formats and ratings of the approval system.
+p-act = { path = "../p-act" }
 # Verifies the host's signature in session-bind@openssh.com and the CA's in a
 # host certificate (ed25519, ECDSA P-256/P-384, RSA 2048..8192 with SHA-2),
 # and hashes for fingerprints. Already in the workspace's lock file. The
