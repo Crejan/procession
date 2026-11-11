@@ -111,6 +111,56 @@ impl Object {
         Ok(())
     }
 
+    #[cfg(feature = "pact")]
+    /// Whether a member of this name is present.
+    pub(crate) fn has(&self, name: &str) -> bool {
+        self.members.iter().any(|(n, _)| n == name)
+    }
+
+    #[cfg(feature = "pact")]
+    /// A non-negative integer.
+    pub(crate) fn take_u64(&mut self, name: &'static str) -> Result<u64, ParseError> {
+        let raw = self.take_raw(name)?;
+        self.typed(name, &raw, "a non-negative integer")
+    }
+
+    #[cfg(feature = "pact")]
+    /// A string whose line breaks are allowed (a PEM block), but no other control character and no bidirectional mark.
+    pub(crate) fn take_multiline(&mut self, name: &'static str) -> Result<String, ParseError> {
+        let raw = self.take_raw(name)?;
+        let s: String = self.typed(name, &raw, "a string")?;
+        for line in s.split('\n') {
+            text::check(&format!("{}{name}", self.prefix), line)?;
+        }
+        Ok(s)
+    }
+
+    #[cfg(feature = "pact")]
+    /// An array of objects, each as an [`Object`] with `prefix`.
+    pub(crate) fn take_objects(&mut self, name: &'static str, prefix: &'static str) -> Result<Vec<Object>, ParseError> {
+        let raw = self.take_raw(name)?;
+        let items: Vec<Box<RawValue>> = self.typed(name, &raw, "an array of objects")?;
+        items
+            .iter()
+            .map(|item| {
+                Object::parse(item.get(), prefix).map_err(|e| match e {
+                    ParseError::NotJson(_) => ParseError::WrongType {
+                        member: format!("{}{name}", self.prefix),
+                        expected: "an array of objects",
+                    },
+                    other => other,
+                })
+            })
+            .collect()
+    }
+
+    /// `schema_version` must be 1: the version of an unsigned message (not the `v` of a signed document).
+    pub(crate) fn take_schema_version(&mut self) -> Result<(), ParseError> {
+        let raw = self.take_raw("schema_version")?;
+        let v: serde_json::Number = self.typed("schema_version", &raw, "a number")?;
+        if v.as_u64() == Some(1) { Ok(()) } else { Err(ParseError::UnsupportedVersion(v.to_string())) }
+    }
+
     /// Whatever has not been taken is unknown.
     pub(crate) fn finish(self) -> Result<(), ParseError> {
         match self.members.into_iter().next() {

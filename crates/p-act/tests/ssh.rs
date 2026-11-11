@@ -4,9 +4,10 @@
 
 use p_act::rating::{Damage, Disruption, Exposure, Rating};
 use p_act::sign::{
-    ApprovalKind, ApprovalTrust, PublicKey, SignError, Signer, request_person, sign_approval, sign_call,
-    sign_clearance, sign_request, signature_agent, signature_certificate, signature_from_base64, signature_person,
-    signature_to_base64, verify_approval, verify_call, verify_call_agent, verify_clearance, verify_request,
+    ApprovalKind, ApprovalTrust, Fingerprint, Namespace, PublicKey, SignError, Signer, agent_certificate,
+    is_reserved_namespace, request_person, sign_approval, sign_call, sign_clearance, sign_request, signature_agent,
+    signature_certificate, signature_fingerprint, signature_from_base64, signature_person, signature_to_base64,
+    verify_approval, verify_call, verify_call_agent, verify_clearance, verify_request,
 };
 use p_act::{Call, CallContent, CallId, Clearance, Document, Request, ServiceId, Timestamp};
 use std::path::{Path, PathBuf};
@@ -411,7 +412,7 @@ fn in_the_first_stage_the_persons_two_keys_are_listed_directly() {
     let keys = Keys::new();
     let (confirmed, automatic) = (keys.key("confirmed"), keys.key("automatic"));
     let (confirmed_pub, automatic_pub) = (keys.public(&confirmed), keys.public(&automatic));
-    let trust = ApprovalTrust::PersonKeys { confirmed: &confirmed_pub, automatic: &automatic_pub };
+    let trust = ApprovalTrust::PersonKeys { person: "alice", confirmed: &confirmed_pub, automatic: &automatic_pub };
     let request = request(&d, INTERNAL);
 
     let confirmed_sig = sign_approval(&Signer::plain(&confirmed), &request).unwrap();
@@ -425,16 +426,61 @@ fn in_the_first_stage_the_persons_two_keys_are_listed_directly() {
     let on_worst = sign_approval(&Signer::plain(&automatic), &worst).unwrap();
     assert!(matches!(verify_approval(&worst, &on_worst, trust), Err(SignError::AutomaticNotAcceptable)));
 
-    // A stranger's key, and the wrong person (the keys are alice's).
+    // A stranger's key.
     let stranger = Signer::plain(keys.key("stranger"));
     assert!(is_rejected(verify_approval(&request, &sign_approval(&stranger, &request).unwrap(), trust)));
+}
+
+#[test]
+fn person_keys_say_whose_they_are_and_refuse_another_persons_request() {
+    // Two persons' delegations: one set of approval keys, alice's, and a request for each person's agent.
+    let alices = delegation("alice");
     let bobs = delegation("bob");
-    let for_bob = Request::compose(&bobs.call, &bobs.sig, INTERNAL).unwrap();
-    let alice_signs_bobs = sign_approval(&Signer::plain(&confirmed), &for_bob).unwrap();
-    // The lines are named for the person the request names, so the lines of this test accept
-    // the keys under bob's name: a stage-1 file lists exactly one person, and it is that
-    // person's call that is approved. A different person's key is the stranger case above.
-    assert!(verify_approval(&for_bob, &alice_signs_bobs, trust).is_ok());
+    let keys = Keys::new();
+    let (confirmed, automatic) = (keys.key("confirmed"), keys.key("automatic"));
+    let (confirmed_pub, automatic_pub) = (keys.public(&confirmed), keys.public(&automatic));
+    let for_alice = request(&alices, INTERNAL);
+    let for_bob = request(&bobs, INTERNAL);
+    let sign = |key: &Path, r: &Request| sign_approval(&Signer::plain(key), r).unwrap();
+
+    let alice_trust =
+        ApprovalTrust::PersonKeys { person: "alice", confirmed: &confirmed_pub, automatic: &automatic_pub };
+    for (key, kind) in [(&confirmed, ApprovalKind::Confirmed), (&automatic, ApprovalKind::Automatic)] {
+        assert_eq!(verify_approval(&for_alice, &sign(key, &for_alice), alice_trust).unwrap(), kind);
+        // The right keys, a validly signed approval of exactly this request, but the call is bob's.
+        let sig = sign(key, &for_bob);
+        assert!(matches!(verify_approval(&for_bob, &sig, alice_trust), Err(SignError::ApprovalForAnotherPerson)));
+    }
+    // The same keys declared as bob's approve bob's request and refuse alice's.
+    let bob_trust = ApprovalTrust::PersonKeys { person: "bob", confirmed: &confirmed_pub, automatic: &automatic_pub };
+    assert_eq!(verify_approval(&for_bob, &sign(&confirmed, &for_bob), bob_trust).unwrap(), ApprovalKind::Confirmed);
+    assert!(matches!(
+        verify_approval(&for_alice, &sign(&confirmed, &for_alice), bob_trust),
+        Err(SignError::ApprovalForAnotherPerson)
+    ));
+    // The person is checked before the signature: a signature that would not verify either way names the person's mismatch.
+    assert!(matches!(verify_approval(&for_bob, "garbage", alice_trust), Err(SignError::ApprovalForAnotherPerson)));
+    // A trust that names no usable person is refused, not read as a pattern.
+    for bad in ["", "*", "alice,bob", "a b", "alice:confirmed"] {
+        let trust = ApprovalTrust::PersonKeys { person: bad, confirmed: &confirmed_pub, automatic: &automatic_pub };
+        assert!(
+            matches!(
+                verify_approval(&for_alice, &sign(&confirmed, &for_alice), trust),
+                Err(SignError::BadPrincipal(_))
+            ),
+            "{bad:?}"
+        );
+    }
+    // The site CA's trust names no person: the person is the call's and the certificate's name must agree, as before.
+    let site = site();
+    let ca = site.keys.public(&site.ca);
+    let bob = site.keys.certified("bob-confirmed", &site.ca, "bob:confirmed", VALID);
+    assert!(is_rejected(verify_approval(
+        &for_alice,
+        &sign_approval(&bob, &for_alice).unwrap(),
+        ApprovalTrust::SiteCa(&ca)
+    )));
+    assert!(verify_approval(&for_bob, &sign_approval(&bob, &for_bob).unwrap(), ApprovalTrust::SiteCa(&ca)).is_ok());
 }
 
 #[test]
@@ -585,15 +631,27 @@ fn an_ed25519_agent_under_a_p256_delegation_key() {
 }
 
 #[test]
-fn a_p256_agent_certificate_is_read_too() {
+fn an_agent_certificate_for_a_p256_key_is_refused_everywhere() {
     let keys = Keys::new();
     let ca = keys.ecdsa_key("ca");
     let agent_key = keys.ecdsa_key("agent");
     let agent = keys.certify(&agent_key, &ca, "agent", "alice");
     let call = Call::compose(&call_content("probe", "a.example")).unwrap();
     let sig = sign_call(&agent, &call).unwrap();
-    assert_eq!(verify_call(&call, &sig, &keys.public(&ca)).unwrap(), "alice");
-    assert_eq!(signature_certificate(&sig).unwrap().valid_before, 4_070_908_800);
+    // An agent's key is Ed25519, always: every function that reads an agent's certificate refuses this one,
+    // with an error that names the type.
+    let named = |e: SignError| matches!(e, SignError::AgentKeyNotEd25519(t) if t == "ecdsa-sha2-nistp256");
+    assert!(named(verify_call(&call, &sig, &keys.public(&ca)).unwrap_err()));
+    assert!(named(verify_call_agent(&call, &sig, &keys.public(&ca)).unwrap_err()));
+    assert!(named(signature_agent(&sig).unwrap_err()));
+    assert!(named(signature_person(&sig).unwrap_err()));
+    let request = request(&delegation("alice"), INTERNAL);
+    let on_p256 = Request::compose(&call, &sig, INTERNAL).unwrap();
+    assert!(named(request_person(&on_p256).unwrap_err()));
+    assert!(request_person(&request).is_ok());
+    // The raw reading, which judges nothing, still shows it.
+    let cert = signature_certificate(&sig).unwrap();
+    assert_eq!((cert.valid_before, cert.key_type.as_str(), cert.cert_type), (4_070_908_800, "ecdsa-sha2-nistp256", 1));
 }
 
 #[test]
@@ -643,7 +701,7 @@ fn a_p256_broker_and_plain_p256_anchors() {
     // Stage 1: plain P-256 approval keys listed directly.
     let (c, a) = (keys.ecdsa_key("c"), keys.ecdsa_key("a"));
     let (c_pub, a_pub) = (keys.public(&c), keys.public(&a));
-    let trust = ApprovalTrust::PersonKeys { confirmed: &c_pub, automatic: &a_pub };
+    let trust = ApprovalTrust::PersonKeys { person: "alice", confirmed: &c_pub, automatic: &a_pub };
     let sig = sign_approval(&Signer::plain(&c), &request).unwrap();
     assert_eq!(verify_approval(&request, &sig, trust).unwrap(), ApprovalKind::Confirmed);
     let sig = sign_approval(&Signer::plain(&a), &request).unwrap();
@@ -953,14 +1011,272 @@ fn the_same_key_under_both_names_is_refused() {
     let keys = Keys::new();
     let key = keys.key("only");
     let key_pub = keys.public(&key);
-    let trust = ApprovalTrust::PersonKeys { confirmed: &key_pub, automatic: &key_pub };
+    let trust = ApprovalTrust::PersonKeys { person: "alice", confirmed: &key_pub, automatic: &key_pub };
     let request = request(&d, INTERNAL);
     let sig = sign_approval(&Signer::plain(&key), &request).unwrap();
     assert!(matches!(verify_approval(&request, &sig, trust), Err(SignError::SameApprovalKey)));
     // Also for a request that would otherwise be accepted automatically, and for the P-256 key.
     let p256 = keys.ecdsa_key("p256");
     let p256_pub = keys.public(&p256);
-    let trust = ApprovalTrust::PersonKeys { confirmed: &p256_pub, automatic: &p256_pub };
+    let trust = ApprovalTrust::PersonKeys { person: "alice", confirmed: &p256_pub, automatic: &p256_pub };
     let sig = sign_approval(&Signer::plain(&p256), &request).unwrap();
     assert!(matches!(verify_approval(&request, &sig, trust), Err(SignError::SameApprovalKey)));
+}
+
+// ---------------------------------------------------------------------------
+// Fingerprints, and the reserved namespaces
+// ---------------------------------------------------------------------------
+
+/// What `ssh-keygen -l -f <file>` prints as the fingerprint.
+fn keygen_fingerprint(file: &Path) -> String {
+    let out = Command::new("ssh-keygen").args(["-l", "-f"]).arg(file).stdin(Stdio::null()).output().unwrap();
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    let line = String::from_utf8(out.stdout).unwrap();
+    line.split_whitespace().nth(1).unwrap().to_owned()
+}
+
+fn pub_file(key: &Path) -> PathBuf {
+    PathBuf::from(format!("{}.pub", key.display()))
+}
+
+#[test]
+fn a_public_keys_fingerprint_is_what_ssh_keygen_prints() {
+    let keys = Keys::new();
+    for (label, key) in [("ed25519", keys.key("e")), ("p256", keys.ecdsa_key("p"))] {
+        let expected = keygen_fingerprint(&pub_file(&key));
+        let fingerprint = keys.public(&key).fingerprint();
+        assert_eq!(fingerprint.as_str(), expected, "{label}");
+        assert_eq!(fingerprint.to_string().parse::<Fingerprint>().unwrap(), fingerprint);
+        // The key behind a plain signature.
+        let call = Call::compose(&call_content("probe", "a.example")).unwrap();
+        let sig = sign_call(&Signer::plain(&key), &call).unwrap();
+        assert_eq!(signature_fingerprint(&sig).unwrap(), fingerprint, "{label}");
+    }
+}
+
+#[test]
+fn a_certified_keys_fingerprint_is_that_of_the_key_not_of_the_certificate() {
+    let keys = Keys::new();
+    for (label, ca, agent_key) in [
+        ("ed25519 under ed25519", keys.key("ca1"), keys.key("a1")),
+        ("ed25519 under p256", keys.ecdsa_key("ca2"), keys.key("a2")),
+        ("p256 under ed25519", keys.key("ca3"), keys.ecdsa_key("a3")),
+        ("p256 under p256", keys.ecdsa_key("ca4"), keys.ecdsa_key("a4")),
+    ] {
+        let signer = keys.certify(&agent_key, &ca, "agent", "alice");
+        let call = Call::compose(&call_content("probe", "a.example")).unwrap();
+        let sig = sign_call(&signer, &call).unwrap();
+        let expected = keygen_fingerprint(&pub_file(&agent_key));
+        assert_eq!(signature_fingerprint(&sig).unwrap().as_str(), expected, "{label}");
+        assert_eq!(signature_certificate(&sig).unwrap().fingerprint.as_str(), expected, "{label}");
+        let agent = verify_call_agent(&call, &sig, &keys.public(&ca));
+        if label.starts_with("p256 under") {
+            assert!(matches!(agent, Err(SignError::AgentKeyNotEd25519(_))), "{label}");
+        } else {
+            assert_eq!(agent.unwrap().delegation.as_str(), expected, "{label}");
+        }
+        assert_ne!(expected, keys.public(&ca).fingerprint().as_str(), "the issuer is another key");
+    }
+}
+
+#[test]
+fn a_delegation_is_known_by_its_agents_key_alone() {
+    // Two certificates for one key (two delegations over time) have one fingerprint; two keys never do.
+    let keys = Keys::new();
+    let ca = keys.key("ca");
+    let key = keys.key("agent");
+    let first = keys.certify(&key, &ca, "first", "alice");
+    let second = keys.certify(&key, &ca, "second", "alice");
+    let call = Call::compose(&call_content("probe", "a.example")).unwrap();
+    let (a, b) = (
+        signature_fingerprint(&sign_call(&first, &call).unwrap()),
+        signature_fingerprint(&sign_call(&second, &call).unwrap()),
+    );
+    assert_eq!(a.unwrap(), b.unwrap());
+    let other = keys.certify(&keys.key("other"), &ca, "x", "alice");
+    assert_ne!(
+        signature_fingerprint(&sign_call(&other, &call).unwrap()).unwrap().as_str(),
+        keygen_fingerprint(&pub_file(&key))
+    );
+}
+
+#[test]
+fn fingerprints_of_other_things_are_refused() {
+    for bad in [
+        "",
+        "SHA256:",
+        "sha256:abc",
+        "MD5:aa:bb",
+        &format!("SHA256:{}", "a".repeat(42)),
+        &format!("SHA256:{}=", "a".repeat(43)),
+        &format!("SHA256:{}", "a".repeat(44)),
+    ] {
+        assert!(matches!(bad.parse::<Fingerprint>(), Err(SignError::MalformedFingerprint(_))), "{bad:?}");
+    }
+    assert!("SHA256:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA".parse::<Fingerprint>().is_ok());
+    // A signature by another key type is refused with the type named.
+    let keys = Keys::new();
+    let rsa = keys.path("rsa");
+    keys.keygen(&["-q", "-t", "rsa", "-b", "2048", "-N", "", "-C", "", "-f", rsa.to_str().unwrap()]);
+    let call = Call::compose(&call_content("probe", "a.example")).unwrap();
+    let sig = sign_call(&Signer::plain(&rsa), &call).unwrap();
+    assert!(matches!(signature_fingerprint(&sig), Err(SignError::UnsupportedKeyType(t)) if t == "ssh-rsa"));
+    assert!(matches!(signature_fingerprint("not a signature"), Err(SignError::MalformedSignature)));
+}
+
+#[test]
+fn every_namespace_of_the_system_is_reserved_and_nothing_else_is() {
+    let names: Vec<&str> = Namespace::ALL.iter().map(|n| n.as_str()).collect();
+    assert_eq!(
+        names,
+        [
+            "call-v1@procession",
+            "request-v1@procession",
+            "approval-v1@procession",
+            "clearance-v1@procession",
+            "connection-v1@procession",
+            "broker-v1@procession",
+            "hosts-v1@procession",
+        ]
+    );
+    for name in names {
+        assert!(is_reserved_namespace(name), "{name}");
+    }
+    // A future one, and odd spellings of the ending, are reserved too.
+    for reserved in ["anything-v9@procession", "x@procession", "@procession", "call-v1@PROCESSION", "a@Procession"] {
+        assert!(is_reserved_namespace(reserved), "{reserved}");
+    }
+    for free in [
+        "",
+        "file",
+        "git",
+        "ssh",
+        "procession",
+        "call-v1@procession.example",
+        "call-v1@procession ",
+        "@procession@x",
+        "x@processio",
+        "x@procession\n",
+        "example.com",
+        "call-v1@processioN-x",
+    ] {
+        assert!(!is_reserved_namespace(free), "{free:?}");
+    }
+}
+
+// ---------------------------------------------------------------------------
+// The agent's certificate as a bare line, and the numbers programs share
+// ---------------------------------------------------------------------------
+
+fn cert_line_and_sig(keys: &Keys, ca: &Path, principals: &str, options: &[&str]) -> (String, String) {
+    static COUNTER: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+    let n = COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let name = format!("line-agent-{n}");
+    let signer = keys.certified_with(&name, ca, principals, VALID, options);
+    let line = std::fs::read_to_string(keys.path(&format!("{name}-cert.pub"))).unwrap().trim_end().to_owned();
+    let call = Call::compose(&call_content("probe", "a.example")).unwrap();
+    (line, sign_call(&signer, &call).unwrap())
+}
+
+#[test]
+fn a_bare_certificate_line_is_judged_as_the_one_in_a_signature_is() {
+    let keys = Keys::new();
+    for (label, ca) in [("ed25519", keys.key("ca")), ("p256", keys.ecdsa_key("ca-p256"))] {
+        // Accepted: the same agent from the line and from a signature, with the validity.
+        let (line, sig) = cert_line_and_sig(&keys, &ca, "alice", &["extension:groups@procession=admins,diag"]);
+        let agent = agent_certificate(&line).unwrap();
+        assert_eq!(agent, signature_agent(&sig).unwrap(), "{label}");
+        assert_eq!(
+            (agent.person.as_str(), agent.groups.as_slice()),
+            ("alice", ["admins".to_owned(), "diag".to_owned()].as_slice())
+        );
+        assert_eq!((agent.valid_after, agent.valid_before), (1_577_836_800, 4_070_908_800));
+        assert!(agent_certificate(&format!("{line} a comment")).is_ok(), "a comment after the base64 is allowed");
+        // Refused with the same error as `signature_agent` gives.
+        for (principals, options) in [
+            ("alice,bob", vec![]),
+            ("*", vec![]),
+            ("alice", vec!["force-command=/bin/true"]),
+            ("alice", vec!["extension:other@x=1"]),
+            ("alice", vec!["extension:groups@procession=b,a"]),
+            ("alice", vec!["extension:groups@procession=a,a"]),
+            ("alice", vec!["extension:groups@procession=a,,b"]),
+        ] {
+            let (line, sig) = cert_line_and_sig(&keys, &ca, principals, &options);
+            let (from_line, from_sig) = (agent_certificate(&line).unwrap_err(), signature_agent(&sig).unwrap_err());
+            assert_eq!(from_line.to_string(), from_sig.to_string(), "{label} {principals} {options:?}");
+        }
+    }
+    // The certified key must be Ed25519, with an error that names the type; also for a P-256 certificate line.
+    let ca = keys.key("ca-for-p256-subject");
+    let subject = keys.ecdsa_key("p256-agent");
+    keys.certify(&subject, &ca, "agent", "alice");
+    let line = std::fs::read_to_string(format!("{}-cert.pub", subject.display())).unwrap();
+    assert!(
+        matches!(agent_certificate(line.trim_end()), Err(SignError::AgentKeyNotEd25519(t)) if t == "ecdsa-sha2-nistp256")
+    );
+    // An RSA issuer is refused with its type named; a host certificate is not an agent's.
+    let rsa = keys.path("rsa-ca");
+    keys.keygen(&["-q", "-t", "rsa", "-b", "2048", "-N", "", "-C", "", "-f", rsa.to_str().unwrap()]);
+    let (line, _) = cert_line_and_sig(&keys, &rsa, "alice", &[]);
+    assert!(matches!(agent_certificate(&line), Err(SignError::UnsupportedKeyType(t)) if t == "ssh-rsa"));
+    let host = keys.key("host-agent");
+    keys.keygen(&[
+        "-q",
+        "-s",
+        keys.path("ca").to_str().unwrap(),
+        "-I",
+        "h",
+        "-h",
+        "-n",
+        "alice",
+        "-V",
+        VALID,
+        pub_file(&host).to_str().unwrap(),
+    ]);
+    let host_line = std::fs::read_to_string(format!("{}-cert.pub", host.display())).unwrap();
+    assert!(matches!(agent_certificate(host_line.trim_end()), Err(SignError::NotUserCertificate)));
+}
+
+#[test]
+fn what_is_not_a_certificate_line_is_refused_as_such() {
+    let keys = Keys::new();
+    let ca = keys.key("ca");
+    let (line, _) = cert_line_and_sig(&keys, &ca, "alice", &[]);
+    let b64 = line.split(' ').nth(1).unwrap().to_owned();
+    let plain = std::fs::read_to_string(pub_file(&ca)).unwrap();
+    for bad in [
+        String::new(),
+        "ssh-ed25519-cert-v01@openssh.com".to_owned(),
+        format!("ssh-ed25519-cert-v01@openssh.com {}", b64.replacen('A', "!", 1)),
+        format!("ssh-ed25519-cert-v02@openssh.com {b64}"),
+        format!("ecdsa-sha2-nistp256-cert-v01@openssh.com {b64}"),
+        format!("{line}\n"),
+        format!("{line}\x07"),
+        format!("{line}\nssh-ed25519-cert-v01@openssh.com {b64}"),
+        plain.trim_end().to_owned(),
+    ] {
+        assert!(
+            matches!(
+                agent_certificate(&bad),
+                Err(SignError::MalformedCertificateLine | SignError::MalformedSignature | SignError::NotCertified)
+            ),
+            "{bad:?}"
+        );
+    }
+}
+
+#[test]
+fn the_shared_numbers_are_the_documents() {
+    use p_act::limits::*;
+    assert_eq!(
+        (MAX_CALL_BYTES, MAX_REQUEST_BYTES, MAX_CLEARANCE_BYTES, MAX_EXCHANGE_LINE_BYTES),
+        (16 * 1024, 32 * 1024, 1024, 96 * 1024)
+    );
+    assert_eq!((MAX_PARAMS, MAX_PARAM_BYTES, MAX_CLAIM_CHARS), (64, 512, 200));
+    assert_eq!((MAX_DEADLINE_AHEAD_SECONDS, CLOCK_TOLERANCE_SECONDS, CLEARANCE_VALID_SECONDS), (600, 60, 60));
+    assert_eq!(
+        (DEFAULT_DELEGATION_SECONDS, MAX_DELEGATION_SECONDS, MAX_BUNDLE_BYTES),
+        (8 * 3600, 24 * 3600, 64 * 1024)
+    );
 }
