@@ -16,9 +16,9 @@ pub struct Record {
 impl Record {
     /// A record of the given type.
     #[must_use]
-    pub fn new(kind: &str) -> Self {
+    pub fn new(record_type: &str) -> Self {
         let mut text = String::from("{\"type\":");
-        push_string(&mut text, kind);
+        push_string(&mut text, record_type);
         Self { text }
     }
 
