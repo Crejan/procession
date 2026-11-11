@@ -266,3 +266,173 @@ broker setting). The leak risks are in delivery: I propose `agents.delivered`
 the bundle written; a closed connection withdraws it), no bundle to a terminal
 by default, a redacting key type. Changes to `control-sock.md` are listed in
 section 5 of the review; not yet applied to that file.
+
+## Step 3: approvals with keys in files
+
+Merged `agent/p-act` (`p_act::exchange`, `verify_call_agent`,
+`verify_request`, `signature_agent`) and `integration`. Commit
+`a837d5c`. Nothing of step 4 or later.
+
+### What exists
+
+- **`service.sock`** (`service_conn.rs`, `serve.rs`): the shared exchange
+  with `p_act::exchange` under `ClearancePolicy::Refused`. 16 requests open
+  per connection (`too-many-open` then close), one thread per submit, the
+  end of a connection cancels what it had open, a request that does not parse
+  is answered `refused/malformed` for its hash and the connection stays, a
+  line not finished in 10 s ends the connection (`TimedRead`). Door: 0600 in
+  0700, or with `service_group` in `config.json` 0660 in 0710 (group set by
+  `chown`); the peer is recorded, not decided on.
+- **The checks of SPEC section 4 in their order** (`approvals.rs`): the
+  delegation (own, active, not withdrawn, not ended, and the call verified
+  with `verify_call_agent` under the delegation key that issued it), the
+  deadline by pledge's own clock, the identifier, the service's signature
+  under the configured host's key, every field showable, the limits, the mode
+  from the ceilings. Then sign, record, store, send. No record entry, no
+  approval (tested with a failing record). The key holder is unchanged: it
+  signs the bytes it is given.
+- **Modes**: `Ceilings::mode` from p-act. An automatic ceiling above the
+  highest a person can set (and above the ask ceiling) is cut down on
+  every load (`delegations.rs`), and refused when issuing; a request at the
+  top of any scale is asked about and signed with the confirmed key. Tested
+  with the file tampered and pledge restarted.
+- **Store of answers** (`answers.rs`, `answers.jsonl`): `used` identifiers and
+  `answer`s until the call's deadline, fsync per line, compacted at start.
+  Verdicts, approvals and declines are kept; `limit`, `muted`, `unavailable`,
+  `deadline-past`, `call-used`, expiry and cancellation are not. The same bytes
+  get the same answer (same approval bytes) with no dialog and no new record
+  entry, also after a restart; a different request under a used identifier is
+  `call-used`. The identifier is used when the approval is about to be signed
+  and when the person declines. Two connections with the same open request
+  share one dialog and both get the answer.
+- **Limits and muting**: 5 open requests per agent by default
+  (`max_waiting`), refused `limit`; 3 declines within 10 minutes mute the
+  agent for 10 minutes (`muted`, even harmless requests), the person is told;
+  one dialog at a time; a dialog waits its turn within the deadline and
+  closes at it (`expired`), or when cancelled.
+- **Delegations** (`agents.rs`, `openssh.rs`, `delegations.rs`): `pledge
+  agents start` makes an Ed25519 key in memory, builds the OpenSSH key block and
+  the certificate (person as only principal, no critical option, extension
+  `groups@procession`, `-O clear`), has the key holder sign it with the
+  delegation key, checks it with `verify_call_agent` on a probe call, and
+  replies with both. The delegation's identifier is the key's fingerprint.
+  `list`, `withdraw`. Validity 60 s to 24 h, default 8 h. The delegation is
+  pending until `agents.delivered`; a closed connection or `agents.failed`
+  withdraws it. The bundle (`bundle.rs`) is as reviewed: line 1, the key block,
+  the certificate line; the CLI writes it once from one buffer, refuses a
+  terminal unless `--to-terminal`, creates `--output` exclusively with mode
+  0600, and checks the configuration (services, https/http rule) before it
+  starts a delegation.
+- **Record**: `request` entries with the five outcomes (`approved`,
+  `declined`, `refused`, `expired`, `cancelled`), delegation, person, service,
+  call, deadline, shown fields, rating, mode, key role and fingerprint,
+  `request_hash`, peer; events `delegation-issued`, `delegation-withdrawn`
+  (`by` `person` or `delivery-failed`), `agent-muted`. `pledge history` prints them.
+- **Keys**: `pledge keys create confirmed|automatic|delegation` (never offered
+  on the SSH agent socket, tested; one of each).
+- **Stage 1 configuration**: `config.json` in the state directory: `person`,
+  `hosts` (name and public key line of the host that certifies services),
+  `services` and `tls_root` (for the bundle), `deadline_seconds`, `max_waiting`,
+  `service_group`.
+
+### Verified
+
+- `cargo test -p p-ledge --offline`: 165 unit, 3 + 6 integration tests; four runs
+  in a row clean; `clippy --all-targets -D warnings`, `fmt --check`, `doc`
+  clean. Mutations of the new code (deadline tolerance extended, verdicts not
+  kept, used identifier not checked, pending delegation signing, limit off,
+  request signature unchecked, call signature unchecked, ceiling not clamped)
+  each failed a test (one, the call signature, needed a new test first).
+- **With a service faked in the tests** (a throwaway host key certifying a
+  throwaway service key, as p-act's tests do; calls signed with the key and
+  certificate from our own `agents start`, by the real `ssh-keygen`; approvals
+  verified by `ssh-keygen -Y verify` through `verify_approval`): approved
+  automatic and confirmed, declined, refused (ceiling, service-mismatch,
+  not-showable, malformed, call-used, deadline past/too far, limit, muted,
+  unavailable, unknown and withdrawn and ended delegation, a foreign
+  delegation, a loose key, a call signature carried to other bytes), expired
+  with the dialog open, cancelled, a connection that ends, the same bytes
+  again (stored), a different request under a used identifier, a restart
+  between submit and repeat, the 17th open request, no record no approval, the
+  certificate against `ssh-keygen -L` (and a reference made with `-O
+  extension:groups@procession=`), the key block against `ssh-keygen -y`.
+- **Against the real binary** (`tests/real_approvals.rs`): `pledge keys create`,
+  `agents start --output`, the bundle read back (line 1, key block, cert line,
+  mode 0600), a call signed with it by `ssh-keygen`, requests on `service.sock`
+  from a faked service, answers verified, withdraw, `history --verify`, a
+  restart of `pledge serve` and the same approval again, `agents start`
+  refused without services and the withdrawal after a bundle that could not be
+  written.
+
+### Not verified
+
+- The real `pact` and the real `probe serve`: neither exists in this
+  worktree. Whether `pact` reads this bundle (key block without a `.pub`
+  file, certificate line without comment) is only shown by `ssh-keygen`
+  signing with it.
+- Keys of type ECDSA P-256 for the delegation or approval keys: the holder
+  signs P-256 and `agents start` would take it, but no test makes one.
+- `service_group` with a group other than the user's own, and a peer that is
+  not this user.
+- The login test with real `ssh` and `sshd` is still skipped here (no port).
+- Load: every request costs two to three `ssh-keygen` runs.
+- The certificate-validity tolerance of the clock decision: `ssh-keygen`
+  decides on the agent's certificate; pledge backdates the ones it makes by
+  60 s. The 60 s is otherwise only in "more than 10 minutes ahead".
+
+### Where I had to choose (all of them)
+
+1. `config.json` and its members (above). The person's name is the
+   configuration's; a call whose certificate names another person is
+   `unknown-delegation`.
+2. The presence check in the development form is a second prompt after the
+   request's dialog.
+3. A shown field is at most 200 characters, `action`, `parameters` and
+   `claim` alike; a `parameter` of 201 to 512 (which the formats allow) is
+   `not-showable`. The 2000 of a command is not applied (U6 is stage 4).
+4. A control character or bidirectional mark never reaches that check:
+   `p_act` refuses it at parsing, so it is `malformed`.
+5. How long verdicts are kept: to the call's deadline, but at most 11
+   minutes from now (a deadline far ahead would keep an entry for years); for
+   `malformed` there is no deadline, so 11 minutes.
+6. `deadline-past` and `call-used` are not in the document's lists of kept or
+   not kept answers; I do not keep them. `expired` and `cancelled` are not kept.
+7. `unknown-delegation` covers: a certificate that does not keep to 3.1, a
+   fingerprint pledge did not issue, a pending delegation, a person that is
+   not this pledge's, an issuing key pledge no longer has, a signature that
+   does not verify, ceilings in words that are not the scale.
+8. The identifier is marked used before the approval is signed; if pledge
+   dies before it records and stores, the same bytes are decided again (a
+   signature nobody got), a different request is `call-used`.
+9. A repeated answer from the store is not recorded again (as `record.md`
+   section 8 decided).
+10. A `cancel` on one connection while another has submitted the same bytes
+    removes only the first; the dialog closes when the last has gone.
+11. A "no" at the presence check counts as a decline for muting and uses the
+    identifier.
+12. Waiting requests count while their dialog is queued or open, automatic
+    ones only for the instant they take.
+13. The record's `request` entry carries `peer` (uid, pid) of the connection.
+14. The shared exchange's 10 s line timeout is applied by `TimedRead`
+    (the clock starts when a read leaves an unfinished line).
+15. The bundle's line-1 members: `v`, `services` (`host`, `name`, `url`),
+    `deadline_seconds`, `tls_root` (named as `pact.md` section 2 names them;
+    its option B text was not final in my copy); `min_wait_seconds` is never
+    written.
+16. An agent's label (the certificate's key id) is `pledge agent` unless given
+    (`--label`), shown by nobody yet.
+17. Verification uses `p_act`'s `ssh-keygen` runs in the reader process.
+18. A delegation can be activated only once, from pending.
+
+### Questions for the designer
+
+1. Should `deadline-past` and `call-used` be answered again from the store?
+   (They are verdicts on this request by the clock and by another request.)
+2. Is a call with another person's certificate `unknown-delegation`, or does
+   it deserve its own reason?
+3. Fields of 201 to 512 characters that the formats allow in `params` are
+   refused here as `not-showable`; should the formats' limit follow the dialog's
+   200, or the dialog's follow the formats?
+4. Is a delegation that was started but whose bundle was not delivered
+   rightly `withdrawn` in the record (`by` `delivery-failed`), or should it
+   have its own event?
