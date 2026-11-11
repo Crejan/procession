@@ -192,6 +192,12 @@ own, on its transports: `signin`, `blocked`, `superseded`, `busy`, `timeout`
   may be. The broker sends `expired` (`by` `broker`) to the service at the
   deadline if it has nothing else to say. An approval that reaches the broker later is dropped, and the
   answer is `expired`.
+- **A `submit` whose request does not parse** is answered `refused` with
+  pledge's reason `malformed` (or the broker's `bad-request`) for the hash of
+  the bytes received, and the connection stays open. A `submit` whose
+  `request` is not base64 has no hash and is an `error`.
+- **An `answer` whose `result` the receiver does not know** is no answer: a
+  service acts on nothing and goes on waiting until the deadline.
 - **A request is answered once** by each party that answers. The broker forgets
   a request after its answer (apart from the wait for an `ack`, section 4) or
   its `cancel`; pledge keeps its answer under the rule of 3.7.
