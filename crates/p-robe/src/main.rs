@@ -2,48 +2,18 @@
 //!
 //! `probe <noun> <verb> [args]` runs one verb (the dispatcher, [`dispatch`]);
 //! `probe catalog` and `probe <noun>` print the table. `probe serve`, the
-//! service an agent talks to, is not built. What both parts do is in
-//! `SPEC.md`.
-
-mod answer;
-mod audit;
-mod clock;
-mod config;
-mod dispatch;
-mod json;
-mod kit;
-mod lock;
-#[allow(dead_code, reason = "the HTTP transport that calls the MCP layer is not built")]
-mod mcp;
-#[allow(dead_code, reason = "the HTTP transport that calls the MCP layer is not built")]
-mod outcome;
-#[allow(dead_code, reason = "the HTTP transport that calls the MCP layer is not built")]
-mod pledge;
-#[allow(dead_code, reason = "no production row has parameter rules yet, and Mode::Name is the service's")]
-mod rate;
-mod rules;
-#[allow(dead_code, reason = "the HTTP transport that calls the MCP layer is not built")]
-mod runner;
-mod serve;
-#[allow(dead_code, reason = "the HTTP transport that calls the MCP layer is not built")]
-mod service;
-#[cfg(test)]
-mod service_tests;
-mod setup;
-#[allow(dead_code, reason = "the HTTP transport that calls the MCP layer is not built")]
-mod store;
-mod table;
-#[cfg(test)]
-mod testdir;
-#[cfg(feature = "test-verbs")]
-mod testverbs;
+//! service an agent talks to, builds its service and stops where the HTTP
+//! transport would start. The work is in the library.
 
 use std::ffi::OsString;
 use std::io::Write;
 use std::process::ExitCode;
 
-use audit::Audit;
-use dispatch::{Caller, Dispatcher, RC_REFUSED};
+use p_robe::audit::{self, Audit};
+use p_robe::dispatch::{Caller, Dispatcher, RC_REFUSED};
+#[cfg(feature = "test-verbs")]
+use p_robe::rate;
+use p_robe::{json, rules, serve, table};
 
 const USAGE: &str =
     "usage: sudo -n probe <noun> <verb> [args]   run one verb (arguments are words or key=value, never -flags)

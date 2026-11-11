@@ -3,7 +3,7 @@
 One test, `crates/p-robe/tests/stage1.rs` (`test-verbs` feature), run in the
 `check` checkout: `cargo test -p p-robe --features test-verbs --test stage1`.
 Needs `ssh-keygen`, a built `target/debug/pledge`, and a directory where Unix
-sockets bind (`/tmp/claude/`). Three runs in a row passed (4.1 to 4.8 s).
+sockets bind (`/tmp/claude/`). Three runs in a row passed (4.5 s each) after the two cases were added.
 
 ## What is real, what is not
 
@@ -25,10 +25,8 @@ runs in the test process as a caller that is root, `InProcess`; the
 `--within` rule is the dispatcher's own code), and the person (answers written
 to pledge's standard input).
 
-The crate has no library target, so the test includes the sources by
-`#[path]` at its own crate root. Their unit tests come along and run in the same
-binary (87 extra tests); a `lib.rs` would remove that, and is a change to my
-crate for the orchestrator to decide.
+The crate now has a library (`src/lib.rs`, package `p_robe`); `main.rs` is thin
+and `tests/stage1.rs` uses the library, so the unit tests run once.
 
 ## Cases, and what the agent was told against what the record says
 
@@ -44,11 +42,29 @@ crate for the orchestrator to decide.
 | 7 | second delegation withdrawn with `agents withdraw`, then a call | refused / not-allowed (`pledge:delegation-withdrawn`) | refused, `delegation-withdrawn`; event `delegation-withdrawn` by `person` |
 | 8 | a delegation issued by `agents.start` on the control socket and never delivered, then a call | refused / not-allowed (`pledge:unknown-delegation`) | refused, `unknown-delegation`; event `delegation-withdrawn` by `delivery-failed` when the connection ends |
 | 9 | deadline 3 s, dialog open, nobody answers | expired (`expired-by-pledge`) | expired |
+| 10 | the agent goes away (the model's cancel) while the dialog is open | nothing: no answer is written to a client that left | **cancelled**; the verb did not run |
+| 11 | `pledge serve` killed and started again while a request is open | unavailable (`no-route`), not submitted again | **no entry** for the open request; after the restart the same bytes submitted by hand are asked about again and approved; the same call through the service is `call-used` (our store); a new call is done |
 
 `pledge history --verify` succeeded (the chain verifies), the record
 holds no `PRIVATE KEY`, and the nine request entries are in the order above.
 `pact` dropped none of this service's tools; its catalogue has `test_echo`,
 `test_peak`, `test_read` and `sys_kit`.
+
+## The two cases added afterwards, expectations first
+
+Case 10, expected before running (`service-sock.md` section 4, `approval-connections.md`
+2 and 3.4): the service's connection closes, which cancels; pledge closes the
+dialog and records `cancelled`; no approval; the verb does not run. **Held:**
+the record's last request entry became `cancelled` within the poll, the
+dispatcher's log shows no new `peak`.
+
+Case 11, expected before running (`service-sock.md` sections 4 and 6): the service sees the
+connection end, tells the agent `unavailable`, and does not submit again; a
+killed pledge cannot write, so the open request has no entry; after the restart
+pledge holds nothing for it (only `approved` and `declined` are stored), so the
+same bytes submitted by hand are asked about again; the service's store refuses
+the same call. **All held**, including that the chain still verifies after the
+kill and that the delegation of the first agent still signed after the restart.
 
 ## Where the programs did not fit on first contact
 

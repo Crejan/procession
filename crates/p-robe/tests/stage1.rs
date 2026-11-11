@@ -8,59 +8,11 @@
 //! sudo. Everything is real except the HTTP between `pact` and `probe`, sudo,
 //! and the person.
 //!
-//! The crate has no library target, so the sources the service is made of are
-//! included here by path, at this crate root, under the names `main.rs` gives them.
-//! (Their own unit tests come with them and run in this binary too.)
-//!
 //! Needs `ssh-keygen`, a built `pledge` (`cargo build --workspace --features p-robe/test-verbs`)
 //! and a directory where Unix sockets can be bound (`/tmp/claude/` in the sandbox this was written in).
-#![allow(dead_code, unused_imports, clippy::all)]
-
-#[path = "../src/answer.rs"]
-mod answer;
-#[path = "../src/audit.rs"]
-mod audit;
-#[path = "../src/clock.rs"]
-mod clock;
-#[path = "../src/config.rs"]
-mod config;
-#[path = "../src/dispatch.rs"]
-mod dispatch;
-#[path = "../src/json.rs"]
-mod json;
-#[path = "../src/kit.rs"]
-mod kit;
-#[path = "../src/lock.rs"]
-mod lock;
-#[path = "../src/mcp.rs"]
-mod mcp;
-#[path = "../src/outcome.rs"]
-mod outcome;
-#[path = "../src/pledge.rs"]
-mod pledge;
-#[path = "../src/rate.rs"]
-mod rate;
-#[path = "../src/rules.rs"]
-mod rules;
-#[path = "../src/runner.rs"]
-mod runner;
-#[path = "../src/serve.rs"]
-mod serve;
-#[path = "../src/service.rs"]
-mod service;
-#[path = "../src/setup.rs"]
-mod setup;
-#[path = "../src/store.rs"]
-mod store;
-#[path = "../src/table.rs"]
-mod table;
-#[path = "../src/testdir.rs"]
-mod testdir;
-#[path = "../src/testverbs.rs"]
-mod testverbs;
 
 use std::fs;
-use std::io::{BufRead, BufReader, Read, Write};
+use std::io::{BufRead, BufReader, Write};
 use std::os::unix::fs::PermissionsExt;
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
@@ -81,13 +33,14 @@ use p_act::pact::transport::{CancelToken, Transport, TransportError};
 use p_act::pact::{Service as PactService, Settings};
 use p_act::rating::Rating;
 use p_act::sign::{PublicKey, Signer, sign_request, signature_from_base64};
-use p_act::{Call, Document, Request, Timestamp};
+use p_act::{Call, Request, Timestamp};
 use serde_json::{Value, json};
 
-use mcp::{HttpRequest, Mcp};
-use runner::InProcess;
-use service::{Service, Settings as ServiceSettings};
-use store::UsedStore;
+use p_robe::mcp::{HttpRequest, Mcp};
+use p_robe::runner::InProcess;
+use p_robe::service::{Service, Settings as ServiceSettings};
+use p_robe::store::UsedStore;
+use p_robe::{pledge, rate, setup};
 
 const HOST: &str = "a.example";
 
@@ -110,7 +63,11 @@ fn keygen(args: &[&str]) {
 fn pledge_binary() -> PathBuf {
     let exe = std::env::current_exe().unwrap();
     let path = exe.parent().and_then(Path::parent).unwrap().join("pledge");
-    assert!(path.exists(), "{} is not built: cargo build --workspace --offline --features p-robe/test-verbs", path.display());
+    assert!(
+        path.exists(),
+        "{} is not built: cargo build --workspace --offline --features p-robe/test-verbs",
+        path.display()
+    );
     path
 }
 
@@ -136,11 +93,16 @@ impl Pledge {
         });
         fs::write(state.join("config.json"), config.to_string()).unwrap();
         let binary = pledge_binary();
-        let mut child = Command::new(&binary)
+        let (child, stdin, lines) = Pledge::spawn(&binary, dir, &state, &sockets);
+        Pledge { child, stdin, lines, state, sockets, binary }
+    }
+
+    fn spawn(binary: &Path, dir: &Path, state: &Path, sockets: &Path) -> (Child, ChildStdin, Receiver<String>) {
+        let mut child = Command::new(binary)
             .args(["serve", "--state-dir"])
-            .arg(&state)
+            .arg(state)
             .arg("--socket-dir")
-            .arg(&sockets)
+            .arg(sockets)
             .arg("--known-hosts")
             .arg(dir.join("known_hosts"))
             .stdin(Stdio::piped())
@@ -152,15 +114,46 @@ impl Pledge {
         let (tx, lines) = mpsc::channel();
         let (out, err) = (child.stdout.take().unwrap(), child.stderr.take().unwrap());
         let tx2 = tx.clone();
-        std::thread::spawn(move || BufReader::new(out).lines().map_while(Result::ok).for_each(|l| drop(tx.send(format!("out: {l}")))));
-        std::thread::spawn(move || BufReader::new(err).lines().map_while(Result::ok).for_each(|l| drop(tx2.send(format!("err: {l}")))));
-        let pledge = Pledge { child, stdin, lines, state, sockets, binary };
+        std::thread::spawn(move || {
+            BufReader::new(out).lines().map_while(Result::ok).for_each(|l| drop(tx.send(format!("out: {l}"))))
+        });
+        std::thread::spawn(move || {
+            BufReader::new(err).lines().map_while(Result::ok).for_each(|l| drop(tx2.send(format!("err: {l}"))))
+        });
         let started = Instant::now();
-        while UnixStream::connect(pledge.sockets.join("agent.sock")).is_err() {
+        while UnixStream::connect(sockets.join("service.sock")).is_err() {
             assert!(started.elapsed() < Duration::from_secs(10), "pledge serve did not start");
             std::thread::sleep(Duration::from_millis(50));
         }
-        pledge
+        (child, stdin, lines)
+    }
+
+    /// Kills `pledge serve` (no chance to write anything) and starts it again on the same directories.
+    fn restart(&mut self, dir: &Path) {
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+        let (child, stdin, lines) = Pledge::spawn(&self.binary, dir, &self.state, &self.sockets);
+        (self.child, self.stdin, self.lines) = (child, stdin, lines);
+    }
+
+    /// Waits for a line of pledge's output that starts with `prefix` (a dialog is on screen).
+    fn wait_for(&self, prefix: &str) -> String {
+        let deadline = Instant::now() + Duration::from_secs(20);
+        loop {
+            match self.lines.recv_timeout(deadline.saturating_duration_since(Instant::now())) {
+                Ok(line)
+                    if line
+                        .trim_start_matches("out: ")
+                        .trim_start_matches("err: ")
+                        .trim_start()
+                        .starts_with(prefix) =>
+                {
+                    return line;
+                }
+                Ok(_) => {}
+                Err(_) => panic!("pledge serve did not print a line starting {prefix:?}"),
+            }
+        }
     }
 
     /// The answers the dialogs will read, in order.
@@ -169,7 +162,14 @@ impl Pledge {
     }
 
     fn run(&self, args: &[&str]) -> std::process::Output {
-        Command::new(&self.binary).args(args).arg("--state-dir").arg(&self.state).arg("--socket-dir").arg(&self.sockets).output().unwrap()
+        Command::new(&self.binary)
+            .args(args)
+            .arg("--state-dir")
+            .arg(&self.state)
+            .arg("--socket-dir")
+            .arg(&self.sockets)
+            .output()
+            .unwrap()
     }
 
     fn ok(&self, args: &[&str]) -> String {
@@ -179,7 +179,10 @@ impl Pledge {
     }
 
     fn history(&self) -> Vec<Value> {
-        self.ok(&["history", "--format", "json", "--verify"]).lines().map(|l| serde_json::from_str(l).unwrap()).collect()
+        self.ok(&["history", "--format", "json", "--verify"])
+            .lines()
+            .map(|l| serde_json::from_str(l).unwrap())
+            .collect()
     }
 
     /// `pledge agents start` into a file: the bundle's bytes and the delegation's identifier.
@@ -244,8 +247,12 @@ impl Transport for InProcessMcp {
         let response = Mcp::new(&self.service).handle(&http, &gone);
         done.store(true, Ordering::SeqCst);
         let _ = watcher.join();
-        let content_type =
-            response.headers.iter().find(|(k, _)| k.eq_ignore_ascii_case("content-type")).map(|(_, v)| v.clone()).unwrap_or_default();
+        let content_type = response
+            .headers
+            .iter()
+            .find(|(k, _)| k.eq_ignore_ascii_case("content-type"))
+            .map(|(_, v)| v.clone())
+            .unwrap_or_default();
         match response.status {
             200 if content_type.starts_with("text/event-stream") => {
                 let text = String::from_utf8_lossy(&response.body).into_owned();
@@ -290,7 +297,12 @@ struct Told {
 }
 
 fn told(result: &Value) -> Told {
-    let texts: Vec<&str> = result["content"].as_array().unwrap_or_else(|| panic!("no content: {result}")).iter().filter_map(|c| c["text"].as_str()).collect();
+    let texts: Vec<&str> = result["content"]
+        .as_array()
+        .unwrap_or_else(|| panic!("no content: {result}"))
+        .iter()
+        .filter_map(|c| c["text"].as_str())
+        .collect();
     let line: Value = serde_json::from_str(texts[0]).unwrap_or_else(|_| panic!("not an outcome line: {result}"));
     Told {
         outcome: line["outcome"].as_str().unwrap().to_owned(),
@@ -302,6 +314,27 @@ fn told(result: &Value) -> Told {
 
 fn is(told: &Told, outcome: &str, reason: Option<&str>) -> bool {
     told.outcome == outcome && told.reason.as_deref() == reason
+}
+
+/// The request the service would have signed for a posted `tools/call`, rebuilt from its `_meta`.
+fn request_of(sent: &Value, rating: Rating) -> Request {
+    let meta = &sent["params"]["_meta"];
+    let call_bytes = STANDARD.decode(meta["procession/call"].as_str().unwrap()).unwrap();
+    let call_sig = signature_from_base64(meta["procession/call_sig"].as_str().unwrap()).unwrap();
+    Request::compose(&Call::parse(call_bytes).unwrap(), &call_sig, rating).unwrap()
+}
+
+/// Submits `request` on `service.sock` as the service would, and returns pledge's answer.
+fn submit(pledge: &Pledge, signer: &Signer, request: &Request) -> Answered {
+    let mut stream = UnixStream::connect(pledge.sockets.join("service.sock")).unwrap();
+    stream.set_read_timeout(Some(Duration::from_secs(20))).unwrap();
+    let sig = sign_request(signer, request).unwrap();
+    write_message(&mut stream, &Message::Submit(Submit::new(request.clone(), &sig).unwrap()), ClearancePolicy::Refused)
+        .unwrap();
+    match LineReader::new(&stream).read_message(ClearancePolicy::Refused).unwrap().unwrap() {
+        Message::Answer(Answer { outcome, .. }) => outcome,
+        other => panic!("{other:?}"),
+    }
 }
 
 // ---- the run ---------------------------------------------------------------------------------
@@ -335,7 +368,8 @@ fn the_real_parts_against_each_other() {
 
     // The service: its key and certificate from setup, pledge's socket, the identifiers on disk,
     // the dispatcher in this process in place of sudo (a caller that is root: the sudo path does not run).
-    let hook: Arc<Mutex<Option<Box<dyn Fn() + Send + Sync>>>> = Arc::new(Mutex::new(None));
+    type Hook = Arc<Mutex<Option<Box<dyn Fn() + Send + Sync>>>>;
+    let hook: Hook = Arc::new(Mutex::new(None));
     let runner = {
         let hook = hook.clone();
         InProcess {
@@ -354,14 +388,21 @@ fn the_real_parts_against_each_other() {
     let log = Arc::new(Mutex::new(Vec::<String>::new()));
     let sink = log.clone();
     let service = Arc::new(Service::new(
-        ServiceSettings { host: HOST.into(), person: "jan".into(), confirmed: key("confirmed"), automatic: key("automatic"), max_waiting: 16 },
+        ServiceSettings {
+            host: HOST.into(),
+            person: "jan".into(),
+            confirmed: key("confirmed"),
+            automatic: key("automatic"),
+            max_waiting: 16,
+        },
         Signer::certified(dir.join("probe/service-key")).unwrap(),
         UsedStore::new(dir.join("used")),
         pledge::PledgeLink { socket: pledge.sockets.join("service.sock"), uid: unsafe { libc::geteuid() } },
         Box::new(runner),
         Box::new(move |line| sink.lock().unwrap().push(line.to_string())),
     ));
-    let transport = Arc::new(InProcessMcp { service, posted: Mutex::new(Vec::new()), hold_calls: AtomicBool::new(false) });
+    let transport =
+        Arc::new(InProcessMcp { service, posted: Mutex::new(Vec::new()), hold_calls: AtomicBool::new(false) });
 
     let (bundle, _first_id) = pledge.start_agent(&dir, "bundle1");
     let (agent, dropped) = pact(&bundle, &transport, Settings::new(120, None));
@@ -417,9 +458,21 @@ fn the_real_parts_against_each_other() {
     // 5. The same call sent twice: the service's identifier store refuses the second, pledge is not asked.
     let first_call = transport.posted.lock().unwrap().first().unwrap().clone();
     let before = pledge.history().iter().filter(|e| e["type"] == "request").count();
-    let again = told(&transport.post(&PactService { host: HOST.into(), name: "probe".into(), url: String::new() }, &first_call, &CancelToken::default()).unwrap()["result"]);
+    let again = told(
+        &transport
+            .post(
+                &PactService { host: HOST.into(), name: "probe".into(), url: String::new() },
+                &first_call,
+                &CancelToken::default(),
+            )
+            .unwrap()["result"],
+    );
     assert!(is(&again, "refused", Some("invalid")), "{again:?}");
-    assert_eq!(pledge.history().iter().filter(|e| e["type"] == "request").count(), before, "pledge was not asked again");
+    assert_eq!(
+        pledge.history().iter().filter(|e| e["type"] == "request").count(),
+        before,
+        "pledge was not asked again"
+    );
 
     // 6. The same request bytes submitted twice to pledge: its answer store answers the second.
     transport.hold_calls.store(true, Ordering::SeqCst);
@@ -436,7 +489,12 @@ fn the_real_parts_against_each_other() {
         let mut stream = UnixStream::connect(pledge.sockets.join("service.sock")).unwrap();
         stream.set_read_timeout(Some(Duration::from_secs(20))).unwrap();
         let sig = sign_request(&service_signer, &request).unwrap();
-        write_message(&mut stream, &Message::Submit(Submit::new(request.clone(), &sig).unwrap()), ClearancePolicy::Refused).unwrap();
+        write_message(
+            &mut stream,
+            &Message::Submit(Submit::new(request.clone(), &sig).unwrap()),
+            ClearancePolicy::Refused,
+        )
+        .unwrap();
         match LineReader::new(&stream).read_message(ClearancePolicy::Refused).unwrap().unwrap() {
             Message::Answer(Answer { outcome: Answered::Approved(a), .. }) => a.approval().to_owned(),
             other => panic!("{other:?}"),
@@ -477,8 +535,82 @@ fn the_real_parts_against_each_other() {
     let started = Instant::now();
     let expired = call(&short, "test_peak", &[]);
     assert!(is(&expired, "expired", None), "{expired:?}");
-    assert!(started.elapsed() >= Duration::from_secs(2) && started.elapsed() < Duration::from_secs(8), "{:?}", started.elapsed());
+    assert!(
+        started.elapsed() >= Duration::from_secs(2) && started.elapsed() < Duration::from_secs(8),
+        "{:?}",
+        started.elapsed()
+    );
     expected.push(("expired", None));
+
+    let peak_rating =
+        Rating::new(p_act::rating::Exposure::Open, p_act::rating::Damage::None, p_act::rating::Disruption::Outage);
+    let peak_starts =
+        || fs::read_to_string(dir.join("dispatcher.log")).unwrap_or_default().matches("verb=peak").count();
+    let hold = |on: bool| transport.hold_calls.store(on, Ordering::SeqCst);
+    let (open_service, requests) =
+        (PactService { host: HOST.into(), name: "probe".into(), url: String::new() }, |p: &Pledge| {
+            p.history().iter().filter(|e| e["type"] == "request").count()
+        });
+
+    // 10. The agent goes away while the dialog is open. EXPECTED (service-sock.md section 4, connections
+    //     3.4 and section 2): the service's connection closes, which cancels; pledge closes the dialog and
+    //     records `cancelled`; no approval, the verb does not run.
+    hold(true);
+    let _ = call(&agent, "test_peak", &[]);
+    hold(false);
+    let signed = transport.posted.lock().unwrap().last().unwrap().clone();
+    let (cancel, starts) = (CancelToken::default(), peak_starts());
+    let worker = {
+        let (transport, cancel, signed, service) =
+            (transport.clone(), cancel.clone(), signed.clone(), open_service.clone());
+        std::thread::spawn(move || transport.post(&service, &signed, &cancel))
+    };
+    pledge.wait_for("action:");
+    cancel.cancel();
+    let gone = worker.join().unwrap();
+    assert!(gone.is_err(), "no answer is written to a client that went away: {gone:?}");
+    let waited = Instant::now();
+    while pledge.history().last().map(|e| e["result"].clone()) != Some(json!("cancelled")) {
+        assert!(waited.elapsed() < Duration::from_secs(5), "pledge did not record the cancel");
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    assert_eq!(peak_starts(), starts, "the verb did not run");
+    expected.push(("cancelled", None));
+
+    // 11. `pledge serve` is killed and started again with a request open. EXPECTED: the service's
+    //     connection ends, so it tells the agent `unavailable` and does not submit again; pledge,
+    //     killed, wrote nothing for the open request (no entry); after the restart pledge knows
+    //     the request neither as used nor as answered (service-sock.md section 6: only approved and declined
+    //     are stored), so the same bytes submitted by hand are asked about again; the same call
+    //     through the service is refused by its own store (`call-used`); a new call works.
+    hold(true);
+    let _ = call(&agent, "test_peak", &[]);
+    hold(false);
+    let open_call = transport.posted.lock().unwrap().last().unwrap().clone();
+    let worker = {
+        let (transport, open_call, service) = (transport.clone(), open_call.clone(), open_service.clone());
+        std::thread::spawn(move || transport.post(&service, &open_call, &CancelToken::default()))
+    };
+    pledge.wait_for("action:");
+    let entries = requests(&pledge);
+    pledge.restart(&dir);
+    let after_kill = told(&worker.join().unwrap().expect("the service answered")["result"]);
+    assert!(is(&after_kill, "unavailable", None), "{after_kill:?}");
+    assert_eq!(requests(&pledge), entries, "the killed pledge wrote nothing for the open request");
+    let used = told(&transport.post(&open_service, &open_call, &CancelToken::default()).unwrap()["result"]);
+    assert!(is(&used, "refused", Some("invalid")), "the service's store: {used:?}");
+    pledge.answer("y\ny\n");
+    let again = submit(
+        &pledge,
+        &Signer::certified(dir.join("probe/service-key")).unwrap(),
+        &request_of(&open_call, peak_rating),
+    );
+    assert!(matches!(again, Answered::Approved(_)), "the restarted pledge asked again: {again:?}");
+    expected.push(("approved", None));
+    let fresh = call(&agent, "test_echo", &["after=restart"]);
+    assert!(is(&fresh, "done", None), "{fresh:?}");
+    expected.push(("approved", None));
+    assert!(log.lock().unwrap().iter().any(|l| l.contains("no-route:")), "{:?}", log.lock().unwrap());
 
     // The record, against what the agent was told. `--verify` checks the chain (it fails the command if broken).
     std::thread::sleep(Duration::from_millis(300));
@@ -488,7 +620,8 @@ fn the_real_parts_against_each_other() {
         .filter(|e| e["type"] == "request")
         .map(|e| (e["result"].as_str().unwrap().to_owned(), e["reason"].as_str().map(str::to_owned)))
         .collect();
-    let expected: Vec<(String, Option<String>)> = expected.iter().map(|(r, why)| ((*r).to_owned(), why.map(str::to_owned))).collect();
+    let expected: Vec<(String, Option<String>)> =
+        expected.iter().map(|(r, why)| ((*r).to_owned(), why.map(str::to_owned))).collect();
     assert_eq!(results, expected, "the record, request by request");
     let events: Vec<(String, String)> = history
         .iter()
