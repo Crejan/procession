@@ -812,6 +812,20 @@ mod with_test_verbs {
     }
 
     #[test]
+    fn a_call_that_cannot_be_shown_is_refused_by_the_service_before_anybody_is_asked() {
+        let rig = Rig::new(Plan::Decline);
+        let long = "x".repeat(450);
+        let params: Vec<&str> = std::iter::repeat_n(long.as_str(), 5).collect();
+        let sent = rig.jan("test echo", &params);
+        assert_eq!(word(&rig.outcome(&sent)), "refused/invalid");
+        assert!(rig.log_has("exact='not-showable:"), "{:?}", rig.log);
+        assert_eq!(rig.pledge.count("submit"), 0, "nobody was asked");
+        // 2000 characters exactly are shown.
+        let ok: Vec<&str> = std::iter::repeat_n(&long[..400], 5).collect();
+        assert_eq!(word(&rig.outcome(&rig.jan("test echo", &ok))), "declined");
+    }
+
+    #[test]
     fn the_request_carries_the_rating_the_service_signed_and_the_dispatcher_is_held_to_it() {
         let rig = Rig::new(Plan::Silent);
         rig.pledge.set(confirmed(&rig));

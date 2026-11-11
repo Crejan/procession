@@ -232,6 +232,9 @@ impl Service {
         if tool.name != call.action().replace(' ', "_") || tool.params != call.params() || tool.claim != call.claim() {
             return Err(early(invalid("mismatch")));
         }
+        // Whether it can be shown (every field whole, all parameters together at most 2000 characters) is
+        // decided here, before anybody is asked; pledge checks again and is the authority.
+        call.showable().map_err(|e| early(invalid(format!("not-showable:{e}"))))?;
         // 2. Rate the call, and sign a request with the service's own key.
         let rating = rate::rate(verb, call.params(), Mode::Name)
             .map_err(|e| early(invalid(format!("params-not-accepted:{}", e.0))))?

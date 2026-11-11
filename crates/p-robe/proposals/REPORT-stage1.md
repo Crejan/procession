@@ -52,9 +52,9 @@ and `tests/stage1.rs` uses the library, so the unit tests run once.
 | 7 | second delegation withdrawn with `agents withdraw`, then a call | refused / not-allowed (`pledge:delegation-withdrawn`) | refused, `delegation-withdrawn`; event `delegation-withdrawn` by `person` |
 | 8 | a delegation issued by `agents.start` on the control socket and never delivered, then a call | refused / not-allowed (`pledge:unknown-delegation`) | refused, `unknown-delegation` (a pending delegation is not one this pledge answers for); event `delegation-not-delivered` when the connection ends (never `delegation-issued`, never `delegation-withdrawn`: the designer's decision after the first run) |
 | 9 | deadline 3 s, dialog open, nobody answers | expired (`expired-by-pledge`) | expired |
-| 12 | five parameters of 450 bytes: each within 512, together over 2000 characters | refused / invalid (`pledge:not-showable`) | refused, `not-showable` |
+| 12 | five parameters of 450 bytes: each within 512, together over 2000 characters | refused / invalid, by the service itself before anybody is asked (`Call::showable`, exact `not-showable:...`); no entry in pledge's record. The same bytes submitted to pledge by hand are refused `not-showable` by pledge, the authority | refused, `not-showable` (the hand-made submission only) |
 | 10 | the agent goes away (the model's cancel) while the dialog is open | nothing: no answer is written to a client that left | **cancelled**; the verb did not run |
-| 11 | `pledge serve` killed and started again while a request is open | unavailable (`no-route`), not submitted again | **no entry** for the open request; after the restart the same bytes submitted by hand are asked about again and approved; the same call through the service is `call-used` (our store); a new call is done |
+| 11 | `pledge serve` killed and started again while a request is open | unavailable (`no-route`), not submitted again | `received` before the dialog; the killed pledge wrote nothing more; the restarted one wrote **`lost`** for it; after the restart the same bytes submitted by hand are asked about again and approved; the same call through the service is `call-used` (our store); a new call is done |
 
 `pledge history --verify` succeeded (the chain verifies), the record
 holds no `PRIVATE KEY`, and the nine request entries are in the order above.
@@ -79,27 +79,18 @@ kill and that the delegation of the first agent still signed after the restart.
 
 ## Where the programs did not fit on first contact
 
-**One, and it was mine.**
+**One, found on the first run, and since settled otherwise.**
 
 1. **A call that expires was recorded `cancelled`, not `expired` (case 9).**
-   At the deadline the service answered the agent and closed its connection to
-   `service.sock` in the same second, in which pledge's own clock also says the
-   deadline has passed. A closed connection cancels (`service-sock.md` section
-   4, `approval-connections.md` section 2), so pledge recorded `cancelled`.
-   Who is right: `doc/approvals.md` R7 and section 6 ("each of the three
-   watches the deadline itself", "pledge records the request as expired"), and
-   `approval-connections.md` 3.6 (the holder of a request watches the
-   deadline itself and forgets it at it): the record should say `expired`, so
-   the service must not cancel by closing at the deadline. **Fixed in
-   `crates/p-robe/src/pledge.rs`** (commit `b88e5a8` on `agent/p-robe`, merged
-   into `check`): after the deadline the service keeps the connection for up
-   to 2 seconds and takes pledge's own `expired`; an approval that arrives in
-   that time is too late and is not acted on; then it closes. The agent hears
-   `expired` at most 2 seconds after the deadline (the stream keeps it alive
-   meanwhile). The unit tests of p-robe (119, with the feature) pass with it.
-   Not changed in pledge or p-act. (A request the service closes on at once
-   **before** the deadline, because the agent went away, is still `cancelled`,
-   as it should be.)
+   At the deadline the service answered the agent and closed its connection
+   to `service.sock` in the same second pledge's own clock also said the
+   deadline had passed; a closed connection cancels, so pledge recorded
+   `cancelled`. My first fix was a 2-second wait in the service after the
+   deadline (`b88e5a8`). The designer decided that this is pledge's to settle:
+   pledge records `expired` for a submitter that goes away at or after the
+   deadline or within 2 seconds before it (`record.md` section 9). The wait is
+   **removed again**: at the deadline the service answers the agent `expired`
+   and closes, and case 9 records `expired` against pledge's current build.
 
 **Not a misfit, but worth stating:**
 
@@ -140,3 +131,15 @@ store of answers giving the same approval bytes for the same request.
 - A restart of pledge or of the service with requests open, against the
   real pledge (the fake covered it in p-robe's own tests).
 - Keys of type ECDSA P-256; the broker (stage 2); Linux (everything here ran on macOS).
+
+## Added when pledge recorded `received` and `lost` (pledge 5e0363b, p-act b845651)
+
+Every request that waits (mode `ask`) has a `received` entry before its answer;
+the request open when pledge was killed has `received`, then `lost` at the
+restart; the same bytes submitted again are received and answered afresh, and
+`approved` there means this machine signed. The test checks all of it and
+that the record's request entries still match what the agent was told. Five
+runs in a row passed. One mistake in my test, not in pledge: `wait_for("action:")`
+returned lines left over from earlier dialogs and passed by luck; it now drains
+the channel first. Where pledge did not behave as its documents say: nowhere in
+this run.

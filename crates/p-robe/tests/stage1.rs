@@ -24,7 +24,9 @@ use std::time::{Duration, Instant};
 
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD;
-use p_act::exchange::{Answer, ClearancePolicy, LineReader, Message, Outcome as Answered, Submit, write_message};
+use p_act::exchange::{
+    Answer, ClearancePolicy, LineReader, Message, Outcome as Answered, PledgeReason, Refused, Submit, write_message,
+};
 use p_act::pact::bundle::Bundle;
 use p_act::pact::catalogue::Catalogue;
 use p_act::pact::mcp::{Context, call_once};
@@ -134,6 +136,11 @@ impl Pledge {
         let _ = self.child.wait();
         let (child, stdin, lines) = Pledge::spawn(&self.binary, dir, &self.state, &self.sockets);
         (self.child, self.stdin, self.lines) = (child, stdin, lines);
+    }
+
+    /// Forgets the lines printed so far, so that the next `wait_for` waits for a new one.
+    fn drain(&self) {
+        while self.lines.try_recv().is_ok() {}
     }
 
     /// Waits for a line of pledge's output that starts with `prefix` (a dialog is on screen).
@@ -559,6 +566,7 @@ fn the_real_parts_against_each_other() {
     let _ = call(&agent, "test_peak", &[]);
     hold(false);
     let signed = transport.posted.lock().unwrap().last().unwrap().clone();
+    pledge.drain();
     let (cancel, starts) = (CancelToken::default(), peak_starts());
     let worker = {
         let (transport, cancel, signed, service) =
@@ -587,6 +595,7 @@ fn the_real_parts_against_each_other() {
     let _ = call(&agent, "test_peak", &[]);
     hold(false);
     let open_call = transport.posted.lock().unwrap().last().unwrap().clone();
+    pledge.drain();
     let worker = {
         let (transport, open_call, service) = (transport.clone(), open_call.clone(), open_service.clone());
         std::thread::spawn(move || transport.post(&service, &open_call, &CancelToken::default()))
@@ -596,9 +605,15 @@ fn the_real_parts_against_each_other() {
     pledge.restart(&dir);
     let after_kill = told(&worker.join().unwrap().expect("the service answered")["result"]);
     assert!(is(&after_kill, "unavailable", None), "{after_kill:?}");
-    assert_eq!(requests(&pledge), entries, "the killed pledge wrote nothing for the open request");
+    assert_eq!(
+        requests(&pledge),
+        entries + 1,
+        "the killed pledge wrote nothing; the restarted one wrote `lost` for the request that was open"
+    );
+    assert_eq!(pledge.history().iter().rev().find(|e| e["type"] == "request").unwrap()["result"], "lost");
     let used = told(&transport.post(&open_service, &open_call, &CancelToken::default()).unwrap()["result"]);
     assert!(is(&used, "refused", Some("invalid")), "the service's store: {used:?}");
+    expected.push(("lost", None)); // written by the restarted pledge for the request that was open
     pledge.answer("y\ny\n");
     let again = submit(
         &pledge,
@@ -612,13 +627,23 @@ fn the_real_parts_against_each_other() {
     expected.push(("approved", None));
     assert!(log.lock().unwrap().iter().any(|l| l.contains("no-route:")), "{:?}", log.lock().unwrap());
 
-    // 12. Parameters shown whole: 512 bytes each, all together at most 2000 characters (connections 3.7).
-    //     Each is within the service's own limit; pledge refuses the call as not showable, the agent is told invalid.
+    // 12. Parameters shown whole: 512 bytes each, all together at most 2000 characters. Each is within
+    //     the service's own limit; the service now decides it before it asks anybody (`Call::showable`),
+    //     logs the exact reason and tells the agent `refused / invalid`; pledge is not asked. Then the same
+    //     bytes are submitted to pledge by hand, which keeps checking and is the authority.
     let long = "x".repeat(450);
     let five: Vec<&str> = std::iter::repeat_n(long.as_str(), 5).collect();
+    let before = requests(&pledge);
     let too_long = call(&agent, "test_echo", &five);
     assert!(is(&too_long, "refused", Some("invalid")), "{too_long:?}");
-    assert!(log.lock().unwrap().iter().any(|l| l.contains("pledge:not-showable")), "{:?}", log.lock().unwrap());
+    assert!(log.lock().unwrap().iter().any(|l| l.contains("exact='not-showable:")), "{:?}", log.lock().unwrap());
+    assert_eq!(requests(&pledge), before, "pledge was not asked");
+    let direct = submit(
+        &pledge,
+        &Signer::certified(dir.join("probe/service-key")).unwrap(),
+        &request_of(&transport.posted.lock().unwrap().last().unwrap().clone(), Rating::HARMLESS),
+    );
+    assert!(matches!(direct, Answered::Refused(Refused::Pledge(PledgeReason::NotShowable))), "{direct:?}");
     expected.push(("refused", Some("not-showable")));
 
     // The record, against what the agent was told. `--verify` checks the chain (it fails the command if broken).
@@ -631,7 +656,33 @@ fn the_real_parts_against_each_other() {
         .collect();
     let expected: Vec<(String, Option<String>)> =
         expected.iter().map(|(r, why)| ((*r).to_owned(), why.map(str::to_owned))).collect();
-    assert_eq!(results, expected, "the record, request by request");
+    let brief: Vec<String> = history
+        .iter()
+        .map(|e| format!("{} {} {} {} {}", e["type"], e["result"], e["reason"], e["mode"], e["event"]))
+        .collect();
+    assert_eq!(results, expected, "the record, request by request: {brief:#?}");
+    // A waiting request has `received` before its answer; the request open when pledge died has `received`,
+    // then `lost` (written at the restart), and the same bytes submitted again are received and answered afresh.
+    for (at, entry) in history.iter().enumerate().filter(|(_, e)| e["type"] == "request" && e["mode"] == "ask") {
+        let hash = &entry["request_hash"];
+        assert!(
+            history[..at].iter().any(|e| e["type"] == "received" && &e["request_hash"] == hash),
+            "no `received` before {entry}"
+        );
+    }
+    let lost: Vec<usize> = history.iter().enumerate().filter(|(_, e)| e["result"] == "lost").map(|(i, _)| i).collect();
+    assert_eq!(lost.len(), 1, "exactly one `lost`: {history:#?}");
+    let hash = &history[lost[0]]["request_hash"];
+    assert!(
+        history[..lost[0]].iter().any(|e| e["type"] == "received" && &e["request_hash"] == hash),
+        "`lost` without `received`"
+    );
+    assert!(
+        history[lost[0] + 1..]
+            .iter()
+            .any(|e| e["type"] == "request" && e["result"] == "approved" && &e["request_hash"] == hash),
+        "the same bytes were asked about again after the restart"
+    );
     let events: Vec<(String, String)> = history
         .iter()
         .filter_map(|e| e["event"].as_str().map(|ev| (ev.to_owned(), e["by"].as_str().unwrap_or("").to_owned())))
