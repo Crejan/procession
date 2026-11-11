@@ -16,6 +16,7 @@ of conventions, and the realtime tools one library.
 | `p-ledge` | `pledge` | Holds a person's keys on their own machine: an SSH agent with a rule per program, and the person's end of the approval system; macOS first | [`crates/p-ledge/SPEC.md`](crates/p-ledge/SPEC.md) |
 | `p-age` | `page` | The broker of the approval system: checks that a request may be put to a person, carries it there and back, registers delegations | [`crates/p-age/SPEC.md`](crates/p-age/SPEC.md) |
 | `p-robe` | `probe` | A host's diagnostics as a fixed table of rated verbs built on the tools above, offered to agents as a service that asks before it acts | [`crates/p-robe/SPEC.md`](crates/p-robe/SPEC.md) |
+| `p-act` | - | The formats the approval system's programs share: call, request, approval, clearance, rating, and their signatures through `ssh-keygen` | [`doc/approval-formats.md`](doc/approval-formats.md) |
 
 Each name reads twice: an usher who seats threads (pusher), a rover who
 explores (prover), a player on stage (player), a plumber for the pipes
@@ -26,9 +27,9 @@ people (page), a robe and a probe, and `/proc` (p-roc).
 What spans several tools has a document of its own:
 [`doc/approvals.md`](doc/approvals.md), how a service learns that a person
 agrees to an action their agent asked for. `p-ledge`, `p-age` and `p-robe`
-are its three parts.
+are its three parts, and `p-act` is what they share.
 
-The crates of the last four rows are skeletons with specifications and are
+The crates of the last five rows are skeletons or first versions with specifications and are
 not published (`publish = false`).
 
 ## Conventions

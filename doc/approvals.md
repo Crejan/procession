@@ -112,6 +112,14 @@ p-robe by sudo, for one) is not reachable from the sandbox. Without this
 rule R1 means nothing: an agent that runs as its person needs nobody's
 approval.
 
+A sandbox should run the signer (`pact`, section 10) as a user that nothing
+the model starts runs as, so that the agent's key cannot be read and carried
+out. Where a sandbox does not, the key protects against the model's text and
+against accident, not against code the model runs. The design holds either
+way: every use of the key still passes the person's machine and is recorded
+there. What the separation buys is that the key cannot be handed to someone
+who then acts from elsewhere until the delegation ends or is withdrawn.
+
 **R3. An agent may have carried out at most what its person may.** A
 delegation names some of the person's groups and can only narrow. Nobody but
 the person can issue one, and it cannot be passed on.
@@ -148,8 +156,11 @@ happen:
   which directory is cleared), and what it cannot tell it rates at the top.
   Where a call may be rated lower than its action's worst case, the rule for
   that is data beside the action, not code: for a path, a list of prefixes,
-  matched after the path is resolved, with the file then opened once and
-  that same open file used, so that what was rated is what is read.
+  matched after the path is resolved. The rating is made again where the
+  action is carried out, on the object as opened there, and the action is
+  refused if that rating is higher than the one approved. Nothing is rated
+  lower under a directory that anyone but its owner or root can write to:
+  such a call keeps the action's worst rating.
 - A command (U6) is always at the top of all three.
 
 A delegation carries two ceilings, each a rating:
@@ -171,10 +182,13 @@ a host.
 
 **R5. A call is good for one request.** A call names the service, the action
 and its parameters, and carries an identifier (random, 128 bits, a UUID) and
-a deadline; all of it is under the agent's signature. pledge signs for an
-identifier once and then keeps it as used until the deadline, after which
-the call is void anyway. A call that comes a second time gets a refusal, not
-a second approval.
+a deadline; all of it is under the agent's signature. pledge decides on a
+call's identifier once: as soon as it approved, or the person declined, the
+identifier is used, and stays so until the deadline, after which the call is
+void anyway. The same request again gets the same answer again, the same
+approval, not a second one; a different request under a used identifier is
+refused. A declined call is not put to the person again: an agent that
+wants to try again makes a new call.
 
 **R6. A request cannot say something else than the call.** A request
 contains the call as the bytes the agent signed and adds only the rating;
@@ -220,8 +234,9 @@ evaluates it.
 action.
 
 **R12. Everything is recorded on the person's machine**: each request that
-reached it, the answer (approved, declined, refused, expired), the key that
-signed, the agent.
+reached it, the answer (approved, declined, refused, expired; or cancelled,
+when the service gave up before there was one), the key that signed, the
+agent.
 
 ## 4. Threat model
 
@@ -258,7 +273,7 @@ request in front of a person that is not from that person's agent.
 | Threat | Goal | What stops it | What remains |
 |---|---|---|---|
 | An agent asks for something harmful (a bug, an injected instruction) | G1 | R2: it can only ask. R3: only inside its delegation. R4: anything at the top of a scale needs the person; by default so does everything but a harmless query. Limits on how much it may ask (section 7) | A harmful action under a ceiling the person raised. A person who approves a plausible request. A service that rated too low |
-| An agent's key is copied (the sandbox's host, a leak) | G2 | The key is short-lived and narrow. R1: every use passes the person's machine and is recorded there. The person withdraws the delegation in pledge, which stops signing for it at once | Until someone notices: whatever lies under the automatic ceiling. By default harmless queries |
+| An agent's key is copied (the sandbox's host, a leak) | G2 | The key is short-lived and narrow. R1: every use passes the person's machine and is recorded there. The person withdraws the delegation in pledge, which stops signing for it at once | Until someone notices: whatever lies under the automatic ceiling. By default harmless queries. Where the sandbox does not keep the signer apart from what the model runs (R2), the model's own code can be the one that copies it |
 | A call is captured and sent again | G1, G6 | R5: one request per call, enforced by pledge | Nothing known |
 | A request says something else than the call | G1 | R6 | Nothing known; the service is trusted anyway |
 | The sandbox leaks: the agent gets its person's account | G1 | Nothing in this design (trusted, above) | Everything the person can do on that host. R1 does not apply any more |
@@ -277,7 +292,9 @@ request in front of a person that is not from that person's agent.
 
 **Signatures.** SSHSIG, one namespace per use (call, request, approval,
 clearance, connection), verified with `ssh-keygen -Y verify`. A service
-needs no library.
+needs no library. An agent's call is the one signature not made by
+`ssh-keygen`: the signer in the sandbox writes it itself, so that the key is
+never a file there, and is tested against `ssh-keygen` byte for byte.
 
 **A person's keys**, made in the machine's key hardware. pledge prints their
 public parts as one block; an administrator enters it in the site project.
@@ -316,9 +333,12 @@ signs its clearances and everything it sends to a pledge (blocks,
 withdrawals, renewed certificates, group names), and pledge and services
 accept nothing as the broker's that it does not verify. The connections to
 the broker are TLS with a certificate from the site's own certificate
-authority, so that nobody else can stand in its place on the network. A
-service and a pledge therefore hold one trust anchor for persons and broker,
-the site CA's key.
+authority, or pinned where a site has none. A service and a pledge
+therefore hold two things, each for one purpose. The site CA's key is the
+anchor for who signed what; nothing that matters rests on anything else.
+The TLS root, or the pinned certificate, says only that a connection reaches
+the broker: it protects against delay, loss and listening, not against
+forgery.
 
 **The call.** What an agent signs, with its delegated key: the host and name
 of the service, the action and its parameters, an identifier (random, 128
@@ -466,7 +486,7 @@ over its connection. A disabled person gets none.
 | a service's certificate | valid 30 days, renewed after 20 | the host key, by the site's provisioning |
 | requests the broker keeps for a pledge that is not connected | until each one's deadline; per agent as many as the setting below, further ones are refused | broker |
 | how long used identifiers are remembered | until the call's deadline; kept on disk across restarts | service, pledge |
-| tolerated clock difference | 60 seconds | all |
+| tolerated clock difference | 60 seconds, for "more than 10 minutes ahead" and for a certificate whose validity starts in the near future. It never extends a deadline: a party refuses to sign or to act as soon as its own clock says the deadline has passed | all |
 | dialogs on screen | one | pledge |
 | requests waiting per agent | a setting, 5 by default; further ones are refused | pledge (its own setting, per person); the broker (the site's setting) |
 | declines before an agent is muted | 3 within 10 minutes; then its requests are refused without a dialog for 10 minutes and the person is told | pledge |
@@ -515,9 +535,28 @@ Each stage is usable by itself and is the test of the one before.
 Decided since the first draft, and worked in above or in the crates'
 specifications:
 
-- An agent reaches a service by MCP over HTTP, the signed call in a header
-  of each tool call. The sandbox allows connections to services and nowhere
-  else.
+- An agent reaches a service by MCP over HTTP. The call and its signature
+  travel in the tool call's `_meta`, not in HTTP headers; the tool's
+  arguments must equal the signed call. The sandbox allows connections to
+  services and nowhere else.
+- In the sandbox a small program (`pact`, of the crate p-act) holds the
+  agent's key and certificate, signs each call and is the only thing there
+  that talks to services. The model never sees the key. That program sets
+  the deadline from its own setting; the model may ask for a shorter wait,
+  never a longer one.
+- What a model can be told of a call's outcome is a closed list: `done`,
+  `declined`, `expired`, `refused` (with its class), `unavailable` (nothing
+  was done) and `unknown` (the call was sent; whether it ran is not known;
+  only the signer makes this one, and its text tells the model to find out
+  by a query before repeating anything that changes something). While the
+  signer waits for an answer it tells the model's client so at a fixed
+  interval with one fixed text; nothing a service says reaches the model
+  that way.
+- What an agent learns of a "no" is coarse: declined, expired, refused as one
+  of a few classes, unavailable. pledge and the broker give a service their
+  exact reasons, and the exact reason is in the person's record; an agent is
+  not trusted, and exact reasons would tell it where ceilings, limits and
+  delegations lie.
 - Key and certificate get into a sandbox on another host over the SSH
   connection the person starts it through, on standard input.
 - There is one broker per site. It learns of hosts and their keys with the
@@ -549,6 +588,10 @@ Open:
 - **How a command (U6) is matched against grants.** "As sudo matches" is not
   a design: it makes the broker a second sudo matcher, and gives the service
   a sudo rule as wide as every group grant on its host. Stage 4.
+- **TLS between an agent and a service on another host.** Not in stage 1.
+  For stage 2: the service presents a certificate under the site's TLS root
+  (or a pinned one), and the sandbox is given that root with the agent's
+  key.
 - **TLS for the broker on a site without a certificate authority.** The
   requirement is a certificate that pledge and services can verify: from the
   site's own where there is one, pinned otherwise. Left to the binding.
@@ -558,5 +601,9 @@ Open:
 - **Not checked** (section 5): keys in a Secure Enclave in every role this
   design gives them.
 - **The interfaces.** The formats of call, request, approval and clearance
-  are in [`approval-formats.md`](approval-formats.md). Next: the connections
-  (agent to service, service to broker, pledge to broker).
+  are in [`approval-formats.md`](approval-formats.md); the exchange of a
+  request and its answer, and the broker's two connections, are in
+  [`approval-connections.md`](approval-connections.md), a draft. Still
+  proposals of the crates: agent to service (p-robe), the stage-1 socket,
+  the record and the control socket (p-ledge), the agent-side signer
+  (p-act).

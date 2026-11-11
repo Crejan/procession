@@ -44,11 +44,13 @@ One key per purpose. A key is used for its purpose and nothing else.
 | shared | logins and signatures of every other local program | yes | each signature |
 | confirmed approval | approvals the person was asked for | never | each signature |
 | automatic approval | approvals in mode `automatic` | never | none |
-| delegation | an agent's certificate | never | each signature |
+| delegation | an agent's certificate | never on `agent.sock`; for issuing, pledge hands it to its own `ssh-keygen` child over a private socket | each signature |
 | connection | pledge's sign-in to the broker | never | none |
 
-The SSH agent socket refuses a signature in any namespace the four lower
-keys use, whichever key is named.
+Every SSHSIG namespace ending in `@procession` is reserved for the approval
+system (`doc/approval-formats.md`, section 1). The SSH agent socket refuses
+a signature in any of them, whichever key is named. The connection key signs
+in the namespace `connection-v1@procession`.
 
 - Keys are made in the machine's key hardware and never leave it.
 - **How a key becomes known elsewhere.** `pledge keys` prints public parts.
@@ -56,8 +58,10 @@ keys use, whichever key is named.
   in the site project; nothing else makes them valid. A bound or shared
   key's public part goes wherever the person wants to log in with it, as
   with any SSH key.
-- **A bound key** is created for one program and one login (user and host).
-  The program is fixed by its code signature at that moment.
+- **A bound key** is created for one program and one login (user and host
+  key). The host is fixed by its host key's fingerprint, always; a name is
+  for showing only, taken from `known_hosts` where pledge finds one. The
+  program is fixed by its code signature at that moment.
 - **Retiring** a key: pledge deletes it from the hardware and records that.
   For the four lower keys the person also tells an administrator, because
   the site project still lists it.
@@ -87,6 +91,10 @@ first match wins:
    - an **unknown** program is put to the person;
    - an **admitted** program gets a presence check for each signature.
 
+An answer "block" is recorded as a decline of that signing request, because
+the person said no to it, and the block itself as an event; later signing
+requests of that program are refused, reason blocked.
+
 What the person can answer about an unknown program:
 
 | Answer | Effect |
@@ -110,7 +118,9 @@ itself. With an incomplete chain only the two "once" answers are offered.
 
 - A user authentication is bound to the session (`session-bind@openssh.com`)
   and to a host key the SSH agent verified against `known_hosts` or a
-  `@cert-authority` line. A revoked entry counts as unknown. Unbound is
+  `@cert-authority` line. A revoked entry counts as unknown. A client that
+  does not bind (older than OpenSSH 8.9) cannot use pledge's keys; there is
+  no setting for it, and the dialog and the record say why. Unbound is
   refused.
 - A forwarded SSH agent connection is refused.
 - A presence check covers one login. A shared connection (`ControlMaster`)
@@ -130,7 +140,9 @@ What pledge does with a request, which arrives from the broker or, in stage
 1. It checks the call inside the request: signed under a delegation pledge
    issued itself, not ended, not withdrawn; the call's deadline has not
    passed and is not further away than the longest allowed; pledge has not
-   signed for this call's identifier before.
+   decided on this call's identifier before (`doc/approvals.md`, R5: the
+   same request again gets the same answer again, from a store on disk; a
+   different request under a used identifier is refused).
 2. It checks the request: signed by a service key that a host it knows
    certified; that host and the service's name are the ones the call names.
    The request holds the call as the bytes the agent signed, so action,
@@ -147,9 +159,11 @@ What pledge does with a request, which arrives from the broker or, in stage
    - `automatic`: it signs with the automatic approval key;
    - `ask`: it asks. If the person agrees: a presence check, and it signs
      with the confirmed approval key. If the person declines, it answers no.
-7. It keeps the call's identifier as used until the call's end, and records
-   the request, the answer (approved, declined, refused, expired), the key
-   and the agent.
+7. It keeps the call's identifier as used until the call's end, from the
+   moment it approved or the person declined, and records the request, the
+   answer (approved, declined, refused, expired; or cancelled, when the
+   service gave up first), the key and the agent. Without a record entry
+   there is no approval.
 
 A request rated at the top of any scale (`secret`, `lasting`, `outage`) is
 never signed with the automatic approval key: pledge does not let an automatic ceiling be set that high and
@@ -159,7 +173,27 @@ does not honour one it finds.
 dialog that is still open when it passes, and records the request as
 expired. It watches the deadline itself.
 
-**Delegations.** Issuing: the person picks groups and the two ceilings; a
+**Delegations.** pledge writes neither a certificate nor a private key
+itself: OpenSSH does. The agent's key pair is made by `ssh-keygen -t
+ed25519` in a private temporary directory, read and removed. The
+certificate is made by `ssh-keygen -s <delegation public key> -U`, which
+gets its signature through a private SSH agent socket that pledge offers for
+that one issuing (in a directory only the person can enter, holding only the
+delegation key, closed when `ssh-keygen` exits). The reader sees the
+certificate to be signed in that signing request, reads it with p-act, and
+lets the key holder sign only if it is an agent's certificate by
+`doc/approval-formats.md`, section 3.1, for this person, with the groups and
+the validity the person just chose. The key holder still parses nothing.
+
+A delegation exists only once the bundle with key and certificate has been
+handed over (`agents.delivered` on `control.sock`): until then pledge signs
+for no call under it and has not registered it, and a control connection
+that closes first ends it, leaving a record entry. A bundle is never
+written to a terminal. The key's bytes are held in a type that cannot be
+printed or logged. Which services the bundle names is the person's own file
+or options; never the broker's word.
+
+Issuing: the person picks groups and the two ceilings; a
 presence check; pledge creates the agent's key pair, issues its certificate
 with the delegation key (the person as its only principal, the groups in
 the extension `groups@procession`; `doc/approval-formats.md`, section 3.1),

@@ -63,6 +63,8 @@ both treats it as absent.
 **For a request from a service**, in this order; the first failure is the
 answer, a refusal with its reason:
 
+0. The call's deadline has not passed and is not more than 10 minutes
+   ahead. This bounds what the broker holds; it is a limit, not a trust.
 1. The request is signed by a service key that a host of the site project
    certified, and host and service are the ones the call names.
 2. The call is signed under a delegation that is registered, not ended, not
@@ -120,7 +122,15 @@ rule is made here.
 
 - Requests waiting for a pledge to connect, each until its deadline.
 
-It keeps no request beyond its deadline and no approval at all.
+It keeps no request beyond its deadline. An answer, an approval included,
+it holds in memory until the service has acknowledged it or the deadline has
+passed, whichever is first, so that a connection lost at the last moment
+does not cost the person a second dialog. Never on disk, never past the
+deadline. An approval is not a secret and is of use only to the service
+whose request it signs.
+
+A delegation is known in the register by the SHA-256 fingerprint of the
+agent's public key (`doc/approval-formats.md`, section 3.1).
 
 ## Order of work
 
