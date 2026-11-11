@@ -180,3 +180,22 @@ no approval", hash-only entries, `cancelled` as the fifth result and the
 agent's public key as `ssh-keygen -l` prints it. A `request` entry whose
 answer was given again from the store (`service-sock.md`, section 6) is not
 recorded a second time.
+
+## 9. Added by the stage-1 run (designer's decisions)
+
+- **`approved` means this machine signed**, not that the action was done. What
+  ran is in the service's own log, joined to this record by the call's
+  identifier (`call`). `pledge history` says so in its output and in `--help`.
+- **Six outcomes**: approved, declined, refused, expired, cancelled, lost.
+- **`received`**: a request that waits (mode `ask`) gets an entry of type
+  `received` when it arrives, before it is queued or shown: the call's fields
+  and the request's hash. No record, no dialog. Its answer is a second entry
+  (type `request`) naming the same `request_hash`. A request answered at once
+  (automatic, refused) has a single entry.
+- **`lost`**: at start, every `received` without an answer gets an entry (type
+  `request`, result `lost`) with `received` (when), and
+  `last_entry_before_start` (the latest time pledge is known to have been up).
+  Once: a later start finds nothing more to settle.
+- **Cancelled or expired**: a submitter that goes away at or after the deadline,
+  or within 2 seconds before it (`CANCEL_AS_EXPIRED_SECONDS`), is recorded
+  `expired`; earlier, `cancelled`.

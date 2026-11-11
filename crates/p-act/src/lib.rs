@@ -29,7 +29,7 @@ pub mod pact;
 pub mod rating;
 pub mod sign;
 
-pub use call::{Call, CallContent, CallId, ServiceId};
+pub use call::{Call, CallContent, CallId, NotShowable, ServiceId};
 pub use clearance::Clearance;
 pub use error::ParseError;
 pub use hash::{Document, DocumentHash};

@@ -40,6 +40,9 @@ pub const VERBS: &[Verb] = &[
     Verb { name: "history", summary: "every signing request, with who asked; --verify checks the chain" },
 ];
 
+/// What the record's words do and do not say.
+pub const HISTORY_LEGEND: &str = "pledge: `approved` means this machine signed, not that the action was done: what ran is in the service's own log, joined to this record by the call's identifier (call=). `received` is a request pledge was holding; `lost` is one it was holding when it went down.";
+
 /// The help text.
 #[must_use]
 pub fn usage() -> String {
@@ -53,6 +56,7 @@ pub fn usage() -> String {
          programs list | admit PROGRAM | block PROGRAM | forget PROGRAM\n\
          agents   start [--groups A,B] [--automatic E,D,S] [--ask E,D,S] [--valid 8h] [--label L] [--service host/name=url]... [--tls-root FILE] [--deadline S] [--output FILE] | list | withdraw ID\n\
          history  [--type T] [--result R] [--format json] [--verify]\n\
+         \nhistory: `approved` means this machine signed, not that the action was done; what ran is in the service's own log, joined by the call's identifier\n\
          \nall but serve take [--state-dir D] [--socket-dir D]; types: ed25519 (default), ecdsa-p256\n",
     );
     text
@@ -288,6 +292,13 @@ pub fn history_line(entry: &Value) -> String {
             add("namespace=", text("namespace"));
             add("key=", text("key_fingerprint"));
         }
+        Some("received") => {
+            add("", Some("received".to_owned()));
+            add("person=", text("person"));
+            add("agent=", text("delegation"));
+            add("call=", text("call"));
+            add("action=", text("action"));
+        }
         Some("request") => {
             add("", text("result"));
             add("(", text("reason").map(|r| format!("{r})")));
@@ -297,6 +308,7 @@ pub fn history_line(entry: &Value) -> String {
             add("call=", text("call"));
             add("action=", text("action"));
             add("key=", text("key"));
+            add("last-entry-before-start=", text("last_entry_before_start"));
         }
         Some("event") => {
             add("", text("event"));
@@ -497,6 +509,9 @@ fn history_verb(mut args: Vec<String>) -> Done {
             println!("{}", history_line(entry));
         }
     }
+    if !json_out {
+        eprintln!("{HISTORY_LEGEND}");
+    }
     for broken in &report.breaks {
         eprintln!("pledge: the record breaks at line {}: {}", broken.line, broken.problem);
     }
@@ -516,6 +531,20 @@ mod tests {
         assert!(line.contains("program=/usr/bin/curl\\u{001B}[2J"), "{line}");
         assert!(!line.contains('\u{1B}'));
         assert!(line.contains("user=jan host=a.example"), "{line}");
+    }
+
+    #[test]
+    fn history_says_what_approved_means_and_shows_received_and_lost() {
+        assert!(usage().contains("`approved` means this machine signed, not that the action was done"));
+        assert!(HISTORY_LEGEND.contains("call's identifier"));
+        let received = history_line(
+            &json!({"time":"2026-11-11T15:04:05Z","seq":3,"type":"received","call":"c-1","action":"rt procs"}),
+        );
+        assert!(received.contains("received") && received.contains("call=c-1"), "{received}");
+        let lost = history_line(
+            &json!({"time":"2026-11-11T15:04:05Z","seq":9,"type":"request","result":"lost","last_entry_before_start":"2026-11-11T15:00:00Z"}),
+        );
+        assert!(lost.contains("lost") && lost.contains("last-entry-before-start=2026-11-11T15:00:00Z"), "{lost}");
     }
 
     #[test]

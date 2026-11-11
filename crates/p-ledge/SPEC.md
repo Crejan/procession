@@ -251,6 +251,21 @@ program's identity; or the agent, its delegation and the service), what was
 asked in the dialog's words, the answer, and the key that signed. Refused
 and expired ones included.
 
+`approved` means that this machine signed, not that the action was done;
+the record and `pledge history` say so in those words. What ran is in the
+service's own log (for p-robe its syslog lines, which carry the call's
+identifier, so the two can be joined).
+
+A request that waits (queued, or shown in a dialog) gets an entry `received`
+when it arrives, with the call's fields and the request's hash: no record,
+no dialog. Its answer is a second entry that names the hash. A request
+answered at once (automatic, refused) has one entry. When `pledge serve`
+starts, every `received` without an answer gets an entry `lost`, with the
+time pledge was down if it can tell. So a request ends as one of six:
+approved, declined, refused, expired, cancelled, lost. A request whose
+submitter goes away at or after its deadline, or within 2 seconds before it,
+is `expired`; earlier it is `cancelled`.
+
 Kept for a year, readable with `pledge history`. Each entry carries the hash
 of the one before it, so that removing or changing one in the middle shows;
 entries older than a year are removed from the start, and the first one kept
