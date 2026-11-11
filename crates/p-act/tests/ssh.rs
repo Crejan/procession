@@ -586,15 +586,27 @@ fn an_ed25519_agent_under_a_p256_delegation_key() {
 }
 
 #[test]
-fn a_p256_agent_certificate_is_read_too() {
+fn an_agent_certificate_for_a_p256_key_is_refused_everywhere() {
     let keys = Keys::new();
     let ca = keys.ecdsa_key("ca");
     let agent_key = keys.ecdsa_key("agent");
     let agent = keys.certify(&agent_key, &ca, "agent", "alice");
     let call = Call::compose(&call_content("probe", "a.example")).unwrap();
     let sig = sign_call(&agent, &call).unwrap();
-    assert_eq!(verify_call(&call, &sig, &keys.public(&ca)).unwrap(), "alice");
-    assert_eq!(signature_certificate(&sig).unwrap().valid_before, 4_070_908_800);
+    // An agent's key is Ed25519, always: every function that reads an agent's certificate refuses this one,
+    // with an error that names the type.
+    let named = |e: SignError| matches!(e, SignError::AgentKeyNotEd25519(t) if t == "ecdsa-sha2-nistp256");
+    assert!(named(verify_call(&call, &sig, &keys.public(&ca)).unwrap_err()));
+    assert!(named(verify_call_agent(&call, &sig, &keys.public(&ca)).unwrap_err()));
+    assert!(named(signature_agent(&sig).unwrap_err()));
+    assert!(named(signature_person(&sig).unwrap_err()));
+    let request = request(&delegation("alice"), INTERNAL);
+    let on_p256 = Request::compose(&call, &sig, INTERNAL).unwrap();
+    assert!(named(request_person(&on_p256).unwrap_err()));
+    assert!(request_person(&request).is_ok());
+    // The raw reading, which judges nothing, still shows it.
+    let cert = signature_certificate(&sig).unwrap();
+    assert_eq!((cert.valid_before, cert.key_type.as_str(), cert.cert_type), (4_070_908_800, "ecdsa-sha2-nistp256", 1));
 }
 
 #[test]
@@ -1012,8 +1024,12 @@ fn a_certified_keys_fingerprint_is_that_of_the_key_not_of_the_certificate() {
         let expected = keygen_fingerprint(&pub_file(&agent_key));
         assert_eq!(signature_fingerprint(&sig).unwrap().as_str(), expected, "{label}");
         assert_eq!(signature_certificate(&sig).unwrap().fingerprint.as_str(), expected, "{label}");
-        let agent = verify_call_agent(&call, &sig, &keys.public(&ca)).unwrap();
-        assert_eq!(agent.delegation.as_str(), expected, "{label}");
+        let agent = verify_call_agent(&call, &sig, &keys.public(&ca));
+        if label.starts_with("p256 under") {
+            assert!(matches!(agent, Err(SignError::AgentKeyNotEd25519(_))), "{label}");
+        } else {
+            assert_eq!(agent.unwrap().delegation.as_str(), expected, "{label}");
+        }
         assert_ne!(expected, keys.public(&ca).fingerprint().as_str(), "the issuer is another key");
     }
 }

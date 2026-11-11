@@ -115,6 +115,10 @@ pub enum SignError {
     PrincipalCount { found: usize },
     #[error("`{0}` is not a usable name for a person")]
     BadPrincipal(String),
+    #[error("an agent's key must be Ed25519, this one is `{0}`")]
+    AgentKeyNotEd25519(String),
+    #[error("an agent's certificate must be a user certificate")]
+    NotUserCertificate,
     #[error("the agent's certificate has the critical option `{0}`")]
     CriticalOption(String),
     #[error("the agent's certificate has the extension `{0}`, only `groups@procession` is allowed")]
@@ -393,6 +397,10 @@ pub struct Certificate {
     pub extensions: Vec<(String, Vec<u8>)>,
     /// Fingerprint of the certified key.
     pub fingerprint: Fingerprint,
+    /// The certified key's type, like `ssh-ed25519`.
+    pub key_type: String,
+    /// 1 for a user certificate, 2 for a host certificate.
+    pub cert_type: u32,
 }
 
 fn put_string(out: &mut Vec<u8>, s: &[u8]) {
@@ -465,9 +473,14 @@ pub fn signature_fingerprint(sig: &str) -> Result<Fingerprint, SignError> {
 /// The certificate inside an armoured SSHSIG, read, not verified. The key it
 /// certifies and the key that issued it must both be of a supported type.
 pub fn signature_certificate(sig: &str) -> Result<Certificate, SignError> {
+    certificate_from_blob(&signature_key_blob(sig)?)
+}
+
+/// Read a certificate from its wire form (the blob of a `-cert.pub` line, or
+/// the public key field of a signature). Not verified.
+pub(crate) fn certificate_from_blob(blob: &[u8]) -> Result<Certificate, SignError> {
     let bad = || SignError::MalformedSignature;
-    let blob = signature_key_blob(sig)?;
-    let mut key = Reader(&blob);
+    let mut key = Reader(blob);
     let kind = String::from_utf8_lossy(key.string().ok_or_else(bad)?).into_owned();
     if !kind.contains("-cert-v01@") {
         return Err(SignError::NotCertified);
@@ -487,7 +500,7 @@ pub fn signature_certificate(sig: &str) -> Result<Certificate, SignError> {
         put_string(&mut plain, key.string().ok_or_else(bad)?);
     }
     let _serial = key.u64().ok_or_else(bad)?;
-    let _type = key.u32().ok_or_else(bad)?;
+    let cert_type = key.u32().ok_or_else(bad)?;
     let key_id = String::from_utf8(key.string().ok_or_else(bad)?.to_vec()).map_err(|_| bad())?;
     let mut list = Reader(key.string().ok_or_else(bad)?);
     let mut principals = Vec::new();
@@ -504,7 +517,18 @@ pub fn signature_certificate(sig: &str) -> Result<Certificate, SignError> {
         return Err(SignError::UnsupportedKeyType(issuer));
     }
     let fingerprint = Fingerprint::of_blob(&plain);
-    Ok(Certificate { key_id, principals, valid_after, valid_before, critical_options, extensions, fingerprint })
+    let key_type = kind.trim_end_matches("-cert-v01@openssh.com").to_owned();
+    Ok(Certificate {
+        key_id,
+        principals,
+        valid_after,
+        valid_before,
+        critical_options,
+        extensions,
+        fingerprint,
+        key_type,
+        cert_type,
+    })
 }
 
 /// What an agent's certificate says (formats section 3.1): the person it acts
@@ -526,7 +550,19 @@ pub struct Agent {
 /// option; no extension but a well-formed `groups@procession`. A claim until a
 /// verification succeeds ([`verify_call_agent`]).
 pub fn signature_agent(sig: &str) -> Result<Agent, SignError> {
-    let cert = signature_certificate(sig)?;
+    agent_from_certificate(signature_certificate(sig)?)
+}
+
+/// The section 3.1 rules for an agent's certificate, on one already read. The
+/// certified key must be Ed25519, always: pledge makes it, and the signer in
+/// the sandbox refuses any other.
+pub(crate) fn agent_from_certificate(cert: Certificate) -> Result<Agent, SignError> {
+    if cert.key_type != "ssh-ed25519" {
+        return Err(SignError::AgentKeyNotEd25519(cert.key_type));
+    }
+    if cert.cert_type != 1 {
+        return Err(SignError::NotUserCertificate);
+    }
     if let Some((name, _)) = cert.critical_options.first() {
         return Err(SignError::CriticalOption(name.clone()));
     }
