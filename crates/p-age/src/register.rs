@@ -28,7 +28,7 @@ struct Entry {
     withdrawn: bool,
 }
 
-/// Registered delegations, by the fingerprint of the agent's certificate.
+/// Registered delegations, by the SHA-256 fingerprint of the agent's public key.
 #[derive(Debug, Clone, Default)]
 pub struct Register {
     delegations: BTreeMap<String, Entry>,

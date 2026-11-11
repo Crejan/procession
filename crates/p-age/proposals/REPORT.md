@@ -70,3 +70,20 @@ Found while doing this:
 - **pledge's reasons lack a code for a person or key blocked at the broker** (needed when a standing blocks while requests wait). Proposal: `blocked`. Asked of p-ledge.
 - **Stored answers (G2)** now appear as a rule of the exchange (3.7): a repeated `submit` gets the same answer again.
 - The broker's reason names (`deadline`, `delegation`, ...) differ from pledge's (`deadline-past`, `unknown-delegation`, ...) on purpose; `by` says whose list a code is from.
+
+## Update after the designer's decisions on the proposal (integration f4a97a7, merged)
+
+Document: followed, then read once from top to bottom.
+- G2: pledge's answer is final to the deadline, from a store on disk (3.7): `approved`, `declined` and verdict refusals are answered again from it, passing conditions (`limit`, `muted`, `unavailable`, `blocked`) are not stored; a cancelled request is over; `call-used` for a different request under a used identifier; a declined call is not put again.
+- G3: accepted, text and SPEC agree. G4: check 0. G5: two anchors, each for one purpose (section 8).
+- G1: `delegation-v1` and the proof are gone. The broker reads and checks the certificate with p-act (issuer: the person's delegation key; section 3.1 rules; at most 24 h), registers it under the SHA-256 fingerprint of the agent's public key, from the sign-in alone; registering a known certificate changes nothing.
+- G8: no clock anywhere in sign-in or standing. The standing carries the sign-in's `nonce` and a counter `n`; pledge accepts it only on its own connection and only with a higher `n`.
+- Hosts list: carried unaltered (`carried`), verified by pledge with `hosts namespaces="hosts-v1@procession" <CA key>`; newest `at` wins, no expiry. `hosts` joins the names the CA never certifies.
+- A service gets exact codes; no notice that a request was shown; the 60 s tolerance never extends a deadline (only the 10-minute bound). `blocked` joins pledge's list as a passing condition.
+- Code: only the doc comment in `src/register.rs` (key is the SHA-256 fingerprint of the agent's public key).
+
+Section 3 is written to be lifted as it stands (no G-numbers, no p-ledge references); transports are section 2's table, sections 4 and 5.
+
+**Attack check of dropping the proof:** a holder of only the connection key can register a certificate it has seen (they are in every call), but such a certificate is already valid for whoever holds the agent key, and registering adds nothing the delegation key did not sign; it cannot make one. A withdrawn or ended delegation cannot be revived (register keeps the first entry). One case remains: an agent key and certificate exfiltrated before pledge registered it; the broker then learns of it from whoever registers it, and the certificate is valid anyway. I see no attack that needs a mechanism.
+
+Needs from p-act (listed in section 9): the codec for section 3, the standing and connection documents, certificate reading and checking with its identifier, the fingerprint of the key behind a signature.
