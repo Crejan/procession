@@ -51,14 +51,19 @@ The call and its signature are two members of `params._meta` of the
 {"jsonrpc":"2.0","id":7,"method":"tools/call","params":{
   "name":"rt_procs","arguments":{"params":["pid=4711"],"claim":"..."},
   "_meta":{"procession/call":"<base64 of the call's bytes>",
-           "procession/call-signature":"<base64 of the armoured SSHSIG>"}}}
+           "procession/call_sig":"<base64 of the armoured SSHSIG>"}}}
 ```
 
 - Each value is the **base64 (standard, padded) of exact bytes**
   (`approval-formats.md` section 1), so `procession/call` is the request's
-  `call` and `procession/call-signature` is the request's `call_sig`, **copied
+  `call` and `procession/call_sig` is the request's `call_sig`, **copied
   into the request without decoding or re-encoding** (the service decodes a
   copy to read the call).
+- The service takes `tools/list` and `tools/call` without a preceding
+  `initialize` and without a session id (it keeps no state), honours
+  `MCP-Protocol-Version` if sent (2025-06-18; any other value: `400`), and
+  requires `Accept: application/json, text/event-stream` as the specification
+  asks of a client.
 - Each member exactly once; missing, not a string, not base64, or larger than
   the formats allow (call 16 KiB, signature 4 KiB decoded): JSON-RPC error
   `-32602` (a signer bug, not a decision about an action). The body is at most
@@ -68,8 +73,10 @@ The call and its signature are two members of `params._meta` of the
   clients and servers to attach additional metadata to their interactions".
   A key is an optional prefix (labels, dots, a slash) and a name; prefixes
   whose label after the first is `mcp` or `modelcontextprotocol` are reserved
-  for MCP. `procession/call` and `procession/call-signature` are valid and
-  not reserved (name: alphanumeric at both ends, hyphens allowed inside). The
+  for MCP. `procession/call` and `procession/call_sig` are valid and
+  not reserved (name: alphanumeric at both ends, underscores allowed inside).
+  Other keys of `_meta` (`progressToken`) are left alone; any other
+  `procession/` key is refused. The
   base `Request` type has `params._meta` with free keys, which is also how a
   `progressToken` rides on a `tools/call`. **One caution:** in the schema of
   that revision `CallToolRequest.params` is written as `{name, arguments?}`
@@ -91,8 +98,10 @@ signed call, and refuses a body that differs**:
   `rt_procs`). Nouns and verbs are `[a-z][a-z0-9-]*` and never hold `_`, so the
   mapping is unambiguous;
 - `arguments.params` = the call's `params`, element by element, byte for byte;
+  always present, `[]` for a call without parameters;
 - `arguments.claim` = the call's `claim`, both absent or equal;
-- `arguments.wait_seconds` is `pact`'s input, not signed, and not acted on.
+- `arguments.wait_seconds` is `pact`'s input, not signed, and not acted on;
+  `pact` does not send it, and the service ignores it if it comes.
 
 Any difference: `refused`, reason `invalid`, nobody asked (exact code
 `mismatch`, in the audit line).
@@ -106,9 +115,12 @@ Any difference: `refused`, reason `invalid`, nobody asked (exact code
   names them for a person). `run command` only with stage 4 switched on. Test
   verbs in a test build only.
 - `name`: `<noun>_<verb>`; `title`: `<noun> <verb>`.
-- `description`: the row's summary, and the worst-case rating in words, from
-  the function the dialog uses, so an agent and a person read the same.
-  For a row with parameter rules (`rating-rule.md`), the rules are summarised.
+- `description`: **one line** (no control character: `pact` drops a tool whose
+  text breaks the string rule of the formats), at most 600 characters, the
+  worst-case rating in words **first** (from the function the dialog uses, so
+  an agent and a person read the same), then the row's summary, then for a row
+  with parameter rules (`rating-rule.md`) a short summary of them. `pact` cuts
+  descriptions at 1000, so the rating must never be what is cut.
 - `inputSchema`: `params` (array of strings, `maxItems` 64, each `maxLength`
   512 and the argument class as `pattern`; `maxItems: 0` for a verb without
   arguments), `claim` (`maxLength` 200), `wait_seconds` (integer 1 to 600, a
@@ -136,7 +148,7 @@ text content.
 
 | `outcome` | `reason` | Meaning | What the agent should do |
 |---|---|---|---|
-| `done` | none (`rc` in the object) | the verb ran | use the answer |
+| `done` | none (the object also has `rc`) | the verb ran | use the answer |
 | `declined` | **none** | the person said no in a dialog; nothing else is said | not repeat it unless the person asks |
 | `expired` | none | the deadline passed without an approval | may ask again as a new call, after telling the person |
 | `refused` | `not-allowed` | the delegation, the site's rules or the person's ceilings do not allow it | change the plan; do not repeat |
@@ -161,6 +173,11 @@ The mapping lives in one function with one test per exact code; a string
 received is never copied into what an agent reads. The exact lists are those
 of the connections document (p-age's, to become `doc/approval-connections.md`);
 a code that is added there and not here maps to `not-allowed` and is logged.
+
+One outcome is `pact`'s alone: `unavailable` with `reason` `no-answer` for a
+call that was sent and whose answer was lost (a verb may have run). The
+service cannot send it, since it is about the service not answering; if the
+designer accepts it, it joins this list as `pact`-made (`review-pact.md`).
 
 `instructions` (in `initialize`) says in plain words what the table says: a
 call may need your person's approval and waits for it until its deadline;
