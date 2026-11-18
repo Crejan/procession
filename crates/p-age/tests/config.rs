@@ -40,7 +40,9 @@ fn a_configuration_builds_a_broker_with_defaults_for_what_is_left_out() {
     write(
         dir.path(),
         "site.json",
-        &format!(r#"{{"persons":[{{"name":"jan","enabled":true}}],"hosts":[{{"name":"a.example","key":"{KEY}"}}]}}"#),
+        &format!(
+            r#"{{"v":1,"persons":[{{"name":"jan","enabled":true}}],"hosts":[{{"name":"a.example","key":"{KEY}"}}]}}"#
+        ),
     );
     let path = write(dir.path(), "page.json", &config_text(dir.path(), ""));
     let config = Config::read(&path).unwrap();
@@ -99,7 +101,7 @@ fn keys(first: u8) -> String {
 fn a_site_file_with_a_bad_key_a_bad_name_or_a_duplicate_is_refused() {
     use p_age::site::Site;
     let person = |name: &str, keys: &str| format!(r#"{{"name":"{name}","enabled":true,{keys}}}"#);
-    let site = |persons: String| format!(r#"{{"persons":[{persons}],"hosts":[]}}"#);
+    let site = |persons: String| format!(r#"{{"v":1,"persons":[{persons}],"hosts":[]}}"#);
     assert!(Site::from_json(&site(person("jan", &keys(1)))).is_ok());
     assert!(Site::from_json(&site(person("ja n", &keys(1)))).is_err());
     assert!(Site::from_json(&site(person("jan:confirmed", &keys(1)))).is_err(), "a name never has a colon");
@@ -113,7 +115,7 @@ fn a_site_file_with_a_bad_key_a_bad_name_or_a_duplicate_is_refused() {
 #[test]
 fn a_persons_four_keys_are_one_object_all_present_all_different_and_only_for_an_enabled_person() {
     use p_age::site::{Site, SiteError};
-    let site = |person: String| format!(r#"{{"persons":[{person}],"hosts":[]}}"#);
+    let site = |person: String| format!(r#"{{"v":1,"persons":[{person}],"hosts":[]}}"#);
     let row = |n: u8| format!(r#"{{"key":"{}"}}"#, key_line(n));
     // a person need not have approval keys at all
     assert!(Site::from_json(&site(r#"{"name":"jan","enabled":true}"#.to_owned())).is_ok());
@@ -151,13 +153,13 @@ fn a_persons_four_keys_are_one_object_all_present_all_different_and_only_for_an_
     ));
     // no key is another person's, and none is a host's
     let two = format!(
-        r#"{{"persons":[{{"name":"jan","enabled":true,{}}},{{"name":"eva","enabled":true,{}}}],"hosts":[]}}"#,
+        r#"{{"v":1,"persons":[{{"name":"jan","enabled":true,{}}},{{"name":"eva","enabled":true,{}}}],"hosts":[]}}"#,
         keys(1),
         keys(4) // 4 is jan's connection key
     );
     assert!(matches!(Site::from_json(&two), Err(SiteError::KeysClash { .. })));
     let host = format!(
-        r#"{{"persons":[{{"name":"jan","enabled":true,{}}}],"hosts":[{{"name":"a.example","key":"{}"}}]}}"#,
+        r#"{{"v":1,"persons":[{{"name":"jan","enabled":true,{}}}],"hosts":[{{"name":"a.example","key":"{}"}}]}}"#,
         keys(1),
         key_line(2)
     );
@@ -193,7 +195,7 @@ fn a_configuration_or_site_file_that_anyone_but_its_owner_can_write_is_refused()
         mode(&path, good);
         assert!(Config::read(&path).is_ok(), "{good:o}");
     }
-    let site = write(dir.path(), "site.json", r#"{"persons":[],"hosts":[]}"#);
+    let site = write(dir.path(), "site.json", r#"{"v":1,"persons":[],"hosts":[]}"#);
     assert!(p_age::site::Site::read(&site).is_ok());
     mode(&site, 0o666);
     assert!(p_age::site::Site::read(&site).is_err());
@@ -238,7 +240,7 @@ fn the_register_on_disk_is_private_versioned_and_never_replaced_by_an_empty_one(
 #[test]
 fn a_register_that_cannot_be_read_stops_the_broker_from_being_built() {
     let dir = private_dir();
-    write(dir.path(), "site.json", r#"{"persons":[],"hosts":[]}"#);
+    write(dir.path(), "site.json", r#"{"v":1,"persons":[],"hosts":[]}"#);
     let page = write(dir.path(), "page.json", &config_text(dir.path(), ""));
     let state = dir.path().join("register.json");
     std::fs::write(&state, "garbage").unwrap();
@@ -271,11 +273,47 @@ fn the_settings_files_are_read_as_p_act_reads_them_one_object_and_nothing_else()
 fn a_site_file_whose_certificates_or_groups_a_standing_could_not_carry_is_refused_when_read() {
     use p_age::site::Site;
     let person =
-        |extra: &str| format!(r#"{{"persons":[{{"name":"jan","enabled":true,{}{extra}}}],"hosts":[]}}"#, keys(1));
+        |extra: &str| format!(r#"{{"v":1,"persons":[{{"name":"jan","enabled":true,{}{extra}}}],"hosts":[]}}"#, keys(1));
     assert!(Site::from_json(&person(r#","groups":["ops","dev"]"#)).is_ok());
     assert!(Site::from_json(&person(r#","groups":["ops","ops"]"#)).is_ok(), "a duplicate is a set's one entry");
     assert!(Site::from_json(&person(r#","groups":["has space"]"#)).is_err());
     assert!(Site::from_json(&person(r#","groups":["a,b"]"#)).is_err());
     assert!(Site::from_json(&person(r#","groups":[""]"#)).is_err());
     assert!(Site::from_json(&person(r#","certificates":["not a certificate"]"#)).is_err());
+}
+
+#[test]
+fn the_site_file_has_a_version_and_members_absent_empty_and_present_are_three_states() {
+    use p_age::site::{Site, SiteError};
+    let person = |name: &str| format!(r#"{{"name":"{name}","enabled":true}}"#);
+    let file = |v: &str, members: &str| {
+        format!(r#"{{{v}"persons":[{},{}],"hosts":[]{members}}}"#, person("jan"), person("eva"))
+    };
+    // a version, and only 1
+    assert!(Site::from_json(&file(r#""v":1,"#, "")).is_ok());
+    assert!(Site::from_json(&file("", "")).is_err(), "no version");
+    assert!(matches!(Site::from_json(&file(r#""v":2,"#, "")), Err(SiteError::Version(2))));
+    assert!(Site::from_json(&file(r#""v":"1","#, "")).is_err());
+    // absent: the directory's
+    let absent = Site::from_json(&file(r#""v":1,"#, "")).unwrap();
+    assert_eq!(absent.members(), None);
+    assert!(!absent.in_group("jan", "ops"), "a broker that does not know who is in a group answers no");
+    // empty: nobody is in any group
+    let empty = Site::from_json(&file(r#""v":1,"#, r#","members":{}"#)).unwrap();
+    assert_eq!(empty.members().map(|m| m.len()), Some(0));
+    assert!(!empty.in_group("jan", "ops"));
+    // present: sorted, each once
+    let some = Site::from_json(&file(r#""v":1,"#, r#","members":{"ops":["jan","eva","jan"],"dev":[]}"#)).unwrap();
+    assert_eq!(some.members().unwrap()["ops"], ["eva", "jan"]);
+    assert!(some.in_group("jan", "ops") && some.in_group("eva", "ops") && !some.in_group("jan", "dev"));
+    assert!(!some.in_group("jan", "nogroup"));
+    // `null` is neither: refused, so that a writer cannot confuse absent and empty
+    assert!(Site::from_json(&file(r#""v":1,"#, r#","members":null"#)).is_err());
+    // a member must be a person of the file, a group a name a standing can carry
+    assert!(matches!(
+        Site::from_json(&file(r#""v":1,"#, r#","members":{"ops":["nobody"]}"#)),
+        Err(SiteError::BadMembers { .. })
+    ));
+    assert!(Site::from_json(&file(r#""v":1,"#, r#","members":{"has space":["jan"]}"#)).is_err());
+    assert!(Site::from_json(&file(r#""v":1,"#, r#","members":["jan"]"#)).is_err());
 }
