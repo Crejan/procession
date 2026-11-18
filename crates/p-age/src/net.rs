@@ -27,10 +27,6 @@ use crate::tls;
 
 /// The line for a message to a pledge. `None` for `Close`.
 fn pledge_line(out: &PledgeOut) -> Option<Vec<u8>> {
-    if matches!(out, PledgeOut::NotReady) {
-        // `not-ready` is not in p-act's `ToPledge` yet; written here until it is (`approval-connections.md`, section 5).
-        return Some(b"{\"schema_version\":1,\"type\":\"not-ready\"}\n".to_vec());
-    }
     out.to_message()?.encode().ok()
 }
 
@@ -40,14 +36,6 @@ fn service_line(out: &ServiceOut) -> Option<Vec<u8>> {
     match out {
         ServiceOut::Answer(a) => Message::Answer(a.clone()).encode(policy).ok(),
         ServiceOut::Error(code) => Message::Error(ErrorMessage { error: *code }).encode(policy).ok(),
-        // `refused` with the broker's reason `not-ready`: not in p-act's `BrokerReason` yet, so written here until it is
-        // (`approval-connections.md`, section 3.7).
-        ServiceOut::NotReady(hash) => Some(
-            format!(
-                "{{\"schema_version\":1,\"type\":\"answer\",\"request\":\"{hash}\",\"result\":\"refused\",\"by\":\"broker\",\"reason\":\"not-ready\"}}\n"
-            )
-            .into_bytes(),
-        ),
         ServiceOut::Close => None,
     }
 }

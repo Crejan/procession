@@ -176,7 +176,7 @@ pub enum Reply {
     Done(Result<(), &'static str>),
     /// Nothing was done. `why` accompanies `Unavailable`.
     Refused(Refusal, Option<&'static str>),
-    Status(Status),
+    Status(Box<Status>),
 }
 
 #[derive(Debug, Serialize, Deserialize, Default)]
@@ -215,6 +215,9 @@ struct ReplyWire {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     uncovered: Option<Vec<String>>,
     /// The broker's own certificate, present only if it is checked.
+    /// Why `ssh-keygen` cannot be used, when it cannot.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    keygen_unusable: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     broker_certificate_path: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -248,6 +251,7 @@ impl Reply {
                 (w.pledges, w.held, w.delegations, w.withdrawn) =
                     (Some(s.pledges), Some(s.held), Some(s.delegations), Some(s.withdrawn));
                 (w.blocked_persons, w.blocked_keys) = (Some(s.blocked_persons.clone()), Some(s.blocked_keys.clone()));
+                w.keygen_unusable = s.keygen_unusable.clone();
                 let b = &s.broker_certificate;
                 w.broker_certificate_path = Some(b.path.clone());
                 w.broker_certificate_valid = Some(b.valid);
@@ -281,7 +285,7 @@ impl Reply {
                 let reason = Refusal::from_wire(&w.reason?)?;
                 Some(Reply::Refused(reason, w.why.as_deref().map(known_why)))
             }
-            "status" => Some(Reply::Status(Status {
+            "status" => Some(Reply::Status(Box::new(Status {
                 degraded: if w.degraded? { Some(known_why(w.why.as_deref().unwrap_or("io"))) } else { None },
                 pledges: w.pledges?,
                 held: w.held?,
@@ -289,6 +293,7 @@ impl Reply {
                 withdrawn: w.withdrawn?,
                 blocked_persons: w.blocked_persons?,
                 blocked_keys: w.blocked_keys?,
+                keygen_unusable: w.keygen_unusable,
                 broker_certificate: BrokerCertificateStatus {
                     path: w.broker_certificate_path?,
                     valid: w.broker_certificate_valid?,
@@ -304,7 +309,7 @@ impl Reply {
                         uncovered: w.uncovered?,
                     }),
                 },
-            })),
+            }))),
             _ => None,
         }
     }
@@ -322,7 +327,7 @@ pub async fn execute(broker: &Arc<Broker>, command: Command) -> Reply {
     let refused = |r| Reply::Refused(r, None);
     match command {
         Command::Status => match broker.with_core(|c, now| (c.status(now), Vec::new())).await {
-            Some(status) => Reply::Status(status),
+            Some(status) => Reply::Status(Box::new(status)),
             None => refused(Refusal::Malformed),
         },
         Command::Block(Target::Person(p)) => {
@@ -569,6 +574,16 @@ pub struct Condition {
 #[must_use]
 pub fn conditions(s: &Status) -> Vec<Condition> {
     let mut list = Vec::new();
+    // Without a usable ssh-keygen the broker can verify and sign nothing: the same meaning as 7, so the same code, and
+    // a line of its own that says why.
+    if let Some(why) = &s.keygen_unusable {
+        list.push(Condition {
+            code: EXIT_NO_BROKER_CERTIFICATE,
+            name: "ssh-keygen-unusable",
+            detail: why.clone(),
+            text: format!("ssh-keygen cannot be used ({why}): the broker can verify and sign nothing"),
+        });
+    }
     let b = &s.broker_certificate;
     if !b.valid {
         let why = b.failure.unwrap_or("refused");

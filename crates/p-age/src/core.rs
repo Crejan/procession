@@ -32,8 +32,6 @@ use crate::site::Site;
 #[derive(Debug, Clone)]
 pub enum ServiceOut {
     Answer(Answer),
-    /// `refused` with the broker's reason `not-ready` for this request (written by `net`, until p-act has the code).
-    NotReady(DocumentHash),
     Error(ErrorCode),
     /// Close after what was queued before.
     Close,
@@ -54,7 +52,7 @@ pub enum PledgeOut {
     NotRegistered(Fingerprint, NotRegisteredReason),
     /// The answer to a withdrawal: whether it is stored (`true`) or in force in memory only.
     Withdrawn(Fingerprint, bool),
-    /// The broker is up and cannot vouch for anything (written by `net`, until p-act has the message).
+    /// The broker is up and cannot vouch for anything.
     NotReady,
     Error(ErrorCode),
     /// Close after what was queued before.
@@ -74,8 +72,8 @@ impl PledgeOut {
             PledgeOut::NotRegistered(fp, reason) => ToPledge::NotRegistered { delegation: fp.clone(), reason: *reason },
             PledgeOut::Withdrawn(fp, stored) => ToPledge::Withdrawn { delegation: fp.clone(), stored: *stored },
             PledgeOut::Error(code) => ToPledge::Exchange(Box::new(Message::Error(ErrorMessage { error: *code }))),
-            // not in p-act's `ToPledge` yet: `net` writes it
-            PledgeOut::NotReady | PledgeOut::Close => return None,
+            PledgeOut::NotReady => ToPledge::NotReady,
+            PledgeOut::Close => return None,
         })
     }
 }
@@ -185,6 +183,9 @@ pub struct Status {
     pub certificates: Option<CertificateStatus>,
     /// The broker's own certificate, which is always checked.
     pub broker_certificate: BrokerCertificateStatus,
+    /// Why `ssh-keygen` cannot be used, if it cannot (`p_act`'s `Keygen::system`): the broker can then verify and sign
+    /// nothing.
+    pub keygen_unusable: Option<String>,
 }
 
 /// What `page status` says of the broker's own certificate.
@@ -316,8 +317,6 @@ struct Held {
     conn: Option<ConnId>,
     /// The answer, held in memory until the service's `ack` or the deadline.
     answer: Option<Answer>,
-    /// The answer is `refused` `not-ready` (p-act's `Answer` cannot say it yet; `answer` holds a placeholder).
-    not_ready: bool,
 }
 
 #[derive(Debug)]
@@ -629,9 +628,7 @@ impl Core {
                 fx.push(Effect::Service(old, ServiceOut::Error(ErrorCode::Superseded)));
                 fx.push(Effect::Service(old, ServiceOut::Close));
             }
-            if h.not_ready {
-                fx.push(Effect::Service(conn, ServiceOut::NotReady(hash)));
-            } else if let Some(answer) = h.answer.clone() {
+            if let Some(answer) = h.answer.clone() {
                 fx.push(Effect::Service(conn, ServiceOut::Answer(answer)));
             }
             return fx;
@@ -684,7 +681,6 @@ impl Core {
                 seq: self.seq,
                 conn: Some(conn),
                 answer: None,
-                not_ready: false,
             },
         );
         fx
@@ -897,19 +893,8 @@ impl Core {
     /// `not-ready`, there is no clearance, and the broker logs that a person's approval was lost to its own state.
     fn approval_lost(&mut self, hash: DocumentHash, person: &str, now: SystemTime) -> Vec<Effect> {
         eprintln!("page: an approval by {person} was lost: the broker has no valid certificate and is not ready");
-        // The answer is held (and given again to a service that comes back) like any other; `Answer` cannot carry the
-        // reason yet, so the request is marked and `ServiceOut::NotReady` is what is sent.
-        let mut fx =
-            self.finish(hash, Outcome::Refused(Refused::Broker(BrokerReason::Unknown)), "approval-lost:not-ready", now);
-        for e in &mut fx {
-            if let Effect::Service(_, out) = e {
-                *out = ServiceOut::NotReady(hash);
-            }
-        }
-        if let Some(h) = self.held.get_mut(&hash) {
-            h.not_ready = true;
-        }
-        fx
+        // The answer is held, and given again to a service that comes back, like any other.
+        self.finish(hash, Outcome::Refused(Refused::Broker(BrokerReason::NotReady)), "approval-lost:not-ready", now)
     }
 
     fn clearance_for(&self, hash: DocumentHash, approval: &str, now: SystemTime) -> Result<Outcome, ()> {
@@ -1155,6 +1140,7 @@ impl Core {
             withdrawn,
             blocked_persons: self.register.blocked_persons(),
             blocked_keys: self.register.blocked_keys(),
+            keygen_unusable: self.crypto.keygen_usable().err(),
             broker_certificate: {
                 let secs = u64::try_from(unix(now)).unwrap_or(0);
                 let path = self.crypto.broker_certificate_file().display().to_string();
@@ -1257,7 +1243,10 @@ mod tests {
     }
 
     /// Signatures that always succeed: the rules of `core` are tested here, the signatures in `tests/`.
-    struct Fake;
+    #[derive(Default)]
+    struct Fake {
+        keygen: Option<String>,
+    }
 
     impl Crypto for Fake {
         fn verify_request(&self, _: &Request, _: &str, _: &PublicKey) -> Result<(), CryptoError> {
@@ -1285,6 +1274,9 @@ mod tests {
             _: SystemTime,
         ) -> Result<BrokerCertificate, BrokerCertificateFailure> {
             Ok(BrokerCertificate { valid_after: 0, valid_before: u64::MAX })
+        }
+        fn keygen_usable(&self) -> Result<(), String> {
+            self.keygen.clone().map_or(Ok(()), Err)
         }
         fn broker_certificate_file(&self) -> std::path::PathBuf {
             std::path::PathBuf::from("/fake/broker-cert.pub")
@@ -1347,7 +1339,7 @@ mod tests {
             Settings { waiting_per_agent: max_waiting },
             register,
             None,
-            Arc::new(Fake),
+            Arc::new(Fake::default()),
             Box::new(log.clone()),
             Trust { site_ca: PublicKey::parse(&key_line(40)).unwrap(), now: now(0) },
         );
@@ -1518,6 +1510,27 @@ mod tests {
         // a second before it, the request is held
         assert!(f.core.submit(SVC, vetted("jan", AGENT_A, 2, 60), now(59)).is_empty());
         assert_eq!(f.core.held_count(), 1);
+    }
+
+    #[test]
+    fn status_says_when_ssh_keygen_cannot_be_used_and_it_is_one_more_line_of_condition_7() {
+        let log = MemoryLog::default();
+        let core = Core::new(
+            site(),
+            Settings::default(),
+            Register::default(),
+            None,
+            Arc::new(Fake { keygen: Some("/usr/bin/ssh-keygen does not exist".to_owned()) }),
+            Box::new(log),
+            Trust { site_ca: PublicKey::parse(&key_line(40)).unwrap(), now: now(0) },
+        );
+        let status = core.status(now(0));
+        assert_eq!(status.keygen_unusable.as_deref(), Some("/usr/bin/ssh-keygen does not exist"));
+        let conditions = crate::admin::conditions(&status);
+        assert_eq!(conditions.len(), 1, "the certificate is fine by this double: {conditions:?}");
+        assert_eq!((conditions[0].code, conditions[0].name), (7, "ssh-keygen-unusable"));
+        // with a usable one there is none
+        assert_eq!(fixture(5).core.status(now(0)).keygen_unusable, None);
     }
 
     #[test]
