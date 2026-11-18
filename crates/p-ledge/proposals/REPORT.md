@@ -648,3 +648,61 @@ missing file is still the empty configuration. Changes in behaviour:
 - Accepted now that was refused before: nothing.
 Unknown members are still refused by `deny_unknown_fields` on `Config` and its structs.
 Nothing was missing in the helper. Unit and integration tests pass, clippy clean.
+
+## `pledge serve` on Linux: what the start path does there (facts from the code, no fix yet)
+
+Start path (`serve.rs:72-105`, `cli.rs:162-173`), in order: print the warning (stderr);
+`ensure_private_dir(state)`; load `config.json`; `ensure_socket_dir(sockets)`; `Record::open`
+(flock); spawn `pledge key-holder` as a child and `list` its keys (`Shared::new`);
+`settle_lost`, `started`; only then bind `agent.sock`, `control.sock`, `service.sock`, print
+"serving". Every failure before that is an `Error` printed by `cli.rs:117-119` as
+`pledge serve: <message>` on **stderr**, exit code 3; stdout is silent. A harness that
+captures and drops stderr sees only "agent.sock does not answer".
+
+- `cfg(target_os)`: only `peer.rs:27` and `:63` (Linux: `SO_PEERCRED` and
+  `/proc/<pid>/exe`; else `getpeereid`, `LOCAL_PEERPID`, `proc_pidpath`) and `paths.rs:36`
+  (default state dir). The Linux branches were never compiled or run by me: only
+  `aarch64-apple-darwin` is installed here, `cargo check --target x86_64-unknown-linux-gnu`
+  is not possible without installing a target (network). They are not on the start path.
+  They run per connection, after "serving": `serve.rs:141,149`: a failing `peer()` is
+  `.ok()` and the connection is **silently dropped** (the client connects, the server
+  closes, no message). That would look like "does not answer" to a client that speaks the
+  protocol; a bare `connect()` still succeeds (backlog).
+- Program identity (`peer.rs:63`): `read_link(/proc/PID/exe)`; fails for a process of another
+  user or under a restrictive `/proc` (hidepid) and then gives `None`: nothing offered,
+  `program-unknown` in the record, no message on stderr.
+- Socket path length: `UnixListener::bind` (`serve.rs:60`) fails with InvalidInput above
+  108 bytes (104 on macOS): `pledge serve: binding <path>: ...` on stderr, exit 3, after the
+  record, the holder and `started` were already done. The issuing socket
+  (`issue.rs`, `<sockets>/issue-<16 hex>/issue.sock`) adds 35 bytes to the directory and
+  fails at `agents start`, as `unavailable` to the client and a line on stderr.
+- Directory checks (`paths.rs:91-101`, `check_private` `:144`): parents are created with
+  `create_dir_all` (umask), the last component with 0700; an existing directory must be
+  owned by the running user, not a symlink, and have no group or other bit (0700), else
+  `Unsafe: ... is open to other users` (stderr, exit 3). A harness that made the state or
+  socket directory with `mkdir`/`create_dir` (0755) gets exactly this on any OS. Parents
+  are not examined: a sticky `/tmp` or `/var/tmp` does not matter for the final directory
+  (only its owner can remove or rename it) and pledge never removes anything outside it;
+  a world-writable parent without the sticky bit would allow swapping the directory
+  between check and use (not checked).
+- Locks (`record.rs:83-95`): `flock(LOCK_EX|LOCK_NB)` on the record, retried 2 s. Any error
+  other than success is treated as "held": on a file system without `flock` (some network
+  or overlay setups: `ENOLCK`, `EOPNOTSUPP`) the message is the wrong one,
+  `... is in use by another pledge serve`, after 2 s. A second `serve` is also detected at
+  `bind_socket` (`serve.rs:49-58`) by connecting to the socket.
+- Holder child (`holder.rs:290`): started from `std::env::current_exe()` (`cli.rs:170`; on
+  Linux `/proc/self/exe`, `" (deleted)"` if the binary was replaced after start). Its stdin
+  and stdout are pipes, **its stderr is inherited**; if it dies (keys directory refused,
+  exec refused) the parent only sees `key holder: the holder has gone` from `Shared::new`.
+- HOME, tty, login session: HOME only for the default state dir and the default
+  `known_hosts` list (`paths.rs:35`, `serve.rs:default_known_hosts`; unset HOME with
+  `--state-dir` given is fine, with defaults it is `no HOME: give --state-dir`). Standard
+  input is read by a thread for dialogs and only decides whether dialogs are possible
+  (`dialog.rs`: EOF means `unavailable` per dialog, not a failed start). No login session,
+  no tty requirement.
+- Tests that would have shown each, had they run on Linux: `peer.rs` unit test
+  (SO_PEERCRED and `/proc/exe`), `paths.rs` and `serve.rs` tests (directory modes, socket
+  binding), `real_programs`/`real_approvals` (whole start). None covers: a socket path over
+  108 bytes (`TestDir` picks short paths), a directory made 0755 by a harness, a file system
+  without `flock`, a hidepid `/proc`, a noexec temp directory.
+Awaiting the owner's own stderr before anything is changed.
