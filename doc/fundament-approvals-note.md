@@ -207,7 +207,20 @@ approval-broker:
   a small piece of `fundament.core`, and it is new mechanism, not model.
   The certificates can be built with `cryptography`, which the store uses
   for every key (`doc/secret-store/index.md`, Generators) and which builds
-  SSH certificates. The hosts list is a product of the same converge, signed
+  SSH certificates. The certificates it issues for a person's approval keys
+  and for the broker's key carry no critical option and no extension: they
+  are issued with everything cleared (`ssh-keygen -s ... -O clear`, or the
+  builder's equivalent), because a verifier refuses one that has any
+  (`approval-formats.md`, section 3.2). What it writes for the broker has
+  one layout: the certificates go into one directory, each a file named
+  `<login>-<purpose>-cert.pub` (OpenSSH's convention for a certificate
+  file; `broker-cert.pub` for the broker's own if it lives there too), from
+  which the broker reads only `*-cert.pub` and takes person, purpose and
+  key from the certificate, never from the name; directory and files are
+  owned by root or the broker's user with no write bit for group or others,
+  and a directory that fails that is refused whole; the site CA's public
+  key is a file of its own (`site_ca` in the broker's configuration). The
+  hosts list is a product of the same converge, signed
   while the key is unlocked. It needs an SSHSIG signature by the CA key
   itself; `ssh-keygen -Y sign` takes a key from a file or an SSH agent, and
   the store's rule is that a key is never written, so the step loads the key

@@ -185,7 +185,6 @@ pub use smtp::SmtpMailer;
 
 #[cfg(feature = "email")]
 mod smtp {
-    use std::fs;
     use std::time::Duration;
 
     use anyhow::{Context, Result};
@@ -216,7 +215,7 @@ mod smtp {
             builder = builder.port(port).timeout(Some(Duration::from_secs(30)));
             if let Some(user) = &cfg.username {
                 let file = cfg.password_file.as_ref().context("email.username needs email.password_file")?;
-                let password = fs::read_to_string(file).with_context(|| format!("reading {}", file.display()))?;
+                let password = crate::secret::read_secret(file)?;
                 builder = builder.credentials(Credentials::new(user.clone(), password.trim_end().to_string()));
             }
             Ok(Self { transport: builder.build(), from: cfg.from.parse().context("email.from")? })

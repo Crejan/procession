@@ -19,6 +19,7 @@ pub mod lock;
 pub mod mcp;
 pub mod outcome;
 pub mod pledge;
+pub mod prover;
 pub mod rate;
 pub mod rules;
 pub mod runner;

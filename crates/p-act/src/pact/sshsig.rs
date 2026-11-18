@@ -84,7 +84,8 @@ mod tests {
             .stderr(Stdio::null())
             .spawn()
             .unwrap();
-        child.stdin.take().unwrap().write_all(message).unwrap();
+        // A child that exits first makes this write fail with `Broken pipe`: its status is the answer.
+        let _ = child.stdin.take().unwrap().write_all(message);
         let out = child.wait_with_output().unwrap();
         assert!(out.status.success());
         String::from_utf8(out.stdout).unwrap()
@@ -111,7 +112,8 @@ mod tests {
             .stderr(Stdio::null())
             .spawn()
             .unwrap();
-        child.stdin.take().unwrap().write_all(message).unwrap();
+        // A child that exits first makes this write fail with `Broken pipe`: its status is the answer.
+        let _ = child.stdin.take().unwrap().write_all(message);
         child.wait().unwrap().success()
     }
 

@@ -3,10 +3,12 @@
 use super::Settings;
 use super::bundle::Bundle;
 use super::catalogue::Catalogue;
+use super::guard;
 use super::http::HttpTransport;
 use super::mcp::{Context, call_once, serve};
 use super::rt::{SystemClock, SystemRandomSource, harden};
 use super::transport::Transport;
+use p_ermit::peer::{self, LOG_INTERVAL, Throttle};
 use serde_json::Value;
 use std::io::{self, Read, Write};
 use std::os::unix::fs::PermissionsExt;
@@ -16,7 +18,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 const USAGE: &str = "usage:
-  pact serve --socket PATH [--socket-mode OCTAL] [--min-wait SECONDS]   (bundle on standard input)
+  pact serve --socket PATH [--socket-mode OCTAL] [--client-uid UID]... [--refuse-own-user] [--min-wait SECONDS]
+                                                                        (bundle on standard input)
   pact stdio --socket PATH
   pact call [--min-wait SECONDS] TOOL [ARGUMENTS_JSON]                  (bundle on standard input)
   pact tools [--min-wait SECONDS]                                       (bundle on standard input)";
@@ -28,6 +31,8 @@ struct Options {
     command: String,
     socket: Option<PathBuf>,
     socket_mode: u32,
+    client_uids: Vec<u32>,
+    refuse_own_user: bool,
     min_wait: Option<u32>,
     positional: Vec<String>,
 }
@@ -35,7 +40,15 @@ struct Options {
 fn parse(args: &[String]) -> Result<Options, String> {
     let mut it = args.iter();
     let command = it.next().ok_or("no command")?.clone();
-    let mut o = Options { command, socket: None, socket_mode: 0o600, min_wait: None, positional: vec![] };
+    let mut o = Options {
+        command,
+        socket: None,
+        socket_mode: 0o600,
+        client_uids: vec![],
+        refuse_own_user: false,
+        min_wait: None,
+        positional: vec![],
+    };
     while let Some(a) = it.next() {
         let mut value = |name: &str| it.next().cloned().ok_or_else(|| format!("{name} needs a value"));
         match a.as_str() {
@@ -44,6 +57,11 @@ fn parse(args: &[String]) -> Result<Options, String> {
                 o.socket_mode = u32::from_str_radix(&value("--socket-mode")?, 8)
                     .map_err(|_| "--socket-mode is an octal number".to_owned())?
             }
+            "--client-uid" => {
+                o.client_uids
+                    .push(value("--client-uid")?.parse().map_err(|_| "--client-uid is a numeric user id".to_owned())?);
+            }
+            "--refuse-own-user" => o.refuse_own_user = true,
             "--min-wait" => {
                 o.min_wait =
                     Some(value("--min-wait")?.parse().map_err(|_| "--min-wait is a number of seconds".to_owned())?)
@@ -92,7 +110,7 @@ pub fn run(args: Vec<String>) -> i32 {
 fn context(options: &Options) -> Result<Arc<Context>, String> {
     harden().iter().for_each(|w| log(w));
     let now = super::rt::Clock::now(&SystemClock);
-    let bundle = Bundle::read(io::stdin().lock(), now).map_err(|e| e.to_string())?;
+    let bundle = Bundle::read(guard::bundle_input()?, now).map_err(|e| e.to_string())?;
     let settings = Settings::new(bundle.config.deadline_seconds, options.min_wait);
     #[cfg(not(feature = "pact-tls"))]
     if let Some(s) = bundle.config.services.iter().find(|s| s.url.starts_with("https://")) {
@@ -125,9 +143,15 @@ fn context(options: &Options) -> Result<Arc<Context>, String> {
 
 fn cmd_serve(options: &Options) -> Result<(), String> {
     let path = options.socket.clone().ok_or("serve needs --socket")?;
+    let own = p_ermit::peer::own_uid();
+    let clients = guard::Clients::new(options.client_uids.clone(), options.refuse_own_user, own)?;
     let ctx = context(options)?;
     // Standard input has been read to its end; nothing else is read after start.
-    let listener = UnixListener::bind(&path).map_err(|e| format!("cannot listen on {}: {e}", path.display()))?;
+    clients.start_warning(own).iter().for_each(|w| log(w));
+    guard::warn_directories(&path, &mut |w| log(w));
+    // With the umask 077 the socket never has another mode, not even for the instant before the mode is set.
+    let listener = guard::with_private_umask(|| UnixListener::bind(&path))
+        .map_err(|e| format!("cannot listen on {}: {e}", path.display()))?;
     std::fs::set_permissions(&path, std::fs::Permissions::from_mode(options.socket_mode))
         .map_err(|e| format!("cannot set the socket's mode: {e}"))?;
     log(&format!("listening on {}", path.display()));
@@ -138,11 +162,17 @@ fn cmd_serve(options: &Options) -> Result<(), String> {
             refresher.refresh();
         }
     });
+    let mut throttle = Throttle::new("pact", LOG_INTERVAL);
     for stream in listener.incoming() {
         let Ok(stream) = stream else { continue };
+        // Read or drop: a client whose credentials cannot be read, or who is not allowed, is closed without a word.
+        if peer::accept(&stream, &clients.policy(), "a client was refused", &mut throttle, &mut |l| eprintln!("{l}"))
+            .is_none()
+        {
+            continue;
+        }
         let ctx = Arc::clone(&ctx);
         std::thread::spawn(move || {
-            warn_if_same_user(&stream);
             let Ok(reader) = stream.try_clone() else { return };
             if let Err(e) = serve(&ctx, reader, stream) {
                 log(&format!("a client ended badly: {e}"));
@@ -151,33 +181,6 @@ fn cmd_serve(options: &Options) -> Result<(), String> {
     }
     Ok(())
 }
-
-/// The key stays secret from the model only if they are different users (R2): say so when a client is the same user.
-#[cfg(target_os = "linux")]
-fn warn_if_same_user(stream: &UnixStream) {
-    use std::os::fd::AsRawFd;
-    let mut cred = libc::ucred { pid: 0, uid: 0, gid: 0 };
-    let mut len = libc::socklen_t::try_from(std::mem::size_of::<libc::ucred>()).unwrap_or(0);
-    // SAFETY: `cred` and `len` are valid for the call, and `len` is the size of `cred`.
-    let status = unsafe {
-        libc::getsockopt(
-            stream.as_raw_fd(),
-            libc::SOL_SOCKET,
-            libc::SO_PEERCRED,
-            std::ptr::addr_of_mut!(cred).cast(),
-            &mut len,
-        )
-    };
-    // SAFETY: `geteuid` has no arguments and cannot fail.
-    if status == 0 && cred.uid == unsafe { libc::geteuid() } {
-        log(
-            "a client connected as the same user as pact: the agent's key is not kept from it by the sandbox (approvals.md R2)",
-        );
-    }
-}
-
-#[cfg(not(target_os = "linux"))]
-fn warn_if_same_user(_: &UnixStream) {}
 
 fn cmd_stdio(options: &Options) -> Result<(), String> {
     let path = options.socket.clone().ok_or("stdio needs --socket")?;

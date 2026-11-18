@@ -37,6 +37,23 @@ pub fn socket_dir() -> PathBuf {
     if sandbox.is_dir() { sandbox } else { std::env::temp_dir() }
 }
 
+/// Write a certificate into the certificates directory the way the site's signing step does:
+/// `<login>-<purpose>-cert.pub`, one line, mode 0644; the directory is made (0755) if it is not there. The broker
+/// reads person, purpose and key from the certificate, never from the name. The path of the file.
+///
+/// # Panics
+///
+/// If the file cannot be written: this is for tests.
+pub fn write_certificate(directory: &Path, login: &str, purpose: &str, line: &str) -> PathBuf {
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::create_dir_all(directory).expect("certificates directory");
+    std::fs::set_permissions(directory, std::fs::Permissions::from_mode(0o755)).expect("certificates directory mode");
+    let path = directory.join(format!("{login}-{purpose}{}", crate::certs::SUFFIX));
+    std::fs::write(&path, format!("{}\n", line.trim_end())).expect("certificate file");
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).expect("certificate file mode");
+    path
+}
+
 /// One person of a site file.
 #[derive(Debug, Clone)]
 pub struct PersonSpec {
@@ -44,14 +61,13 @@ pub struct PersonSpec {
     enabled: bool,
     keys: Option<[String; 4]>,
     groups: Vec<String>,
-    certificates: Vec<String>,
 }
 
 impl PersonSpec {
     /// An enabled person without keys.
     #[must_use]
     pub fn new(name: &str) -> PersonSpec {
-        PersonSpec { name: name.to_owned(), enabled: true, keys: None, groups: Vec::new(), certificates: Vec::new() }
+        PersonSpec { name: name.to_owned(), enabled: true, keys: None, groups: Vec::new() }
     }
 
     /// The person's four keys, as public key lines (`<type> <base64> [comment]`): confirmed, automatic,
@@ -66,13 +82,6 @@ impl PersonSpec {
     #[must_use]
     pub fn groups(mut self, groups: &[&str]) -> PersonSpec {
         self.groups = groups.iter().map(|g| (*g).to_owned()).collect();
-        self
-    }
-
-    /// The certificates of the person's approval keys, as `-cert.pub` lines.
-    #[must_use]
-    pub fn certificates(mut self, certificates: impl IntoIterator<Item = String>) -> PersonSpec {
-        self.certificates = certificates.into_iter().map(|c| c.trim().to_owned()).collect();
         self
     }
 
@@ -129,8 +138,7 @@ impl SiteBuilder {
             .persons
             .iter()
             .map(|p| {
-                let mut o =
-                    json!({"name": p.name, "enabled": p.enabled, "groups": p.groups, "certificates": p.certificates});
+                let mut o = json!({"name": p.name, "enabled": p.enabled, "groups": p.groups});
                 if let Some([confirmed, automatic, delegation, connection]) = &p.keys {
                     o["keys"] = json!({"confirmed": row(confirmed), "automatic": row(automatic),
                                        "delegation": row(delegation), "connection": row(connection)});
@@ -168,6 +176,7 @@ pub struct BrokerSetup {
     timeouts: Timeouts,
     clock: Arc<dyn Clock>,
     crypto: Option<Arc<dyn Crypto>>,
+    certificates: Option<crate::certs::CertificateInput>,
 }
 
 /// A broker that was started.
@@ -192,6 +201,7 @@ impl BrokerSetup {
             timeouts: Timeouts::default(),
             clock: Arc::new(SystemClock),
             crypto: None,
+            certificates: None,
         }
     }
 
@@ -217,6 +227,14 @@ impl BrokerSetup {
     #[must_use]
     pub fn crypto(mut self, crypto: Arc<dyn Crypto>) -> BrokerSetup {
         self.crypto = Some(crypto);
+        self
+    }
+
+    /// The certificates the broker carries to pledge: a directory of `*-cert.pub` files, checked against `site_ca`
+    /// (see [`write_certificate`] for the files' names). Without this call none are carried.
+    #[must_use]
+    pub fn certificates(mut self, site_ca: p_act::sign::PublicKey, directory: impl Into<PathBuf>) -> BrokerSetup {
+        self.certificates = Some(crate::certs::CertificateInput { site_ca, directory: directory.into() });
         self
     }
 
@@ -247,6 +265,10 @@ impl BrokerSetup {
             Arc::clone(&crypto),
             Box::new(log.clone()),
         );
+        let core = match self.certificates {
+            Some(input) => core.with_certificates(input, self.clock.now()),
+            None => core,
+        };
         let broker = Broker::new(core, crypto, site, self.clock, self.timeouts, 8);
         TestBroker { broker, log, register }
     }

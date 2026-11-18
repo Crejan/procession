@@ -385,6 +385,12 @@ fn commands_and_answers_are_read_as_strictly_as_everything_else() {
         withdrawn: 1,
         blocked_persons: vec!["eva".into()],
         blocked_keys: vec![fp.to_string()],
+        certificates: Some(p_age::core::CertificateStatus {
+            carried: 3,
+            not_carried: 1,
+            directory_refused: false,
+            uncovered: vec!["eva:automatic".into()],
+        }),
     };
     for r in [
         Reply::Done(Ok(())),

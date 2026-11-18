@@ -122,6 +122,10 @@ pub enum SignError {
     NotUserCertificate,
     #[error("the agent's certificate has the critical option `{0}`")]
     CriticalOption(String),
+    #[error(
+        "the certificate has the extension `{0}`; certificates the site CA issues carry none (issue them with `-O clear`)"
+    )]
+    SiteCertificateExtension(String),
     #[error("the agent's certificate has the extension `{0}`, only `groups@procession` is allowed")]
     UnknownExtension(String),
     #[error("the agent's certificate has a bad `groups@procession`: {0}")]
@@ -810,7 +814,7 @@ pub fn verify_approval(request: &Request, sig: &str, trust: ApprovalTrust<'_>) -
             return Err(SignError::ApprovalForAnotherPerson);
         }
     }
-    let attempt = |kind: ApprovalKind| {
+    let signed = |kind: ApprovalKind| {
         let principal = format!("{person}:{}", kind.suffix());
         let allowed = match trust {
             ApprovalTrust::SiteCa(ca) => ca_line("*:confirmed,*:automatic", &[Namespace::Approval], ca),
@@ -821,6 +825,14 @@ pub fn verify_approval(request: &Request, sig: &str, trust: ApprovalTrust<'_>) -
             ),
         };
         verify(Namespace::Approval, &allowed, &principal, sig, request.as_bytes())
+    };
+    let attempt = |kind: ApprovalKind| {
+        signed(kind)?;
+        // Signed by a key certified by the site CA: its certificate has no option or extension.
+        if matches!(trust, ApprovalTrust::SiteCa(_)) {
+            site_certificate_in(sig)?;
+        }
+        Ok::<(), SignError>(())
     };
     match attempt(ApprovalKind::Confirmed) {
         Ok(()) => Ok(ApprovalKind::Confirmed),
@@ -842,7 +854,8 @@ pub fn sign_clearance(signer: &(impl SshsigSigner + ?Sized), clearance: &Clearan
 /// is the caller's to check.
 pub fn verify_clearance(clearance: &Clearance, sig: &str, site_ca: &PublicKey) -> Result<(), SignError> {
     let allowed = ca_line("broker", &[Namespace::Clearance], site_ca);
-    verify(Namespace::Clearance, &allowed, "broker", sig, clearance.as_bytes())
+    verify(Namespace::Clearance, &allowed, "broker", sig, clearance.as_bytes())?;
+    site_certificate_in(sig)
 }
 
 // ---------------------------------------------------------------------------
@@ -888,7 +901,8 @@ pub fn sign_broker(signer: &(impl SshsigSigner + ?Sized), document: &[u8]) -> Re
 /// `broker`, against the site CA's key. A person's key, certified for a person, does not verify here.
 pub fn verify_broker(site_ca: &PublicKey, sig: &str, document: &[u8]) -> Result<(), SignError> {
     let allowed = ca_line("broker", &[Namespace::Broker], site_ca);
-    verify(Namespace::Broker, &allowed, "broker", sig, document)
+    verify(Namespace::Broker, &allowed, "broker", sig, document)?;
+    site_certificate_in(sig)
 }
 
 // ---------------------------------------------------------------------------
@@ -1030,6 +1044,24 @@ pub fn verify_approval_certificate_for(
     if cert.person == person && cert.kind == kind { Ok(cert) } else { Err(SignError::NotTheExpectedName) }
 }
 
+/// A certificate the site CA issues (an approval key's, the broker's) carries **no critical option and no extension**
+/// (`approval-formats.md` section 3.2): what is not specified must not be there, since some other consumer of OpenSSH
+/// certificates might honour it.
+fn no_option_or_extension(cert: &Certificate) -> Result<(), SignError> {
+    if let Some((name, _)) = cert.critical_options.first() {
+        return Err(SignError::CriticalOption(shown(name)));
+    }
+    if let Some((name, _)) = cert.extensions.first() {
+        return Err(SignError::SiteCertificateExtension(shown(name)));
+    }
+    Ok(())
+}
+
+/// After a signature by a site-CA-certified key verified: the certificate inside it has no option or extension.
+fn site_certificate_in(sig: &str) -> Result<(), SignError> {
+    no_option_or_extension(&signature_certificate(sig)?)
+}
+
 /// Everything of [`verify_approval_certificate`] except the time: the shape, the name, the issuer and the signature. The
 /// caller judges validity itself, from `valid_after` and `valid_before` or [`ApprovalCertificate::valid_at`].
 pub fn check_approval_certificate(line: &str, site_ca: &PublicKey) -> Result<ApprovalCertificate, SignError> {
@@ -1037,9 +1069,7 @@ pub fn check_approval_certificate(line: &str, site_ca: &PublicKey) -> Result<App
     if cert.cert_type != 1 {
         return Err(SignError::NotUserCertificate);
     }
-    if let Some((name, _)) = cert.critical_options.first() {
-        return Err(SignError::CriticalOption(name.clone()));
-    }
+    no_option_or_extension(&cert)?;
     let principal = match <[String; 1]>::try_from(cert.principals.clone()) {
         Ok([p]) => p,
         Err(many) => return Err(SignError::PrincipalCount { found: many.len() }),

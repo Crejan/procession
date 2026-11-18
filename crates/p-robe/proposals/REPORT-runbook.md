@@ -382,3 +382,35 @@ processes); the service no longer waits for the pipe then (one second, then it a
 not text, not started), `outcome::dispatcher` per code, service (each runner result; `test fail` end to end with the audit line), MCP result, stage1 case 1b.
 **Stage 1:** case 1b ends `failed` for the service, but `pact` (p-act) does not know the word and says `unknown`; the test accepts both until p-act passes it on (the
 service's log and the audit line are checked either way). Stage A scripts are untouched: none of them expects a verb code.
+
+## Update: `rt procs` and `rt irq` run the real `prover`
+
+`src/prover.rs`, as `SPEC.md` ("A verb that runs `prover`") says; a few points that went further than the text:
+- **The path** is the constant `/usr/local/bin/prover`, not a setting: the dispatcher runs it as root, and nothing an account can write may name it. Before it is run
+  (for root) it must be a file owned by root that group and others cannot write, else `tool-unusable` (failed). `sys kit` shows `prover` and `prover_problem`, with a warning.
+- **A test build** takes `PROBE_TEST_PROVER` (never for root, like `PROBE_TEST_SANDBOX`): the row's command has no option for another `/proc`, and must not have. `tests/prover.rs` points it at a
+  script that runs the **real** `prover` (built on demand) with the roots of `crates/p-rover/tests/fixtures/host1` in front of the row's words: `rt procs` gives the header, the threads, the
+  finding `rt-on-housekeeping` and trailer `rc` 1 / `warnings`; `max=1` and `duration=1 top=1` arrive as `--max 1` and `--duration 1s --top 1`. Every failing case is tested against fakes
+  (`prover::tests`, and in the dispatcher with a script as `prover`): code 4/5/127, a signal, the timeout, not JSON / an array / two objects / not UTF-8 / empty, one byte over 4 MiB, another
+  `subcommand` or `schema_version`, a missing member, a record of a reserved type: each is exit 70 with its cause, and the output is a header, one `error` record and a trailer.
+- **Records are the tool's, as it wrote them** (`serde_json` `raw_value`, no new crate): the member order is kept; the whitespace between tokens is removed so that a record is one line.
+- **When the answer is cut at the cap:** superseded, see the next update (the trailer is always written).
+- **Parameters** are checked by the rating rule (`rate.rs`) in the service and again in the dispatcher: `max` 1..10000, `duration` 1..30, `top` 1..1000, each once, digits only; others are refused (64) before anything starts. They add nothing to the rating.
+- `sys kit`'s `verbs_ready` is now 3 plus the test verbs.
+- **Also, three timing-dependent tests were made independent of the machine** (earlier commit) and `with_no_answer_the_call_expires_at_its_deadline…` had a lower bound of one second that a whole-second deadline can undercut (0.977 s seen): it is 500 ms now.
+
+## Update: the closing record is never cut; the path's directories are checked (designer's decisions)
+
+**Path.** `PROVER_PATH` is one constant (packaging may change it at build time; no setting). For root the file where the name leads and every directory above it down to `/` must be
+owned by root and not writable by group or others, else `tool-unusable` (failed). `unsafe_chain` is tested without root by naming another uid as the trusted one and writable bits per level.
+**The cap**, for every verb (`answer.rs`): the cap holds for everything before the closing record; later lines are counted, not written (the verb is not stopped, so counts are complete); then the
+`truncated` record (`limit_bytes`, `dropped_lines`, `dropped_bytes`, `dropped` by type for the eight most numerous, `others`) and then the closing record, always: `prover`'s trailer (`rc`, `result`, the tool's counts,
+`truncated: true`) and `sys kit`'s `summary`. Reserved out of the cap: 1024 B and 2048 B. The `done` audit line says `truncated=true dropped_lines=N`.
+**Tests:** `answer` (a cut answer: counts by type and bytes exact, closing record present and within its bound; the `truncated` record within its bound for 300 long type names; an answer that fits is unmarked), a cut `sys kit` through the dispatcher
+(summary present, counts the tool's), a cut `prover` answer (12 000 records and 300 findings: trailer `rc` 2/`critical`/`truncated` true, `records` 12 000, `findings` 300, written + dropped = what the tool gave).
+
+| What an agent saw for an answer over the cap | Before (up to `057774c`) | Now |
+|---|---|---|
+| `sys kit`-like (no row has one that long) | `done`, lines, then `{"type":"truncated","limit_bytes":N}` last; no `summary`, so no `usable`, no problems or warnings | `done`, lines, `truncated` with the drop counts, then the `summary` with its full content |
+| a `prover` row (new in `dc5685b`, never in a release) | `done`, lines, `truncated`, no trailer (`rc`, `result` missing) | `done`, lines, `truncated` with counts, trailer with `rc`, `result` and the tool's counts |
+The service and MCP did not change: both pass the dispatcher's lines on (`done`, `rc` 0, the lines as the answer); the message limit (4 MiB) holds as the cap did not grow.
