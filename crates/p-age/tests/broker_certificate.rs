@@ -8,7 +8,6 @@ use std::os::unix::fs::PermissionsExt;
 use std::path::PathBuf;
 
 use common::*;
-use p_act::exchange::{BrokerReason, ClearancePolicy, Message, Outcome, Refused};
 use p_act::sign::{Signer, sign_approval};
 use p_age::admin::{Command, Reply, execute};
 
@@ -35,7 +34,7 @@ async fn recheck(w: &World) {
 
 async fn status(w: &World) -> p_age::core::BrokerCertificateStatus {
     let Reply::Status(s) = execute(&w.broker, Command::Status).await else { panic!("status") };
-    s.broker_certificate.expect("the broker's certificate is checked")
+    s.broker_certificate
 }
 
 #[tokio::test]
@@ -88,8 +87,12 @@ async fn each_way_a_certificate_can_be_wrong_is_a_broker_without_a_certificate_a
     assert!(status(&w).await.valid);
 }
 
+async fn nothing_for(c: &mut Client) {
+    assert!(tokio::time::timeout(std::time::Duration::from_millis(400), c.lines.read(None)).await.is_err());
+}
+
 #[tokio::test]
-async fn a_broker_without_a_valid_certificate_issues_no_clearance_and_no_standing_and_recovers() {
+async fn a_broker_that_is_not_ready_lets_a_pledge_in_without_a_standing_and_serves_only_what_restricts() {
     let w = World::new();
     let mut pledge = open_pledge(&w).await;
     pledge.connect_as("jan", &w.jan_connection).await;
@@ -97,45 +100,92 @@ async fn a_broker_without_a_valid_certificate_issues_no_clearance_and_no_standin
         .send_json(serde_json::json!({"schema_version":1,"type":"delegation","cert":w.keys.cert_line(&w.agent)}))
         .await;
     assert_eq!(pledge.recv_type().await, "registered");
-    // the certificate ends: not at the next look but at its end, the broker does not sign
-    reissue(&w, &w.site_ca, "broker", "20200101Z:20200102Z", &[]);
+    let fp = agent_fingerprint(&w);
     let submit = w.submit(1, 500);
     let mut service = open_service(&w);
     service.send(&submit_line(&submit)).await;
     assert_eq!(pledge.recv_type().await, "submit");
-    recheck(&w).await; // noticed
+
+    // the certificate ends: the pledge that is connected is told `not-ready`, once
+    reissue(&w, &w.site_ca, "broker", "20200101Z:20200102Z", &[]);
+    recheck(&w).await;
+    assert_eq!(pledge.recv().await, serde_json::json!({"schema_version":1,"type":"not-ready"}));
+    w.clock.advance(61);
+    w.broker.sweep().await;
+    nothing_for(&mut pledge).await;
+
+    // an approval that comes back: the service is answered `refused` `not-ready`, no clearance; the loss is logged
     let approval = sign_approval(&Signer::certified(&w.jan_confirmed).unwrap(), submit.request()).unwrap();
     pledge.send(&approval_line(hash_of(&submit), &approval)).await;
-    let line = service.recv_raw().await.unwrap();
-    let Message::Answer(answer) = Message::parse(&line, ClearancePolicy::Required).unwrap() else {
-        panic!("an answer")
-    };
-    assert!(
-        matches!(answer.outcome, Outcome::Refused(Refused::Broker(BrokerReason::Busy))),
-        "an approval comes back and gets no clearance: {answer:?}"
+    let v = service.recv().await;
+    assert_eq!(
+        (v["type"].as_str(), v["result"].as_str(), v["by"].as_str(), v["reason"].as_str()),
+        (Some("answer"), Some("refused"), Some("broker"), Some("not-ready"))
     );
-    // a pledge that signs in is told `busy` (no standing can be made that it could verify) and closed
-    let mut again = open_pledge(&w).await;
-    again.sign_in("jan", &w.jan_connection).await;
-    let mut got = again.recv().await;
-    while got["type"] == "ready" {
-        got = again.recv().await;
-    }
-    assert_eq!(got["error"], "busy");
-    // a good certificate again: noticed within a minute, and what was refused works
+    assert!(v.get("clearance").is_none() && v.get("approval").is_none());
+    wait_logged(&w, 1).await;
+    assert_eq!(w.log.entries()[0].result, "approval-lost:not-ready");
+    // a service that comes back for it gets the same answer again
+    let mut again = open_service(&w);
+    again.send(&submit_line(&submit)).await;
+    assert_eq!(again.recv().await["reason"], "not-ready");
+
+    // a registration: `not-registered` with `unavailable`; nothing that permits is served
+    let other = w.keys.certified("agent2", &w.jan_delegation, "jan", "-5m:+8h", &["extension:groups@procession=ops"]);
+    pledge.send_json(serde_json::json!({"schema_version":1,"type":"delegation","cert":w.keys.cert_line(&other)})).await;
+    let v = pledge.recv().await;
+    assert_eq!((v["type"].as_str(), v["reason"].as_str()), (Some("not-registered"), Some("unavailable")));
+    // a withdrawal is taken and answered as always
+    pledge.send_json(serde_json::json!({"schema_version":1,"type":"withdraw","delegation":fp})).await;
+    let v = pledge.recv().await;
+    assert_eq!((v["type"].as_str(), v["stored"].as_bool()), (Some("withdrawn"), Some(true)));
+
+    // a pledge that signs in is let in: `ready`, then `not-ready` in place of a standing, and the connection stays
+    let mut eva = open_pledge(&w).await;
+    eva.sign_in("eva", &w.eva_connection).await;
+    assert_eq!(eva.recv_type().await, "ready");
+    assert_eq!(eva.recv().await, serde_json::json!({"schema_version":1,"type":"not-ready"}));
+    eva.send_json(serde_json::json!({"schema_version":1,"type":"ping"})).await;
+    nothing_for(&mut eva).await;
+    // an administrator's block is in force and nothing is sent that could not be vouched for
+    w.broker.block_person("eva".into()).await;
+    nothing_for(&mut eva).await;
+
+    // the certificate is valid again: both pledges get the standing, without signing in again
     reissue(&w, &w.site_ca, "broker", VALID, &[]);
     recheck(&w).await;
-    let submit = w.submit(2, 500);
+    let v = pledge.recv().await;
+    assert_eq!(v["type"], "notice");
+    let v = eva.recv().await;
+    assert_eq!(v["type"], "notice");
+}
+
+#[tokio::test]
+async fn a_certificate_that_ends_between_two_looks_is_noticed_at_its_end_and_requests_wait_for_the_standing() {
+    let w = World::new();
+    reissue(&w, &w.site_ca, "broker", "-1h:+2m", &[]);
+    recheck(&w).await; // the short certificate is the one in force now
+    let mut pledge = open_pledge(&w).await;
+    pledge.connect_as("jan", &w.jan_connection).await;
+    pledge
+        .send_json(serde_json::json!({"schema_version":1,"type":"delegation","cert":w.keys.cert_line(&w.agent)}))
+        .await;
+    assert_eq!(pledge.recv_type().await, "registered");
+    // it ends with no look at the file between: the sweep (every second) sees the end
+    w.clock.advance(125);
+    w.broker.sweep().await;
+    assert_eq!(pledge.recv_type().await, "not-ready");
+    // a request that arrives now is held and not put to the pledge
+    let submit = w.submit(1, 500);
     let mut service = open_service(&w);
     service.send(&submit_line(&submit)).await;
+    wait_held(&w, 1).await;
+    nothing_for(&mut pledge).await;
+    // a valid certificate: the standing, and then the request that waited
+    reissue(&w, &w.site_ca, "broker", VALID, &[]);
+    recheck(&w).await;
+    assert_eq!(pledge.recv_type().await, "notice");
     assert_eq!(pledge.recv_type().await, "submit");
-    let approval = sign_approval(&Signer::certified(&w.jan_confirmed).unwrap(), submit.request()).unwrap();
-    pledge.send(&approval_line(hash_of(&submit), &approval)).await;
-    let line = service.recv_raw().await.unwrap();
-    let Message::Answer(answer) = Message::parse(&line, ClearancePolicy::Required).unwrap() else {
-        panic!("an answer")
-    };
-    assert!(matches!(answer.outcome, Outcome::Approved(_)), "{answer:?}");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -145,7 +195,10 @@ async fn page_status_exits_7_without_a_valid_certificate_before_5_and_6() {
     let config = config_file(&w);
     let (code, out, _) = page(&config, &["status"]).await;
     assert_eq!(code, 0, "{out}");
-    assert!(out.contains("broker certificate: valid,") && out.contains("days left"), "{out}");
+    assert!(
+        out.contains("conditions: none") && out.contains("broker certificate (") && out.contains("-cert.pub): valid,"),
+        "{out}"
+    );
     // 6: eva has no confirmed certificate
     std::fs::remove_file(w.certs_dir.join("eva-confirmed-cert.pub")).unwrap();
     recheck(&w).await;
@@ -162,10 +215,33 @@ async fn page_status_exits_7_without_a_valid_certificate_before_5_and_6() {
     recheck(&w).await;
     let (code, out, _) = page(&config, &["status"]).await;
     assert_eq!(code, 7, "{out}");
-    assert!(out.contains("broker certificate: NOT valid (expired): no clearances are issued"), "{out}");
+    assert!(
+        out.contains("7  the broker has no valid certificate of its own (") && out.contains("): expired;"),
+        "{out}"
+    );
+    // every condition that holds is a line, the gravest first: 7, then 5, then 6
+    let lines: Vec<&str> =
+        out.lines().filter(|l| l.starts_with("  7  ") || l.starts_with("  5  ") || l.starts_with("  6  ")).collect();
+    assert_eq!(
+        lines.iter().map(|l| &l[2..3]).collect::<Vec<_>>(),
+        if can_lock { vec!["7", "5", "6"] } else { vec!["7", "6"] },
+        "{out}"
+    );
+    // and the same list as an array
+    let (code, json, _) = page(&config, &["status", "--format", "json"]).await;
+    assert_eq!(code, 7);
+    let list: serde_json::Value = serde_json::from_str(&json).unwrap();
+    let codes: Vec<u64> = list.as_array().unwrap().iter().map(|c| c["code"].as_u64().unwrap()).collect();
+    assert_eq!(codes, if can_lock { vec![7, 5, 6] } else { vec![7, 6] }, "{json}");
+    assert_eq!(list[0]["condition"], "no-broker-certificate");
+    assert_eq!(list[0]["detail"], "expired");
     let (_, help, _) = page(&config, &["status", "--help"]).await;
     assert!(help.contains("7  the broker has no valid certificate of its own: it issues no clearances"), "{help}");
-    assert!(help.contains("returns 7, then 5, then 6"), "{help}");
+    assert!(
+        help.contains("The exit code of `status` is the gravest condition that holds, in the order 7, 5, 6"),
+        "{help}"
+    );
+    assert!(help.contains("its lines are the complete list"), "{help}");
     std::fs::set_permissions(w.keys.dir.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
 }
 

@@ -19,7 +19,7 @@ use std::sync::Arc;
 use rcgen::{BasicConstraints, CertificateParams, IsCa, Issuer, KeyPair};
 use serde_json::{Value, json};
 
-use crate::core::{Core, Settings};
+use crate::core::{Core, Settings, Trust};
 use crate::crypto::{Crypto, SshCrypto};
 use crate::log::MemoryLog;
 use crate::net::{Broker, Clock, SystemClock, Timeouts};
@@ -187,6 +187,41 @@ pub struct TestBroker {
     pub log: MemoryLog,
     /// The register file.
     pub register: PathBuf,
+    /// The site CA the broker checks against: the one given, or the one the builder made.
+    pub site_ca: p_act::sign::PublicKey,
+}
+
+/// Make a site CA in `dir` and issue the certificate (`broker`, no extension, valid until 2099) for `broker_key`, in
+/// the place `ssh-keygen` finds it: `<broker_key>-cert.pub`. The CA's public key.
+fn make_site_ca(dir: &Path, broker_key: &Path) -> p_act::sign::PublicKey {
+    let ca = dir.join("test-site-ca");
+    let keygen = |args: &[&str]| {
+        let out = std::process::Command::new("ssh-keygen")
+            .args(args)
+            .stdin(std::process::Stdio::null())
+            .output()
+            .expect("ssh-keygen");
+        assert!(out.status.success(), "ssh-keygen {args:?}: {}", String::from_utf8_lossy(&out.stderr));
+    };
+    if !ca.exists() {
+        keygen(&["-q", "-t", "ed25519", "-N", "", "-C", "", "-f", &ca.to_string_lossy()]);
+    }
+    let public = format!("{}.pub", broker_key.display());
+    keygen(&[
+        "-q",
+        "-s",
+        &ca.to_string_lossy(),
+        "-I",
+        "broker",
+        "-n",
+        "broker",
+        "-V",
+        "20200101Z:20990101Z",
+        "-O",
+        "clear",
+        &public,
+    ]);
+    p_act::sign::PublicKey::read(&PathBuf::from(format!("{}.pub", ca.display()))).expect("the made site CA")
 }
 
 impl BrokerSetup {
@@ -232,9 +267,11 @@ impl BrokerSetup {
         self
     }
 
-    /// Check the broker's own certificate against the site CA, as `page serve` does: a broker without a valid one issues
-    /// no clearance and no standing, and its status says so. Without this call (or [`BrokerSetup::certificates`]) it is
-    /// not checked.
+    /// The site CA the broker's own certificate (`<broker_key>-cert.pub`) and the approval-key certificates are
+    /// checked against. There is no broker that does not check its certificate: without this call (or
+    /// [`BrokerSetup::certificates`], which names one too) the builder **makes a site CA** in the state directory and
+    /// issues the broker's certificate for the key with it (the key's `.pub` must be there); [`TestBroker::site_ca`] is
+    /// its public key.
     #[must_use]
     pub fn site_ca(mut self, site_ca: p_act::sign::PublicKey) -> BrokerSetup {
         self.site_ca = Some(site_ca);
@@ -269,6 +306,10 @@ impl BrokerSetup {
         let site = Arc::new(self.site);
         let crypto = self.crypto.unwrap_or_else(|| Arc::new(SshCrypto::new(&self.broker_key)));
         let log = MemoryLog::default();
+        let site_ca = match self.site_ca {
+            Some(site_ca) => site_ca,
+            None => make_site_ca(&self.state_dir, &self.broker_key),
+        };
         let core = Core::new(
             Arc::clone(&site),
             self.settings,
@@ -276,17 +317,14 @@ impl BrokerSetup {
             Some(register.clone()),
             Arc::clone(&crypto),
             Box::new(log.clone()),
+            Trust { site_ca: site_ca.clone(), now: self.clock.now() },
         );
-        let core = match self.site_ca {
-            Some(site_ca) => core.with_broker_certificate_check(site_ca, self.clock.now()),
-            None => core,
-        };
         let core = match self.certificates {
             Some(input) => core.with_certificates(input, self.clock.now()),
             None => core,
         };
         let broker = Broker::new(core, crypto, site, self.clock, self.timeouts, 8);
-        TestBroker { broker, log, register }
+        TestBroker { broker, log, register, site_ca }
     }
 }
 

@@ -216,6 +216,8 @@ struct ReplyWire {
     uncovered: Option<Vec<String>>,
     /// The broker's own certificate, present only if it is checked.
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    broker_certificate_path: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     broker_certificate_valid: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     broker_certificate_days: Option<i64>,
@@ -246,11 +248,11 @@ impl Reply {
                 (w.pledges, w.held, w.delegations, w.withdrawn) =
                     (Some(s.pledges), Some(s.held), Some(s.delegations), Some(s.withdrawn));
                 (w.blocked_persons, w.blocked_keys) = (Some(s.blocked_persons.clone()), Some(s.blocked_keys.clone()));
-                if let Some(b) = &s.broker_certificate {
-                    w.broker_certificate_valid = Some(b.valid);
-                    w.broker_certificate_days = b.days_left;
-                    w.broker_certificate_failure = b.failure.map(str::to_owned);
-                }
+                let b = &s.broker_certificate;
+                w.broker_certificate_path = Some(b.path.clone());
+                w.broker_certificate_valid = Some(b.valid);
+                w.broker_certificate_days = b.days_left;
+                w.broker_certificate_failure = b.failure.map(str::to_owned);
                 if let Some(c) = &s.certificates {
                     w.certificates_carried = Some(c.carried);
                     w.certificates_not_carried = Some(c.not_carried);
@@ -287,13 +289,11 @@ impl Reply {
                 withdrawn: w.withdrawn?,
                 blocked_persons: w.blocked_persons?,
                 blocked_keys: w.blocked_keys?,
-                broker_certificate: match w.broker_certificate_valid {
-                    None => None,
-                    Some(valid) => Some(BrokerCertificateStatus {
-                        valid,
-                        days_left: w.broker_certificate_days,
-                        failure: w.broker_certificate_failure.as_deref().map(known_failure),
-                    }),
+                broker_certificate: BrokerCertificateStatus {
+                    path: w.broker_certificate_path?,
+                    valid: w.broker_certificate_valid?,
+                    days_left: w.broker_certificate_days,
+                    failure: w.broker_certificate_failure.as_deref().map(known_failure),
                 },
                 certificates: match w.certificates_carried {
                     None => None,
@@ -473,7 +473,7 @@ pub fn socket_path(state_dir: &Path) -> PathBuf {
 }
 
 /// The exit codes of the verbs, one meaning each (`SPEC.md`).
-pub const EXIT_TABLE: &str = "exit codes:\n  0  done (and stored, where something is stored)\n  1  refused\n  2  usage\n  3  no broker answers\n  4  in force but NOT stored (block, withdraw)\n  5  the broker is degraded (`status` only)\n  6  an enabled person has no valid certificate for a purpose (`status` only)\n  7  the broker has no valid certificate of its own: it issues no clearances (`status` only)\nWhen more than one of 5, 6 and 7 holds, `status` returns 7, then 5, then 6.";
+pub const EXIT_TABLE: &str = "exit codes:\n  0  done (and stored, where something is stored)\n  1  refused\n  2  usage\n  3  no broker answers\n  4  in force but NOT stored (block, withdraw)\n  5  the broker is degraded (`status` only)\n  6  an enabled person has no valid certificate for a purpose (`status` only)\n  7  the broker has no valid certificate of its own: it issues no clearances (`status` only)\nThe exit code of `status` is the gravest condition that holds, in the order 7, 5, 6; its lines are the complete list\nof the conditions that hold (`status --format json` gives the same list as an array).";
 
 /// Done.
 pub const EXIT_DONE: u8 = 0;
@@ -516,9 +516,16 @@ pub fn render(command: &Command, reply: &Reply) -> (String, u8) {
         }
         Reply::Refused(reason, _) => (format!("{verb} refused: {}", reason.wire()), EXIT_REFUSED),
         Reply::Status(s) => {
-            let mut out = match s.degraded {
-                Some(why) => format!("degraded: yes ({why}): the register cannot be stored; going on from memory\n"),
-                None => "degraded: no\n".to_owned(),
+            let conditions = conditions(s);
+            let mut out = if conditions.is_empty() {
+                "conditions: none\n".to_owned()
+            } else {
+                // The exit code is the gravest of these, in the order 7, 5, 6; this is the complete list.
+                let mut o = String::from("conditions (the exit code is the gravest; this is the complete list):\n");
+                for c in &conditions {
+                    o.push_str(&format!("  {}  {}\n", c.code, c.text));
+                }
+                o
             };
             out.push_str(&format!(
                 "pledges connected: {}\nrequests held: {}\ndelegations: {} ({} withdrawn)\n",
@@ -526,14 +533,12 @@ pub fn render(command: &Command, reply: &Reply) -> (String, u8) {
             ));
             out.push_str(&format!("blocked persons: {}\n", list(&s.blocked_persons)));
             out.push_str(&format!("blocked keys: {}", list(&s.blocked_keys)));
-            if let Some(b) = &s.broker_certificate {
-                match (b.valid, b.days_left, b.failure) {
-                    (true, Some(days), _) => out.push_str(&format!("\nbroker certificate: valid, {days} days left")),
-                    (_, _, failure) => out.push_str(&format!(
-                        "\nbroker certificate: NOT valid ({}): no clearances are issued",
-                        failure.unwrap_or("refused")
-                    )),
+            let b = &s.broker_certificate;
+            match (b.valid, b.days_left) {
+                (true, Some(days)) => {
+                    out.push_str(&format!("\nbroker certificate ({}): valid, {days} days left", b.path));
                 }
+                _ => out.push_str(&format!("\nbroker certificate ({}): NOT valid", b.path)),
             }
             if let Some(c) = &s.certificates {
                 out.push_str(&format!(
@@ -544,22 +549,75 @@ pub fn render(command: &Command, reply: &Reply) -> (String, u8) {
                     list(&c.uncovered)
                 ));
             }
-            let uncovered = s.certificates.as_ref().is_some_and(|c| !c.uncovered.is_empty() || c.directory_refused);
-            let no_certificate = s.broker_certificate.as_ref().is_some_and(|b| !b.valid);
-            // The most severe first: nothing is cleared at all (7), then the register cannot be stored (5), then some
-            // person cannot be approved (6).
-            let code = if no_certificate {
-                EXIT_NO_BROKER_CERTIFICATE
-            } else if s.degraded.is_some() {
-                EXIT_DEGRADED
-            } else if uncovered {
-                EXIT_UNCOVERED
-            } else {
-                EXIT_DONE
-            };
-            (out, code)
+            (out, conditions.first().map_or(EXIT_DONE, |c| c.code))
         }
     }
+}
+
+/// A condition `page status` reports: a code (the exit code if it is the gravest), a name and a detail for a machine,
+/// and a line for a person.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Condition {
+    pub code: u8,
+    pub name: &'static str,
+    pub detail: String,
+    pub text: String,
+}
+
+/// Every condition that holds, the gravest first: 7 (no valid certificate of the broker's own), 5 (degraded), 6 (an
+/// enabled person without a valid certificate for a purpose, or a certificates directory refused whole).
+#[must_use]
+pub fn conditions(s: &Status) -> Vec<Condition> {
+    let mut list = Vec::new();
+    let b = &s.broker_certificate;
+    if !b.valid {
+        let why = b.failure.unwrap_or("refused");
+        list.push(Condition {
+            code: EXIT_NO_BROKER_CERTIFICATE,
+            name: "no-broker-certificate",
+            detail: why.to_owned(),
+            text: format!(
+                "the broker has no valid certificate of its own ({}): {why}; it issues no clearances and no standings",
+                b.path
+            ),
+        });
+    }
+    if let Some(why) = s.degraded {
+        list.push(Condition {
+            code: EXIT_DEGRADED,
+            name: "degraded",
+            detail: why.to_owned(),
+            text: format!("the broker is degraded ({why}): the register cannot be stored; going on from memory"),
+        });
+    }
+    if let Some(c) = &s.certificates {
+        if c.directory_refused {
+            list.push(Condition {
+                code: EXIT_UNCOVERED,
+                name: "certificates-directory-refused",
+                detail: String::new(),
+                text: "the certificates directory is refused whole: no certificate is carried".to_owned(),
+            });
+        } else if !c.uncovered.is_empty() {
+            list.push(Condition {
+                code: EXIT_UNCOVERED,
+                name: "no-valid-certificate",
+                detail: c.uncovered.join(","),
+                text: format!("no valid certificate for: {}", c.uncovered.join(", ")),
+            });
+        }
+    }
+    list
+}
+
+/// The conditions as a JSON array, one object per condition (`status --format json`); `[]` when none holds.
+#[must_use]
+pub fn conditions_json(s: &Status) -> String {
+    let items: Vec<serde_json::Value> = conditions(s)
+        .into_iter()
+        .map(|c| serde_json::json!({"code": c.code, "condition": c.name, "detail": c.detail}))
+        .collect();
+    serde_json::Value::Array(items).to_string()
 }
 
 fn list(items: &[String]) -> String {

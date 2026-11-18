@@ -49,7 +49,9 @@ async fn status_and_a_block_and_its_lifting_as_the_verbs_say_them() {
     let (code, out, _) = page(&config, &["status"]).await;
     assert_eq!(code, 0);
     assert!(
-        out.contains("degraded: no") && out.contains("pledges connected: 0") && out.contains("blocked persons: none"),
+        out.contains("conditions: none")
+            && out.contains("pledges connected: 0")
+            && out.contains("blocked persons: none"),
         "{out}"
     );
 
@@ -120,7 +122,10 @@ async fn a_block_that_cannot_be_stored_says_so_and_stays_in_force_and_lifting_it
     // the broker is degraded, and status says so and exits 1
     let (code, out, _) = page(&config, &["status"]).await;
     assert_eq!(code, 5, "degraded");
-    assert!(out.contains("degraded: yes (permission-denied)") && out.contains("blocked persons: jan"), "{out}");
+    assert!(
+        out.contains("5  the broker is degraded (permission-denied)") && out.contains("blocked persons: jan"),
+        "{out}"
+    );
     // lifting permits: refused, and the block stays
     let (code, _, err) = page(&config, &["unblock", "jan"]).await;
     assert_eq!((code, err.as_str()), (1, "unblock refused: the register cannot be written (permission-denied)"));
@@ -133,7 +138,7 @@ async fn a_block_that_cannot_be_stored_says_so_and_stays_in_force_and_lifting_it
     assert_eq!((code, out.as_str()), (0, "unblocked and stored: jan"));
     let (code, out, _) = page(&config, &["status"]).await;
     assert_eq!(code, 0);
-    assert!(out.contains("degraded: no"), "{out}");
+    assert!(out.contains("conditions: none"), "{out}");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -385,11 +390,12 @@ fn commands_and_answers_are_read_as_strictly_as_everything_else() {
         withdrawn: 1,
         blocked_persons: vec!["eva".into()],
         blocked_keys: vec![fp.to_string()],
-        broker_certificate: Some(p_age::core::BrokerCertificateStatus {
+        broker_certificate: p_age::core::BrokerCertificateStatus {
+            path: "/etc/page/broker-cert.pub".into(),
             valid: false,
             days_left: None,
             failure: Some("expired"),
-        }),
+        },
         certificates: Some(p_age::core::CertificateStatus {
             carried: 3,
             not_carried: 1,

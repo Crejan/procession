@@ -272,11 +272,9 @@ fn the_configuration_names_the_site_ca_and_may_name_the_directory() {
     assert!(matches!(Config::read(&path), Err(ConfigError::Settings(_))));
     write(text(&format!(r#","site_ca":"{dir}/site-ca.pub""#)));
     assert!(Config::read(&path).unwrap().certificates.is_none());
-    // the broker's certificate: `ssh-keygen` finds the key by its name, so it is `<broker_key>-cert.pub` or not given
+    // there is no member for the broker's certificate: its path is `<broker_key>-cert.pub`
     write(text(&format!(r#","site_ca":"{dir}/site-ca.pub","broker_certificate":"{dir}/broker-cert.pub""#)));
-    assert!(Config::read(&path).is_ok());
-    write(text(&format!(r#","site_ca":"{dir}/site-ca.pub","broker_certificate":"{dir}/elsewhere.pub""#)));
-    assert!(matches!(Config::read(&path), Err(ConfigError::BrokerCertificatePath { .. })));
+    assert!(matches!(Config::read(&path), Err(ConfigError::Settings(_))));
     // with the directory: the broker built from it carries the certificates
     SiteBuilder_write(&w);
     write(text(&format!(r#","site_ca":"{dir}/site-ca.pub","certificates":"{}""#, w.certs_dir.display())));
@@ -287,7 +285,8 @@ fn the_configuration_names_the_site_ca_and_may_name_the_directory() {
     let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
     let Reply::Status(s) = rt.block_on(execute(&broker, Command::Status)) else { panic!("status") };
     assert_eq!(s.certificates.unwrap().carried, 4);
-    assert!(s.broker_certificate.unwrap().valid);
+    assert!(s.broker_certificate.valid);
+    assert_eq!(s.broker_certificate.path, format!("{dir}/broker-cert.pub"));
     // a site CA key that others can write is refused, like a settings file
     std::fs::set_permissions(w.keys.path("site-ca.pub"), std::fs::Permissions::from_mode(0o666)).unwrap();
     assert!(matches!(config.build(), Err(ConfigError::SiteCa { .. })));
