@@ -41,7 +41,6 @@ use thiserror::Error;
 
 const BEGIN: &str = "-----BEGIN SSH SIGNATURE-----\n";
 const END: &str = "\n-----END SSH SIGNATURE-----\n";
-const KEYGEN: &str = "ssh-keygen";
 /// The key types p-act accepts as public keys, and as the subject of a certificate it reads.
 const SUPPORTED_KEYS: [&str; 2] = ["ssh-ed25519", "ecdsa-sha2-nistp256"];
 
@@ -132,6 +131,10 @@ pub enum SignError {
     BadGroups(&'static str),
     #[error("`{0}` is not a fingerprint like SHA256:<43 base64 characters>")]
     MalformedFingerprint(String),
+    #[error("the certificate's principal `{0}` is not `broker`")]
+    NotBrokerName(String),
+    #[error("there is no ssh-keygen to trust: {0}")]
+    Keygen(#[from] crate::keygen::KeygenError),
     #[error("ssh-keygen reported success without having read all its input, so it did not check what was asked")]
     InputNotRead,
     #[error("the certificate has bytes after its signature, which the signature does not cover")]
@@ -321,27 +324,25 @@ impl Signer {
 
 /// Run `ssh-keygen args` with `stdin` as its input and no terminal input; its
 /// standard output on success.
+///
+/// The program is [`crate::keygen::Keygen::system`]: a fixed path, an ownership test, a cleared environment and a version
+/// check, once; if there is none the error is [`SignError::Keygen`] and nothing is verified.
 fn run(args: &[&OsStr], stdin: &[u8]) -> Result<Vec<u8>, SignError> {
-    run_program(OsStr::new(KEYGEN), args, stdin)
+    let keygen = crate::keygen::Keygen::system()?;
+    let mut command = keygen.command();
+    command.args(args);
+    run_command(command, stdin)
 }
 
-/// [`run`] for any program (the tests give a stand-in; nothing in a production build can).
+/// [`run`] for any command (the tests give a stand-in; nothing in a production build can).
 ///
 /// The input is written on the side, so that a full pipe cannot deadlock. A program that stops reading early closes
 /// its end and the write fails (`Broken pipe`); that is **never reported as an I/O error of its own**: the outcome is
 /// the program's. Non-zero is [`SignError::Tool`] with its status and standard error. Zero with a write that failed
 /// is [`SignError::InputNotRead`]: the program says it succeeded without having been given all its input, so what it
 /// checked is not what was asked, and it is a refusal, never a verified signature.
-fn run_program(program: &OsStr, args: &[&OsStr], stdin: &[u8]) -> Result<Vec<u8>, SignError> {
-    let mut child = Command::new(program)
-        .args(args)
-        // A key that wants a passphrase must fail, not ask on the terminal: the "askpass program" is `false`.
-        .env("SSH_ASKPASS", "false")
-        .env("SSH_ASKPASS_REQUIRE", "force")
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()?;
+fn run_command(mut command: Command, stdin: &[u8]) -> Result<Vec<u8>, SignError> {
+    let mut child = command.stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped()).spawn()?;
     let mut pipe = child.stdin.take().ok_or_else(|| io::Error::other("no stdin"))?;
     let (output, written) = std::thread::scope(|s| {
         let writer = s.spawn(move || pipe.write_all(stdin));
@@ -1002,14 +1003,7 @@ impl ApprovalCertificate {
     /// Whether `now` is within the certificate's validity: at or after its start, before its end (the end is exclusive,
     /// as `ssh-keygen` treats it).
     pub fn valid_at(&self, now: crate::time::Timestamp) -> Result<(), SignError> {
-        let now = u64::try_from(now.unix()).unwrap_or(0);
-        if now < self.valid_after {
-            Err(SignError::CertificateNotYetValid)
-        } else if now >= self.valid_before {
-            Err(SignError::CertificateExpired)
-        } else {
-            Ok(())
-        }
+        valid_between(self.valid_after, self.valid_before, now)
     }
 }
 
@@ -1076,18 +1070,100 @@ fn site_certificate_in(sig: &str) -> Result<(), SignError> {
     no_option_or_extension(&signature_certificate(sig)?)
 }
 
-/// Everything of [`verify_approval_certificate`] except the time: the shape, the name, the issuer and the signature. The
-/// caller judges validity itself, from `valid_after` and `valid_before` or [`ApprovalCertificate::valid_at`].
-pub fn check_approval_certificate(line: &str, site_ca: &PublicKey) -> Result<ApprovalCertificate, SignError> {
+/// What every certificate the site CA issues has: one certificate line whose blob ends with its signature, a user
+/// certificate, no critical option, no extension, exactly one principal. Returns it and that principal.
+fn site_certificate_shape(line: &str) -> Result<(Certificate, String), SignError> {
     let cert = certificate_from_blob(&certificate_line_blob(line)?)?;
     if cert.cert_type != 1 {
         return Err(SignError::NotUserCertificate);
     }
     no_option_or_extension(&cert)?;
-    let principal = match <[String; 1]>::try_from(cert.principals.clone()) {
-        Ok([p]) => p,
-        Err(many) => return Err(SignError::PrincipalCount { found: many.len() }),
-    };
+    match <[String; 1]>::try_from(cert.principals.clone()) {
+        Ok([principal]) => Ok((cert, principal)),
+        Err(many) => Err(SignError::PrincipalCount { found: many.len() }),
+    }
+}
+
+/// The signature and the issuer, by `ssh-keygen`, before anything of the certificate is believed: the issuer is
+/// `site_ca` and no other.
+fn issued_by(line: &str, site_ca: &PublicKey) -> Result<(), SignError> {
+    if certificate_issuer(line)? != site_ca.fingerprint() {
+        return Err(SignError::WrongIssuer);
+    }
+    Ok(())
+}
+
+/// What a verified certificate of the broker's key says.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BrokerCertificate {
+    /// The key the certificate certifies (Ed25519 or ECDSA P-256).
+    pub key: PublicKey,
+    /// The certificate's label; never to decide on.
+    pub key_id: String,
+    /// Seconds since the Unix epoch.
+    pub valid_after: u64,
+    /// Seconds since the Unix epoch (the largest value for "forever").
+    pub valid_before: u64,
+}
+
+impl BrokerCertificate {
+    /// Whether this certificate is for `key`.
+    #[must_use]
+    pub fn certifies(&self, key: &PublicKey) -> bool {
+        self.key == *key
+    }
+
+    /// As [`ApprovalCertificate::valid_at`].
+    pub fn valid_at(&self, now: crate::time::Timestamp) -> Result<(), SignError> {
+        valid_between(self.valid_after, self.valid_before, now)
+    }
+}
+
+fn valid_between(after: u64, before: u64, now: crate::time::Timestamp) -> Result<(), SignError> {
+    let now = u64::try_from(now.unix()).unwrap_or(0);
+    if now < after {
+        Err(SignError::CertificateNotYetValid)
+    } else if now >= before {
+        Err(SignError::CertificateExpired)
+    } else {
+        Ok(())
+    }
+}
+
+/// The broker's own certificate, as the site CA issued it (the line of a `-cert.pub` file), at the time `now`: a user
+/// certificate with exactly one principal, `broker`, issued by `site_ca` and no other, valid at `now`, with **no
+/// critical option, no extension** and nothing after its signature (formats section 3.2). The same rules as
+/// [`verify_approval_certificate`], for the one name that one refuses.
+pub fn verify_broker_certificate(
+    line: &str,
+    site_ca: &PublicKey,
+    now: crate::time::Timestamp,
+) -> Result<BrokerCertificate, SignError> {
+    let cert = check_broker_certificate(line, site_ca)?;
+    cert.valid_at(now)?;
+    Ok(cert)
+}
+
+/// Everything of [`verify_broker_certificate`] except the time: the caller judges validity from `valid_after` and
+/// `valid_before` or [`BrokerCertificate::valid_at`].
+pub fn check_broker_certificate(line: &str, site_ca: &PublicKey) -> Result<BrokerCertificate, SignError> {
+    let (cert, principal) = site_certificate_shape(line)?;
+    if principal != "broker" {
+        return Err(SignError::NotBrokerName(shown(&principal)));
+    }
+    issued_by(line, site_ca)?;
+    Ok(BrokerCertificate {
+        key: PublicKey::from_blob(&cert.key_blob)?,
+        key_id: cert.key_id,
+        valid_after: cert.valid_after,
+        valid_before: cert.valid_before,
+    })
+}
+
+/// Everything of [`verify_approval_certificate`] except the time: the shape, the name, the issuer and the signature. The
+/// caller judges validity itself, from `valid_after` and `valid_before` or [`ApprovalCertificate::valid_at`].
+pub fn check_approval_certificate(line: &str, site_ca: &PublicKey) -> Result<ApprovalCertificate, SignError> {
+    let (cert, principal) = site_certificate_shape(line)?;
     let (person, kind) = match principal.rsplit_once(':') {
         Some((person, "confirmed")) => (person, ApprovalKind::Confirmed),
         Some((person, "automatic")) => (person, ApprovalKind::Automatic),
@@ -1099,10 +1175,7 @@ pub fn check_approval_certificate(line: &str, site_ca: &PublicKey) -> Result<App
     if RESERVED_PERSONS.contains(&person) {
         return Err(SignError::ReservedName(person.to_owned()));
     }
-    // The signature and the issuer, by `ssh-keygen`, before anything of the certificate is believed.
-    if certificate_issuer(line)? != site_ca.fingerprint() {
-        return Err(SignError::WrongIssuer);
-    }
+    issued_by(line, site_ca)?;
     Ok(ApprovalCertificate {
         person: person.to_owned(),
         kind,
@@ -1119,7 +1192,9 @@ mod run_tests {
 
     /// A stand-in for `ssh-keygen`: `/bin/sh -c script`.
     fn stand_in(script: &str, input: &[u8]) -> Result<Vec<u8>, SignError> {
-        run_program(OsStr::new("/bin/sh"), &[OsStr::new("-c"), OsStr::new(script)], input)
+        let mut command = Command::new("/bin/sh");
+        command.args(["-c", script]);
+        run_command(command, input)
     }
 
     /// More than any pipe buffer holds, so that a program that does not read makes the write fail, whatever the timing.
