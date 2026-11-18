@@ -97,16 +97,67 @@ pub fn keygen(args: &[&str]) {
     );
 }
 
-/// `target/debug/pledge`, next to this test's `deps` directory.
-pub fn pledge_binary() -> PathBuf {
+/// The commit this test binary was built from, if the build line said (`PROBE_BUILT_FROM=... cargo test`).
+pub const BUILT_FROM: Option<&str> = option_env!("PROBE_BUILT_FROM");
+
+/// Whether a binary built from `built` is the one that was expected (`PROBE_EXPECT_BUILT_FROM`): a run that
+/// states what it expects does not go on with another binary, the one left from an earlier build.
+///
+/// # Errors
+/// What differs, in words.
+pub fn build_matches(built: Option<&str>, expect: Option<&str>) -> Result<(), String> {
+    match (built, expect) {
+        (_, None) => Ok(()),
+        (Some(built), Some(expect)) if built == expect => Ok(()),
+        (built, Some(expect)) => Err(format!(
+            "this is a stale test binary: it was built from {}, the checkout is at {expect}",
+            built.unwrap_or("an unknown commit (built without PROBE_BUILT_FROM)")
+        )),
+    }
+}
+
+/// Says what this binary was built from, and stops if the run expected another.
+pub fn check_build() {
+    eprintln!("test binary built from: {}", BUILT_FROM.unwrap_or("unknown (PROBE_BUILT_FROM was not set)"));
+    if let Err(why) = build_matches(BUILT_FROM, std::env::var("PROBE_EXPECT_BUILT_FROM").ok().as_deref()) {
+        panic!("{why}");
+    }
+}
+
+/// Which file a program of this workspace is: the one `given` (what the run said in `variable`; the scripts take
+/// it from cargo's own output), else `classic` (next to this test's `deps` directory).
+///
+/// # Errors
+/// That the file is not there, in words.
+pub fn resolve_binary(given: Option<std::ffi::OsString>, classic: PathBuf, variable: &str) -> Result<PathBuf, String> {
+    match given {
+        Some(path) => {
+            let path = PathBuf::from(path);
+            if path.is_file() {
+                Ok(path)
+            } else {
+                Err(format!("{variable} names {}, which is not a file", path.display()))
+            }
+        }
+        None if classic.exists() => Ok(classic),
+        None => Err(format!(
+            "{} is not there: this cargo may keep test executables elsewhere; build it with `cargo build --workspace \
+             --features p-robe/test-verbs,p-act/pact` and name it in {variable}",
+            classic.display()
+        )),
+    }
+}
+
+/// A program of this workspace that the test starts, as [`resolve_binary`] finds it.
+pub fn workspace_binary(variable: &str, name: &str) -> PathBuf {
     let exe = std::env::current_exe().unwrap();
-    let path = exe.parent().and_then(Path::parent).unwrap().join("pledge");
-    assert!(
-        path.exists(),
-        "{} is not built: cargo build --workspace --offline --features p-robe/test-verbs",
-        path.display()
-    );
-    path
+    let classic = exe.parent().and_then(Path::parent).unwrap().join(name);
+    resolve_binary(std::env::var_os(variable), classic, variable).unwrap_or_else(|why| panic!("{why}"))
+}
+
+/// `pledge`: `PROBE_PLEDGE_BIN`, or `target/debug/pledge` next to this test's `deps` directory.
+pub fn pledge_binary() -> PathBuf {
+    workspace_binary("PROBE_PLEDGE_BIN", "pledge")
 }
 
 /// Panics with everything a program that did not start said: its exit status (or that it is still running)
