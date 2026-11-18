@@ -52,6 +52,7 @@ fn serve_says_what_is_wrong_with_its_settings() {
     std::fs::create_dir_all(&dir).unwrap();
     let file = dir.join("probe.json");
     std::fs::write(&file, r#"{"person":"jan"}"#).unwrap();
+    std::fs::set_permissions(&file, std::os::unix::fs::PermissionsExt::from_mode(0o600)).unwrap(); // not the umask's
     let out = probe(&["serve", "--config", file.to_str().unwrap()], None);
     assert_eq!(out.status.code(), Some(64));
     assert!(text(&out.stderr).contains("missing field `confirmed_key`"), "{}", text(&out.stderr));

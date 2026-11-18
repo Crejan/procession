@@ -138,7 +138,12 @@ pub fn run_if_due(host_key: &Path, host: &str, out: &Path, now: i64) -> Result<I
 /// What `ssh-keygen` said, or why a file could not be prepared.
 pub fn run(host_key: &Path, host: &str, out: &Path) -> Result<Done, String> {
     let principal = format!("{SERVICE_NAME}@{host}");
+    let created = !out.exists();
     std::fs::create_dir_all(out).map_err(|e| format!("{}: {e}", out.display()))?;
+    if created {
+        // Not the umask's (0775 under 0002): a directory that holds a key and its certificate.
+        std::fs::set_permissions(out, std::fs::Permissions::from_mode(0o755)).map_err(|e| e.to_string())?;
+    }
     let (key, public, cert) = (out.join("service-key"), out.join("service-key.pub"), out.join("service-key-cert.pub"));
     let made = !key.exists();
     if made {
@@ -148,6 +153,7 @@ pub fn run(host_key: &Path, host: &str, out: &Path) -> Result<Done, String> {
         // The private half is there; the public half is derived from it.
         let derived = keygen_output(&["-y", "-f", &path(&key)])?;
         std::fs::write(&public, derived).map_err(|e| format!("{}: {e}", public.display()))?;
+        std::fs::set_permissions(&public, std::fs::Permissions::from_mode(0o644)).map_err(|e| e.to_string())?;
     }
     let issued = issue(host_key, &principal, out, &public, &cert, &key);
     if let (Err(_), true) = (&issued, made) {

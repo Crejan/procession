@@ -291,8 +291,17 @@ HTTP transport has never been run over TCP by its author.
 pledge serve --state-dir /home/alice/.local/state/pledge --socket-dir /run/user/1000/pledge --known-hosts /home/alice/.ssh/known_hosts
 ```
 
-(`1000` is alice's uid; `id -u alice`.) Before the first start put
-`/home/alice/.local/state/pledge/config.json` in place, mode 0600, with:
+**A note on the umask, for every file below that a program judges.** On Debian an account
+with a group of its own name (`alice`, and often `probe-svc`) has the umask `0002`, so a file it creates
+is group-writable (0664), and `pledge` and `probe` **refuse** a settings file that its group can write
+(`can be written by someone other than its owner`): `pledge serve` then exits before it binds a socket. So every
+file below is created with its mode written out (`install -m`, or `chmod` straight after), never left to the
+umask. (A container's `su -s /bin/sh probe-svc -c umask` printed 0002 on the owner's run.)
+
+(`1000` is alice's uid; `id -u alice`.) Before the first start, as `alice`, put
+`/home/alice/.local/state/pledge/config.json` in place with mode 0600 (`install -m 0600 -d
+/home/alice/.local/state/pledge` first for the directory; then write the file and `chmod 600` it, or
+`install -m 0600 config.json /home/alice/.local/state/pledge/config.json` from a file you made), with:
 
 ```
 {"person": "alice",
@@ -310,7 +319,8 @@ with that group. **Only after the `pledge: serving.` line (see below)** make the
 `pledge keys create delegation`, `... confirmed`, `... automatic`. Then
 `pledge keys list --format json` shows the public key lines; write the confirmed
 one to `/etc/probe/alice-confirmed.pub` and the automatic one to
-`/etc/probe/alice-automatic.pub` (root, 0644).
+`/etc/probe/alice-automatic.pub` (root, 0644; as root: `install -m 0644 FILE /etc/probe/alice-confirmed.pub`, the same for
+the automatic one, from the lines you copied into FILE).
 
 **Wait for `pledge: serving.`** on its output before anything else: it binds `agent.sock`, `control.sock`
 and `service.sock` one after another and prints that line only after all three. A `pledge keys create`
@@ -406,7 +416,8 @@ systemctl daemon-reload`. (Without the timer the certificate ends in 30 days and
 
 ### B3. `/etc/probe.json`
 
-One JSON object, mode 0644 or 0640, owned by root or by the user that runs the program (**a file that its group or
+One JSON object, **installed with `install -m 0644 probe.json /etc/probe.json`** (mode 0644 or 0640, never left to the
+umask), owned by root or by the user that runs the program (**a file that its group or
 anyone else can write is refused**, and so are an unknown member, a member given twice, trailing
 text and a byte order mark; the reading is `p_act::settings`'s, the same for all programs):
 
@@ -481,7 +492,8 @@ rm -rf /etc/systemd/system/probe-serve.service.d; systemctl daemon-reload`.
 
 ### B5. An agent and a call
 
-As `alice`: `pledge agents start --groups admins --output /home/alice/bundle` (answer the dialog).
+As `alice`: `pledge agents start --groups admins --output /home/alice/bundle` (answer the dialog; pledge creates the bundle
+exclusively with mode 0600 itself, whatever the umask: it is the agent's key).
 Then, as the user the agent runs as (the bundle is the agent's key: guard it):
 
 ```
