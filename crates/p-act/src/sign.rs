@@ -132,6 +132,8 @@ pub enum SignError {
     BadGroups(&'static str),
     #[error("`{0}` is not a fingerprint like SHA256:<43 base64 characters>")]
     MalformedFingerprint(String),
+    #[error("ssh-keygen reported success without having read all its input, so it did not check what was asked")]
+    InputNotRead,
     #[error("the certificate has bytes after its signature, which the signature does not cover")]
     CertificateTrailingData,
     #[error("the certificate is for another person or role than the one expected")]
@@ -320,7 +322,18 @@ impl Signer {
 /// Run `ssh-keygen args` with `stdin` as its input and no terminal input; its
 /// standard output on success.
 fn run(args: &[&OsStr], stdin: &[u8]) -> Result<Vec<u8>, SignError> {
-    let mut child = Command::new(KEYGEN)
+    run_program(OsStr::new(KEYGEN), args, stdin)
+}
+
+/// [`run`] for any program (the tests give a stand-in; nothing in a production build can).
+///
+/// The input is written on the side, so that a full pipe cannot deadlock. A program that stops reading early closes
+/// its end and the write fails (`Broken pipe`); that is **never reported as an I/O error of its own**: the outcome is
+/// the program's. Non-zero is [`SignError::Tool`] with its status and standard error. Zero with a write that failed
+/// is [`SignError::InputNotRead`]: the program says it succeeded without having been given all its input, so what it
+/// checked is not what was asked, and it is a refusal, never a verified signature.
+fn run_program(program: &OsStr, args: &[&OsStr], stdin: &[u8]) -> Result<Vec<u8>, SignError> {
+    let mut child = Command::new(program)
         .args(args)
         // A key that wants a passphrase must fail, not ask on the terminal: the "askpass program" is `false`.
         .env("SSH_ASKPASS", "false")
@@ -330,21 +343,22 @@ fn run(args: &[&OsStr], stdin: &[u8]) -> Result<Vec<u8>, SignError> {
         .stderr(Stdio::piped())
         .spawn()?;
     let mut pipe = child.stdin.take().ok_or_else(|| io::Error::other("no stdin"))?;
-    // Written on the side so that a full pipe cannot deadlock; a tool that stops reading early is seen in its exit status.
-    let output = std::thread::scope(|s| {
-        s.spawn(move || {
-            let _ = pipe.write_all(stdin);
-        });
-        child.wait_with_output()
-    })?;
-    if output.status.success() {
-        Ok(output.stdout)
-    } else {
-        Err(SignError::Tool {
+    let (output, written) = std::thread::scope(|s| {
+        let writer = s.spawn(move || pipe.write_all(stdin));
+        let output = child.wait_with_output();
+        (output, writer.join())
+    });
+    let output = output?;
+    if !output.status.success() {
+        return Err(SignError::Tool {
             status: output.status.to_string(),
             stderr: String::from_utf8_lossy(&output.stderr).trim().to_owned(),
-        })
+        });
     }
+    if !matches!(written, Ok(Ok(()))) {
+        return Err(SignError::InputNotRead);
+    }
+    Ok(output.stdout)
 }
 
 /// `ssh-keygen -Y verify -f <allowed> -I <principal> -n <namespace> -s <sig> < data`
@@ -1097,4 +1111,61 @@ pub fn check_approval_certificate(line: &str, site_ca: &PublicKey) -> Result<App
         valid_after: cert.valid_after,
         valid_before: cert.valid_before,
     })
+}
+
+#[cfg(test)]
+mod run_tests {
+    use super::*;
+
+    /// A stand-in for `ssh-keygen`: `/bin/sh -c script`.
+    fn stand_in(script: &str, input: &[u8]) -> Result<Vec<u8>, SignError> {
+        run_program(OsStr::new("/bin/sh"), &[OsStr::new("-c"), OsStr::new(script)], input)
+    }
+
+    /// More than any pipe buffer holds, so that a program that does not read makes the write fail, whatever the timing.
+    fn big() -> Vec<u8> {
+        vec![b'x'; 4 * 1024 * 1024]
+    }
+
+    #[test]
+    fn a_program_that_reads_everything_and_succeeds_is_ok() {
+        assert_eq!(stand_in("cat >/dev/null; echo fine", &big()).unwrap(), b"fine\n");
+        assert_eq!(stand_in("cat; ", b"abc").unwrap(), b"abc");
+    }
+
+    #[test]
+    fn a_program_that_exits_non_zero_without_reading_is_its_status_not_an_io_error() {
+        for _ in 0..20 {
+            match stand_in("echo why >&2; exit 3", &big()) {
+                Err(SignError::Tool { status, stderr }) => {
+                    assert!(status.contains('3'), "{status}");
+                    assert_eq!(stderr, "why");
+                }
+                other => panic!("{other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn a_program_that_exits_zero_without_reading_is_not_taken_as_having_checked_anything() {
+        for _ in 0..20 {
+            assert!(matches!(stand_in("exit 0", &big()), Err(SignError::InputNotRead)));
+        }
+    }
+
+    #[test]
+    fn a_program_that_closes_its_input_early_and_then_exits_zero_is_not_taken_either() {
+        for _ in 0..20 {
+            assert!(matches!(stand_in("exec 0<&-; echo done; exit 0", &big()), Err(SignError::InputNotRead)));
+            assert!(matches!(stand_in("head -c 10 >/dev/null; exit 0", &big()), Err(SignError::InputNotRead)));
+        }
+    }
+
+    #[test]
+    fn what_a_failed_run_is_never_is_a_verified_signature() {
+        // `verify` turns Ok into "verified" and every Err into a refusal: so the three outcomes above cannot verify.
+        for script in ["exit 3", "exit 0", "exec 0<&-; exit 0", "head -c 10 >/dev/null; exit 0"] {
+            assert!(stand_in(script, &big()).is_err(), "{script}");
+        }
+    }
 }
