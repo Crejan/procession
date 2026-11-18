@@ -167,12 +167,34 @@ fn sign(spec: &CallSpec<'_>) -> Sent {
     }
 }
 
+/// A count of the keepalive comments a test's client has seen, shared with a fake pledge or a runner that
+/// holds back until enough have come.
+#[derive(Clone, Default)]
+struct Seen(Arc<std::sync::atomic::AtomicUsize>);
+
+impl Seen {
+    fn one_more(&self) {
+        self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    /// Waits for `n`; a minute at most, so that a stream that never sends one fails the test, not hangs it.
+    fn wait_for(&self, n: usize) {
+        let until = Instant::now() + Duration::from_secs(60);
+        while self.0.load(std::sync::atomic::Ordering::SeqCst) < n && Instant::now() < until {
+            std::thread::sleep(Duration::from_millis(5));
+        }
+    }
+}
+
 // ---- the fake pledge -----------------------------------------------------------
 
 #[derive(Clone)]
 enum Plan {
     Approve(PathBuf),
     ApproveAfter(Duration, PathBuf),
+    /// Approves once `seen` has counted that many keepalive comments: what a test shows about the
+    /// stream is then not a matter of how fast the machine is (it waits at most a minute).
+    ApproveWhen(Seen, usize, PathBuf),
     /// Signs an approval over a request that is not the one submitted.
     OverOther(PathBuf),
     Decline,
@@ -296,6 +318,10 @@ fn connection(stream: UnixStream, plan: &Plan, events: &Mutex<Vec<String>>, host
         Plan::Approve(path) => answer(&stream, hash, Answered::Approved(approve(path, submit.request())), POLICY),
         Plan::ApproveAfter(wait, path) => {
             std::thread::sleep(*wait);
+            answer(&stream, hash, Answered::Approved(approve(path, submit.request())), POLICY);
+        }
+        Plan::ApproveWhen(seen, at_least, path) => {
+            seen.wait_for(*at_least);
             answer(&stream, hash, Answered::Approved(approve(path, submit.request())), POLICY);
         }
         Plan::OverOther(path) => {
@@ -1223,11 +1249,18 @@ mod streaming {
         head: Option<Head>,
         chunks: Vec<(Duration, String)>,
         fail_after_head: bool,
+        seen: Seen,
     }
 
     impl Recorder {
         fn new() -> Recorder {
-            Recorder { started: Instant::now(), head: None, chunks: Vec::new(), fail_after_head: false }
+            Recorder {
+                started: Instant::now(),
+                head: None,
+                chunks: Vec::new(),
+                fail_after_head: false,
+                seen: Seen::default(),
+            }
         }
 
         fn comments(&self) -> usize {
@@ -1254,6 +1287,9 @@ mod streaming {
             assert!(self.head.is_some(), "a body before the head");
             if self.fail_after_head {
                 return Err(std::io::ErrorKind::BrokenPipe.into());
+            }
+            if bytes.starts_with(b": keepalive") {
+                self.seen.one_more();
             }
             self.chunks.push((self.started.elapsed(), String::from_utf8(bytes.to_vec()).unwrap()));
             Ok(())
@@ -1282,26 +1318,30 @@ mod streaming {
     #[test]
     fn the_head_comes_when_the_call_is_accepted_then_comments_while_the_person_is_asked_then_the_answer() {
         let rig = Rig::new(Plan::Silent);
-        rig.pledge.set(Plan::ApproveAfter(Duration::from_millis(1200), rig.pki.confirmed.clone()));
+        let mut out = Recorder::new();
+        // The person answers only after five comments have been seen: the order is what is shown, not
+        // how many fit in a stretch of wall time.
+        rig.pledge.set(Plan::ApproveWhen(out.seen.clone(), 5, rig.pki.confirmed.clone()));
         let mut mcp = Mcp::new(&rig.service);
         mcp.keepalive = Duration::from_millis(100);
-        let mut out = Recorder::new();
         mcp.serve(&request(&rig.jan("sys kit", &[]), Some(json!("tok"))), &AtomicBool::new(false), &mut out);
 
-        let (at, status, _) = out.head.clone().unwrap();
+        let (_, status, _) = out.head.clone().unwrap();
         assert_eq!(status, 200);
         assert_eq!(content_type(&out), "text/event-stream");
-        assert!(at < Duration::from_millis(600), "the head came at {at:?}, long before the approval");
+        // The head came first, then at least five comments, then the answer, which is the last thing.
         assert!(out.comments() >= 5, "{} comments while waiting for the person", out.comments());
         let messages = out.messages();
         assert_eq!(messages.len(), 1, "no notice of progress: only the answer");
         let last = messages.last().unwrap();
         assert_eq!(last["id"], 9);
         assert!(last["result"]["content"][0]["text"].as_str().unwrap().contains("\"outcome\":\"done\""));
-        // No silence longer than a few keepalives anywhere in the stream.
-        let mut times = vec![at];
-        times.extend(out.chunks.iter().map(|(t, _)| *t));
-        assert!(times.windows(2).all(|w| w[1] - w[0] < Duration::from_millis(500)), "{times:?}");
+        assert!(out.chunks.last().unwrap().1.starts_with("event: message"), "{:?}", out.chunks.last());
+        assert!(out.chunks[..out.chunks.len() - 1].iter().all(|(_, c)| c.starts_with(": keepalive")));
+        // Comments are not spammed: the keepalive interval (100 ms) is a lower bound on the spacing. (A slow
+        // machine only widens the gaps, so this holds under load.)
+        let times: Vec<_> = out.chunks.iter().map(|(t, _)| *t).collect();
+        assert!(times.windows(2).take(4).all(|w| w[1] - w[0] >= Duration::from_millis(80)), "{times:?}");
     }
 
     #[test]
@@ -1309,16 +1349,18 @@ mod streaming {
         let rig = Rig::new(Plan::Silent);
         rig.pledge.set(confirmed(&rig));
         // The dispatcher is held up for a while just before it runs the verb.
+        let mut out = Recorder::new();
+        let seen = out.seen.clone();
         let runner = InProcess {
             audit_file: rig.audit.clone(),
             lock_dir: rig.dispatcher_dir.path().join("locks"),
             user: "probe".into(),
-            before: Some(Box::new(|| std::thread::sleep(Duration::from_millis(900)))),
+            // Held until five comments have been seen while it is held (not for a stretch of wall time).
+            before: Some(Box::new(move || seen.wait_for(5))),
         };
         let (service, _) = make_service(&rig.pki, rig.pledge.link(), &rig.used, runner, 16);
         let mut mcp = Mcp::new(&service);
         mcp.keepalive = Duration::from_millis(100);
-        let mut out = Recorder::new();
         mcp.serve(&request(&rig.jan("sys kit", &[]), Some(json!(1))), &AtomicBool::new(false), &mut out);
         let after_running = out.comments();
         assert!(after_running >= 5, "{after_running} comments while the person was asked and the verb ran");
@@ -1470,6 +1512,11 @@ mod http_tests {
     /// Reads one response from `stream` as it arrives: the head, then the pieces of the chunked body or the
     /// whole body of a Content-Length response, until the server closes.
     async fn read_reply<S: AsyncReadExt + Unpin>(stream: &mut S) -> Reply {
+        read_reply_counting(stream, None).await
+    }
+
+    /// As [`read_reply`], counting each keepalive comment in `seen` as it arrives.
+    async fn read_reply_counting<S: AsyncReadExt + Unpin>(stream: &mut S, seen: Option<&Seen>) -> Reply {
         let started = Instant::now();
         let mut buffer = Vec::new();
         let mut byte = [0u8; 4096];
@@ -1505,6 +1552,9 @@ mod http_tests {
                         break;
                     }
                     let data = String::from_utf8(rest[line_end + 2..line_end + 2 + size].to_vec()).unwrap();
+                    if data.starts_with(": keepalive") {
+                        seen.iter().for_each(|seen| seen.one_more());
+                    }
                     chunks.push((started.elapsed(), data));
                     rest.drain(..line_end + 2 + size + 2);
                 }
@@ -1525,10 +1575,14 @@ mod http_tests {
 
     /// One request over an in-memory connection.
     async fn exchange(service: &Arc<Service>, limits: Limits, bytes: &[u8]) -> Reply {
+        exchange_counting(service, limits, bytes, None).await
+    }
+
+    async fn exchange_counting(service: &Arc<Service>, limits: Limits, bytes: &[u8], seen: Option<&Seen>) -> Reply {
         let (mut client, server) = tokio::io::duplex(1 << 16);
         tokio::spawn(serve_connection(server, service.clone(), limits));
         client.write_all(bytes).await.unwrap();
-        read_reply(&mut client).await
+        read_reply_counting(&mut client, seen).await
     }
 
     #[test]
@@ -1589,28 +1643,27 @@ mod http_tests {
     #[test]
     fn the_stream_head_comes_at_acceptance_with_keepalive_comments_until_the_answer() {
         let rig = Rig::new(Plan::Silent);
-        rig.pledge.set(Plan::ApproveAfter(Duration::from_millis(1200), rig.pki.confirmed.clone()));
+        let seen = Seen::default();
+        // Approved after five comments have arrived at the client: the order is shown, not a count in wall time.
+        rig.pledge.set(Plan::ApproveWhen(seen.clone(), 5, rig.pki.confirmed.clone()));
         let service = service_of(&rig);
         let sent = rig.jan("sys kit", &[]);
         runtime().block_on(async {
             let limits = Limits { keepalive: Duration::from_millis(100), ..Limits::default() };
-            let reply = exchange(&service, limits, &request(&call_body(&sent, Some("tok")), "")).await;
+            let reply =
+                exchange_counting(&service, limits, &request(&call_body(&sent, Some("tok")), ""), Some(&seen)).await;
             assert_eq!(reply.status, 200);
             assert_eq!(reply.header("content-type"), Some("text/event-stream"));
             assert_eq!(reply.header("transfer-encoding"), Some("chunked"));
-            assert!(
-                reply.head_at < Duration::from_millis(600),
-                "the head came at {:?}, long before the approval",
-                reply.head_at
-            );
             assert!(reply.comments() >= 5, "{} comments while the person was asked", reply.comments());
             let messages = reply.messages();
             assert_eq!(messages.len(), 1, "no notice of progress");
             assert!(messages[0]["result"]["content"][0]["text"].as_str().unwrap().contains("\"outcome\":\"done\""));
-            // No silence longer than a few keepalives on the wire.
-            let mut times = vec![reply.head_at];
-            times.extend(reply.chunks.iter().map(|(t, _)| *t));
-            assert!(times.windows(2).all(|w| w[1] - w[0] < Duration::from_millis(500)), "{times:?}");
+            // The head came before any comment and the answer after all of them.
+            let last = reply.chunks.last().unwrap();
+            assert!(last.1.starts_with("event: message"), "{last:?}");
+            assert!(reply.chunks[..reply.chunks.len() - 1].iter().all(|(_, c)| c.starts_with(": keepalive")));
+            assert!(reply.chunks.iter().all(|(t, _)| *t >= reply.head_at));
         });
     }
 
