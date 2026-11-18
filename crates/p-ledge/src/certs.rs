@@ -3,6 +3,13 @@
 //! name is `<person>:<role>` (`doc/approval-connections.md`, section 5, "certificates"). The broker's
 //! signature on the standing is not what makes it good; the CA's is. The judgement of the certificate itself
 //! is `p_act::sign::verify_approval_certificate`; what is pledge's is whose key it is.
+//!
+//! **Possession.** The old check had the holder sign a probe, which proved this pledge holds the private key.
+//! Now the certificate is compared with `certifies(<the holder's own public key>)`. That is enough here: the
+//! public key comes from the holder's own key store (`key_with_purpose`), which lists only keys it has a pair
+//! for, so a certificate for that key is a certificate for a key the holder can sign with. Where pledge relies
+//! on actual signing is every approval: a certificate whose key is not the signing key makes the service refuse
+//! the approval, and `seam::sign` signs with the holder's plain key and carries this certificate.
 
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD;

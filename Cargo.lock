@@ -837,7 +837,6 @@ dependencies = [
  "libc",
  "p-act",
  "p-age",
- "rcgen",
  "ring",
  "rustls",
  "rustls-pki-types",

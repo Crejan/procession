@@ -485,6 +485,12 @@ fn deliver(data: &Value, output: Option<&str>) -> std::result::Result<(), String
                 .mode(0o600)
                 .open(path)
                 .map_err(|e| format!("{path}: {e}"))?;
+            // Exactly 0600 whatever the umask (a umask of 0177 would leave 0400) and whatever a directory's
+            // default ACL put in the group bits (on Linux the ACL mask is set by this chmod too).
+            if let Err(e) = file.set_permissions(std::os::unix::fs::PermissionsExt::from_mode(0o600)) {
+                let _ = std::fs::remove_file(path);
+                return Err(format!("{path}: {e}"));
+            }
             file.write_all(&bundle).and_then(|()| file.sync_all()).map_err(|e| {
                 let _ = std::fs::remove_file(path);
                 format!("{path}: {e}")
@@ -532,6 +538,23 @@ fn history_verb(mut args: Vec<String>) -> Done {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_bundle_file_is_exactly_0600_owned_by_the_person_and_never_replaces_a_file() {
+        use std::os::unix::fs::MetadataExt as _;
+        let dir = crate::testing::TestDir::new("deliver");
+        let path = dir.path().join("bundle");
+        let data = json!({"bundle": "AAEC"});
+        deliver(&data, path.to_str()).expect("written");
+        let meta = std::fs::metadata(&path).expect("meta");
+        assert_eq!(meta.mode() & 0o7777, 0o600, "whatever the umask the test runs under");
+        assert_eq!(meta.uid(), crate::approvals_tests::own_uid_for_tests());
+        assert_eq!(std::fs::read(&path).expect("read"), [0, 1, 2]);
+        // A file that is there is never written into, nor its mode changed.
+        std::fs::set_permissions(&path, std::os::unix::fs::PermissionsExt::from_mode(0o644)).expect("chmod");
+        assert!(deliver(&data, path.to_str()).is_err());
+        assert_eq!(std::fs::metadata(&path).expect("meta").mode() & 0o7777, 0o644);
+    }
+
     use super::*;
 
     #[test]
