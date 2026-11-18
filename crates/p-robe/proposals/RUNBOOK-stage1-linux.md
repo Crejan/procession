@@ -79,16 +79,30 @@ programs have today, and what is not yet there is marked.
   ```
   Defaults:probe-svc !lecture
   Defaults:probe-svc env_reset
-  probe-svc ALL=(root) NOPASSWD: /usr/local/bin/probe --within [a-z]*,[a-z]*,[a-z]* --call ????????-????-????-????-???????????? [a-z]* [a-z]*
+  probe-svc ALL=(root) NOPASSWD: /usr/local/bin/probe --within [a-z]*,[a-z]*,[a-z]* --call ????????-????-????-????-???????????? --until [0-9]* [a-z]* [a-z]*
   ```
   It lets `probe-svc` run `/usr/local/bin/probe` as root in one form: `--within
-  <rating> --call <uuid> <noun> <verb> [arguments]`. Sudoers wildcards match
+  <rating> --call <uuid> --until <seconds> <noun> <verb> [arguments]`. Sudoers wildcards match
   anything, spaces included, so the rule alone does not limit the words: the
   dispatcher refuses what is not a verb of its table (`run command` among it),
   and anything whose own rating is above the rating after `--within`. **The
   account can, through this rule, run every verb of the table** (the designer's
   decision, `crates/p-robe/SPEC.md`); what holds it back is the service's checks,
   not sudo. The rule is checked with `visudo -cf` before it is put in place.
+- **The lock and the deadline.** `--call` is the waiting form: the dispatcher
+  waits up to 10 seconds for the one lock of the calling identity (`probe-svc`:
+  one call at a time) instead of failing at once, so that a call the person has
+  approved does not fail because another is finishing. `--until <seconds>` is the
+  call's deadline, passed by the service: the wait is cut at it, and **the verb is
+  not started at or after it** (the dispatcher decides that itself, after it holds
+  the lock, by its own clock; exit 76, `event=expired`, the service tells the agent
+  `expired`). Still held after the wait: exit 75, `event=busy ... waited=10.00s`,
+  `refused / try-later`. The waiting form exists only with `--call`; `--until`
+  is refused without it; by hand, without either flag, a busy lock is immediate.
+  **This is why the rule has `--until`**: without it the dispatcher cannot know
+  the deadline, and the service cannot stop a root process that has not started
+  its verb yet (it can signal only its own `sudo`, and not at the right moment).
+  The rule's line is therefore one pattern longer than it was.
 - `/usr/local/bin/probe` is owned by root and writable by root only: sudo runs
   it as root, so whoever can replace it is root.
 - **The environment.** The rule has `env_reset` and no `SETENV` tag, so sudo
@@ -156,9 +170,12 @@ checks, each with its own line:
 | `test peak` with `--within open,none,outage` | exit 0 |
 | `run command` | exit 64: refused by the dispatcher, even with the widest rating |
 | `--call` given twice | exit 64: refused by the dispatcher |
-| `sudo -n /usr/local/bin/probe sys kit` (no flags) | exit 1: sudo itself refuses, the form is not in the rule |
+| `sudo -n /usr/local/bin/probe sys kit` (no flags), and the form without `--until` | exit 1: sudo itself refuses, the form is not in the rule |
+| `--until 1` (a deadline already past) | exit 76: the verb is not started |
+| the lock held by someone else for 3 seconds (`flock`, as root), then a call with `--call` | exit 0: it waited and ran; its syslog line says `waited=` about 2 seconds |
+| the lock held for 6 seconds and the deadline 2 seconds away | exit 76 after about 2 seconds: the wait is cut at the deadline and the verb is not started (`event=expired`) |
 | `sudo -n /bin/true` | exit 1: no other program is in the rule |
-| the audit lines | syslog has `event=start` and `event=done` with `call=<uuid>` for the call that ran, `event=refused ... above-approved` with `call=<uuid>` for the one that was refused |
+| the audit lines | syslog has `event=start` and `event=done` with `call=<uuid>` for the call that ran, `event=refused ... above-approved` with `call=<uuid>` for the one that was refused, `event=expired` for the two that ran out of time |
 
 Did not pass: the line says which check, what it got and what it expected,
 with sudo's own message (`a password is required` means the rule did not

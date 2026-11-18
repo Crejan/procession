@@ -61,7 +61,15 @@ otherwise, or at once when there is no certificate or the key changed. A
 renewal that fails ends non-zero, so the timer's unit shows as failed and
 the next day tries again. Run by hand, `probe setup` renews always. Nothing
 from outside the host is an argument to it, and no converge is needed. `sys kit` reports the days
-left, and fewer than 5 is a warning. The service runs under an account of its own, and the dispatcher
+left, and fewer than 5 is a warning. **The lock and the deadline.** The dispatcher takes one lock per calling identity, so one call per
+identity runs at a time. A call that comes through the service (`--call <uuid>`) waits for it, up to
+about 10 seconds; by hand, without `--call`, a held lock is "busy" at once. The service passes the
+call's deadline (`--until <seconds>`), and **the dispatcher enforces it**: it cuts its wait there and,
+after it holds the lock, checks the clock again and does not start the verb at or after the deadline
+(exit 76; the agent hears `expired`). The service enforces its part too: it starts the dispatcher only
+while the deadline has not passed. Still held after the wait: exit 75, `refused / try-later`, and the
+audit line says that it waited and for how long. The deadline bounds the start of a verb, not its run.
+The service runs under an account of its own, and the dispatcher
 gets the privilege each verb needs through the same sudo rule a person's
 call uses. It holds no rule about who may what. It does hold the ratings: they are facts about its own verbs, and
 rating them is its responsibility.

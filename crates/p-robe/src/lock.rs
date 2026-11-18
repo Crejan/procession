@@ -52,6 +52,23 @@ pub fn take(dir: &Path, identity: &str) -> Result<Taken, Fault> {
     }
 }
 
+/// As [`take`], but a lock that is held is waited for, up to `max`, asking again every 20 ms (a `flock`
+/// that blocks cannot be given up on without a thread). `max` of zero is [`take`].
+///
+/// # Errors
+/// As [`take`]; [`Fault::Busy`] only after `max` has passed.
+pub fn take_waiting(dir: &Path, identity: &str, max: std::time::Duration) -> Result<Taken, Fault> {
+    let started = std::time::Instant::now();
+    loop {
+        match take(dir, identity) {
+            Err(Fault::Busy) if started.elapsed() < max => {
+                std::thread::sleep(std::time::Duration::from_millis(20).min(max - started.elapsed()));
+            }
+            other => return other,
+        }
+    }
+}
+
 /// Why a directory or file that root executes from is not safe, or `None`:
 /// not owned by root, or writable by group or others.
 #[must_use]
@@ -95,6 +112,36 @@ mod tests {
             }
             std::thread::sleep(std::time::Duration::from_millis(20));
         }
+    }
+
+    #[test]
+    fn a_lock_that_is_held_is_waited_for_until_it_is_free_or_the_time_is_up() {
+        use std::time::{Duration, Instant};
+        let dir = crate::testdir::new("lock");
+        let held = take(&dir, "jan").unwrap();
+        // Time up: busy, after about the time asked.
+        let started = Instant::now();
+        assert_eq!(take_waiting(&dir, "jan", Duration::from_millis(300)).unwrap_err(), Fault::Busy);
+        assert!(started.elapsed() >= Duration::from_millis(300) && started.elapsed() < Duration::from_secs(2));
+        // Zero is no wait.
+        let started = Instant::now();
+        assert_eq!(take_waiting(&dir, "jan", Duration::ZERO).unwrap_err(), Fault::Busy);
+        assert!(started.elapsed() < Duration::from_millis(100));
+        // Freed during the wait: taken.
+        let releaser = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(200));
+            drop(held);
+        });
+        let started = Instant::now();
+        assert!(matches!(take_waiting(&dir, "jan", Duration::from_secs(5)).unwrap(), Taken::Held(_)));
+        assert!(started.elapsed() >= Duration::from_millis(150) && started.elapsed() < Duration::from_secs(3));
+        releaser.join().unwrap();
+        // What is not a wait's business is refused at once: a symlink, no directory.
+        std::os::unix::fs::symlink(dir.join("x"), dir.join("eva.lock")).unwrap();
+        let started = Instant::now();
+        assert!(matches!(take_waiting(&dir, "eva", Duration::from_secs(5)), Err(Fault::Refused(_))));
+        assert!(started.elapsed() < Duration::from_millis(200));
+        assert!(matches!(take_waiting(&dir.join("absent"), "jan", Duration::from_secs(5)), Ok(Taken::NoDirectory)));
     }
 
     #[test]

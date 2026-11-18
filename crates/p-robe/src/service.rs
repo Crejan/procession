@@ -289,7 +289,7 @@ impl Service {
             return Err(Stop::Cancelled(hash.clone()));
         }
         // 5. Run the dispatcher, refusing above what was approved.
-        let (outcome, exact) = self.run(rating, call.id().as_str(), call.action(), call.params());
+        let (outcome, exact) = self.run(rating, call.id().as_str(), deadline.unix(), call.action(), call.params());
         Ok((outcome, format!("{exact} approval={}", ApprovalKindWord(kind)), hash.clone()))
     }
 
@@ -307,15 +307,17 @@ impl Service {
         })
     }
 
-    fn run(&self, within: p_act::rating::Rating, call_id: &str, action: &str, params: &[String]) -> Ended {
+    fn run(&self, within: p_act::rating::Rating, call_id: &str, until: i64, action: &str, params: &[String]) -> Ended {
         let _one_at_a_time = self.run_lock.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-        match self.runner.run(within, call_id, action, params) {
+        match self.runner.run(within, call_id, until, action, params) {
             Err(why) => unavailable(format!("run:{why}")),
             Ok(out) if out.timed_out => unavailable("run-limit"),
             Ok(out) => match out.rc {
                 crate::dispatch::RC_REFUSED => (Outcome::Refused(Why::NotAllowed), "dispatcher-refused".into()),
                 crate::dispatch::RC_UNAVAILABLE => unavailable("dispatcher-unavailable"),
                 crate::dispatch::RC_BUSY => (Outcome::Refused(Why::TryLater), "dispatcher-busy".into()),
+                // Could not start before the deadline: nothing ran, and the call is over: expired, not try-later.
+                crate::dispatch::RC_EXPIRED => (Outcome::Expired, "dispatcher-deadline".into()),
                 rc => (Outcome::Done { rc, answer: out.stdout }, "ran".into()),
             },
         }

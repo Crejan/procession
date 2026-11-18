@@ -209,3 +209,34 @@ and the certificate lapses. Now:
   p-act's socket tests and mine both skip or never ran over TCP.
 - The dropped-answer invariant (`0c9ca11`) stands: tested with a valid approval of another request's bytes under another
   hash, dropped and logged; the wait goes on; only the real answer is acted on, once.
+
+## Update: the dispatcher waits for the lock with `--call`, and the deadline is `--until`
+
+Designer's decision, built:
+
+- **Waiting form:** with `--call` the dispatcher waits for the identity's lock up to 10 s (`LOCK_WAIT`, polling every
+  20 ms); without `--call` the immediate "busy" stays. Still held after the wait: exit 75, `refused / try-later` for the agent,
+  and the busy line says `identity-busy: waited 10.00s`; every audit line of a waiting call has `waited=<secs>`.
+  One call per identity at a time still holds.
+- **Who enforces the deadline, and how a waiting dispatcher cannot start the verb after the service gave up:**
+  the documents gave the dispatcher no way to know the deadline, and the service cannot stop a root process that is
+  waiting (it can signal only its own `sudo`, with a race against the moment the verb starts). So this needed
+  something the documents do not give, and **I built the proposal: `--until <seconds>`**, the call's deadline, passed by
+  the service next to `--call`. The dispatcher (a) refuses at once if it has passed (exit 76, `event=expired`), (b) cuts
+  its wait at it, (c) **after it holds the lock, checks the clock again and does not start the verb at or after the
+  deadline**, so the decision to start is made in one place, after the lock, by the dispatcher's own clock; the service
+  also starts the dispatcher only while the deadline has not passed. Exit 76 reaches the agent as `expired`, not
+  `try-later` (`dispatcher-deadline`). `--until` exists only with `--call`, and only as a plain number.
+- **Sudoers consequence (needs the designer's yes):** the rule's line gains `--until [0-9]*`:
+  `... --call ????????-????-????-????-???????????? --until [0-9]* [a-z]* [a-z]*`. The form without `--until` is no longer
+  in the rule. Updated: `a1-prepare.sh`, `a2-check-rule.sh` (all calls carry `--until`; new checks: the form without it is
+  refused by sudo, a past deadline is 76, a held lock is waited for and the line says `waited=`, a deadline that passes
+  while waiting is 76 and nothing starts), and runbook section 2 and the A2 table. **Not run on Linux.**
+- **SPEC:** `crates/p-robe/SPEC.md` says which part enforces what.
+- **Tests:** `take_waiting` (waits, times out, zero is none, a symlink or missing directory at once); the dispatcher: waits and
+  says how long, no wait without `--call`, busy after the wait with the line, past deadline, deadline while waiting (the
+  wait is cut at about 1 s, not 10), lock freed after the deadline (not started), a far deadline, `--until` only with `--call`
+  and only as a plain number (nine bad shapes); the service: the exit codes 75/76/64/3/0 map to try-later/expired/
+  not-allowed/unavailable/done, the runner is given the call's id and deadline, and a call whose dispatcher waits past the
+  deadline is `expired` with no `start` line. The in-process runner's retry loop is gone (the waiting form replaces it).
+  156 unit with `test-verbs`.
