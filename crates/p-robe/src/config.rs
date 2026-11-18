@@ -82,11 +82,9 @@ impl Config {
     /// # Errors
     /// The file is there and refused.
     pub fn load_optional(path: &Path) -> Result<Option<Config>, String> {
-        match p_act::settings::read::<Config>(path) {
-            Ok(config) => config.checked().map(Some).map_err(|e| format!("{}: {e}", path.display())),
-            Err(p_act::settings::SettingsError::Io { source, .. }) if source.kind() == std::io::ErrorKind::NotFound => {
-                Ok(None)
-            }
+        match p_act::settings::read_optional::<Config>(path) {
+            Ok(Some(config)) => config.checked().map(Some).map_err(|e| format!("{}: {e}", path.display())),
+            Ok(None) => Ok(None),
             Err(e) => Err(format!("{}: {e}", path.display())),
         }
     }
