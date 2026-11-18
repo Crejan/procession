@@ -80,7 +80,7 @@ impl Pledge {
         let config = json!({
             "person": "jan",
             "hosts": [{"host": HOST, "key": host.trim()}],
-            "services": [{"host": HOST, "name": "probe", "url": "http://127.0.0.1:8443/mcp"}],
+            "services": [{"host": HOST, "name": "probe", "url": std::env::var("PROBE_STAGE1_URL").unwrap_or_else(|_| "http://127.0.0.1:8443/mcp".into())}],
         });
         fs::write(state.join("config.json"), config.to_string()).unwrap();
         let binary = pledge_binary();

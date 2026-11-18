@@ -90,7 +90,9 @@ pub fn judge(lock_problem: Option<&str>, euid: u32, test_verbs: bool, certificat
 pub fn run(env: &Env, _args: &[String], answer: &mut Answer<'_>) -> Result<u8, Full> {
     let test_verbs = cfg!(feature = "test-verbs");
     let lock_problem = lock::directory_problem(&env.lock_dir);
-    let cert_path = config::certificate_path(std::fs::read_to_string(config::DEFAULT_FILE).ok().as_deref());
+    let cert_path = config::certificate_path(
+        config::read_checked(std::path::Path::new(config::DEFAULT_FILE)).ok().flatten().as_deref(),
+    );
     let certificate = look_at_certificate(&cert_path, Timestamp::now().map_or(0, Timestamp::unix));
     let executable = std::env::current_exe().ok().map(|path| path.display().to_string());
     answer.record(&header("sys", "kit", &hostname(), &clock::now()))?;

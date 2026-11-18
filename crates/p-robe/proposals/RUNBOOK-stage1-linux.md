@@ -21,14 +21,15 @@ service over HTTP. Nothing in it has been run on Linux. Terms are those of
 |---|---|
 | `pledge serve`, `pledge keys`, `pledge agents start/withdraw`, `pledge history` | built (p-ledge), tested on macOS |
 | `probe` dispatcher, `sudo -n probe --within <rating> --call <uuid> <noun> <verb> ...` | built, tested on macOS with a simulated root; **never run through sudo** |
-| `probe setup` (the service's key and its 30-day certificate from the host key; **the same command renews**: it keeps the key, replaces the certificate by a rename; with no arguments it takes `/etc/probe.toml` or the defaults) | built, run on macOS with a throwaway host key |
+| `probe setup` (the service's key and its 30-day certificate from the host key; **the same command renews**: it keeps the key, replaces the certificate by a rename; with no arguments it takes `/etc/probe.json` or the defaults) | built, run on macOS with a throwaway host key |
 | the daily renewal timer and its unit (`stage1/probe-setup.service` and `.timer`, running `probe setup --if-due`) | written, **never run** (no systemd here); `systemd-analyze verify` is the first check |
 | `sys kit` reports the certificate's days left (a warning under 5) | built and tested on macOS with certificates made by `ssh-keygen -V` |
 | `probe serve`: the service core (checks, request, wait, approval, run), the MCP layer | built; run in-process against the real pledge (`tests/stage1.rs`) |
-| `probe serve` **over HTTP** | **not built.** It needs an HTTP server crate that cannot be fetched in the sandbox (section 6) |
+| `probe serve` over HTTP (`hyper`) | **built** (`src/http.rs`), tested over memory and over a Unix socket; **never run over TCP** (no port can be bound in the sandbox) |
 | `pact` composer, signer, catalogue, `pact call` / `pact tools` | built (p-act) |
-| `pact`'s HTTP client | **not built** (`NoHttp`: every call is `unavailable`); p-act's decision (section 6) |
+| `pact`'s HTTP client | p-act's, `ureq` 3, built in parallel; not in this runbook's tree until merged |
 | the cross run through `SudoRunner` | **written, not run:** `tests/stage1_sudo.rs` |
+| the cross run over real HTTP with the real `pact` | **written, not run:** `tests/stage1_http.rs` (needs a TCP port and `pact`'s client) |
 | the scripts of Stage A (`stage1/*.sh`) | **written, not run** (syntax checked with `sh -n` on macOS) |
 
 So the runbook has two stages. **Stage A runs today on a Linux machine**: the
@@ -117,7 +118,7 @@ programs have today, and what is not yet there is marked.
 | lines in syslog or the journal (tag `probe`, facility `auth`) | the dispatcher, on every call | not undone: they are history |
 | files in `/var/tmp` (`probe-stage1-run`, `probe-stage1.check.log*`) | `a2`, `a3` | `a3` removes its own; `undo.sh` the rest |
 | temporary files under `/tmp` for pledge's state and sockets | the test | the test removes them when it passes; on a failure `rm -rf /tmp/s1-*` |
-| Stage B only: `/etc/probe/` (service key and certificate), `/etc/probe.toml`, the units `probe-serve.service`, `probe-setup.service` and `probe-setup.timer`, pledge's state in your home, a TCP port on 127.0.0.1 | Stage B steps | the undo lines of Stage B |
+| Stage B only: `/etc/probe/` (service key and certificate), `/etc/probe.json`, the units `probe-serve.service`, `probe-setup.service` and `probe-setup.timer`, pledge's state in your home, a TCP port on 127.0.0.1 | Stage B steps | the undo lines of Stage B |
 
 `undo.sh` is safe to run at any time and does nothing to what is not on this list.
 
@@ -223,9 +224,10 @@ sh stage1/undo.sh
 
 ## 5. Stage B: pledge as the person, `probe serve` as its own account, `pact`, over HTTP
 
-**Not runnable yet**: it needs `probe serve` to listen (section 6) and `pact`
-to have an HTTP client. The commands below use what exists today; the lines
-marked **(needs HTTP)** are the ones that wait.
+`probe serve` now listens (`hyper`; the owner fetched the crates, section 6).
+What still waits is `pact`'s HTTP client (p-act's, in parallel): B1 to B4 can be
+followed today, B5 needs it. Nothing of Stage B has been run on Linux, and the
+HTTP transport has never been run over TCP by its author.
 
 ### B1. Pledge, as `alice`
 
@@ -342,58 +344,85 @@ warning is gone and the days are 30. **Undo of the timer:** `systemctl disable -
 systemctl daemon-reload`. (Without the timer the certificate ends in 30 days and
 `sys kit` warns from 5 days before.)
 
-### B3. `/etc/probe.toml`
+### B3. `/etc/probe.json`
+
+One JSON object, mode 0644 or 0640, owned by root (**a file that its group or
+anyone else can write is refused**, and an unknown member is refused; a missing
+required member is named in the message):
 
 ```
-host = "HOSTNAME"
-host_key = "/etc/ssh/ssh_host_ed25519_key"
-person = "alice"
-confirmed_key = "/etc/probe/alice-confirmed.pub"
-automatic_key = "/etc/probe/alice-automatic.pub"
-service_key = "/etc/probe/service-key"
-pledge_socket = "/run/user/1000/pledge/service.sock"
-pledge_uid = 1000
-used_dir = "/var/lib/probe/used"
-listen = "127.0.0.1:8765"
-probe = "/usr/local/bin/probe"
+{
+  "host": "HOSTNAME",
+  "host_key": "/etc/ssh/ssh_host_ed25519_key",
+  "person": "alice",
+  "confirmed_key": "/etc/probe/alice-confirmed.pub",
+  "automatic_key": "/etc/probe/alice-automatic.pub",
+  "service_key": "/etc/probe/service-key",
+  "pledge_socket": "/run/user/1000/pledge/service.sock",
+  "pledge_uid": 1000,
+  "used_dir": "/var/lib/probe/used",
+  "listen": "127.0.0.1:8765",
+  "probe": "/usr/local/bin/probe"
+}
 ```
 
-### B4. Start `probe serve` as `probe-svc` **(needs HTTP)**
+(`max_waiting`, default 16, is the only other member.) `probe setup` and `probe
+sys kit` read it too: `setup --if-due` for the key path and the host key, `sys kit` for
+the certificate's path. Passed: `probe serve --config /etc/probe.json` gets as far as
+`probe serve: for alice, pledge reachable`. Did not pass: `probe serve: /etc/probe.json:
+...` with the reason (`writable by its group or by others`, `unknown member ...`,
+`confirmed_key is needed`).
+
+### B4. Start `probe serve` as `probe-svc`
 
 ```
-sudo -u probe-svc /usr/local/bin/probe serve --config /etc/probe.toml
+sudo -u probe-svc /usr/local/bin/probe serve --config /etc/probe.json
 ```
 
-Today this builds the service and says `the HTTP transport on 127.0.0.1:8765 is
-not built yet` (exit 2), and whether pledge is reachable (`pledge reachable`
-or `not reachable`): that part can be run now, and `reachable` shows the
-door of `service.sock` works for the account. Once the transport exists it
-listens. As a unit, `/etc/systemd/system/probe-serve.service`:
+It builds the service, says whether pledge is reachable, and **listens on `listen`**
+(`probe serve: listening on 127.0.0.1:8765`); HTTP/1.1 only, one request per
+connection, MCP at `POST /mcp`. Passed: that line, and from another shell
+`curl -s -X POST -H 'Content-Type: application/json' -H 'Accept: application/json, text/event-stream'
+-d '{"jsonrpc":"2.0","id":1,"method":"tools/list"}' http://127.0.0.1:8765/mcp` prints the tools (`sys_kit`,
+`test_echo`, `test_peak`, `test_read`) with the rating in each description. Did not pass:
+`cannot listen on ...` (the port is taken or the address is not the host's), or an exit 64 with the
+settings problem. **The HTTP transport has never been run over TCP by its author** (no port can be bound
+in the sandbox): it is tested over memory and over a Unix socket (`hyper`, the stream with its head at
+acceptance and its keepalive comments, a client that goes away cancelling the call). A failure here that
+those tests did not show is a finding.
+
+As a unit, `/etc/systemd/system/probe-serve.service` (`stage1/probe-serve.service`):
 
 ```
-[Unit]
-Description=probe: diagnostics for agents, with approval
-After=network.target
-
-[Service]
-User=probe-svc
-ExecStart=/usr/local/bin/probe serve --config /etc/probe.toml
-Restart=on-failure
-NoNewPrivileges=false
-ProtectSystem=strict
-ReadWritePaths=/var/lib/probe/used
-
-[Install]
-WantedBy=multi-user.target
+cp stage1/probe-serve.service /etc/systemd/system/
+systemctl daemon-reload
+systemctl enable --now probe-serve.service
+systemctl status probe-serve.service
 ```
 
-(`NoNewPrivileges` must stay `false`: sudo needs to become root.) Undo:
-`systemctl disable --now probe-serve; rm /etc/systemd/system/probe-serve.service`.
+**In an LXC container (Proxmox).** The unit has **no sandboxing lines** on purpose.
+`ProtectSystem=`, `ReadWritePaths=`, `PrivateTmp=` and `ProtectHome=` need mount
+namespaces, which an unprivileged container gives to its units only with nesting
+(`features: nesting=1` in the container's configuration; without it the unit fails
+with `status=226/NAMESPACE`). **Dropped for that reason: all four.** The unit does not
+set `NoNewPrivileges` (it must stay off: the dispatcher is run through sudo); `User=probe-svc`
+and `Restart=on-failure` are plain and work anywhere. If the container has nesting on,
+`stage1/probe-serve-hardening.conf` (copy it to
+`/etc/systemd/system/probe-serve.service.d/hardening.conf` and `systemctl daemon-reload;
+systemctl restart probe-serve`) adds them back. The same holds for `probe-setup.service`
+(`stage1/probe-setup-hardening.conf`). Other things a container changes: `sudo`, `su`, `useradd`,
+`logger` and journald behave as on a host; pledge's `service_group` needs the group to exist
+inside the container; the sockets are Unix sockets inside it; `/etc/ssh/ssh_host_ed25519_key` is the
+container's own host key (a container made by cloning has the host key of the template until
+`ssh-keygen -A` is run after removing them: do that first, or the key that certifies the
+service is shared with the template). Passed: `status` shows `active (running)`. Undo:
+`systemctl disable --now probe-serve; rm /etc/systemd/system/probe-serve.service;
+rm -rf /etc/systemd/system/probe-serve.service.d; systemctl daemon-reload`.
 
-### B5. An agent and a call **(needs HTTP)**
+### B5. An agent and a call
 
-As `alice`: `pledge agents start --groups admins --output /home/alice/bundle`
-(answer the dialog). Then, as the user the agent runs as:
+As `alice`: `pledge agents start --groups admins --output /home/alice/bundle` (answer the dialog).
+Then, as the user the agent runs as (the bundle is the agent's key: guard it):
 
 ```
 pact tools < /home/alice/bundle
@@ -401,60 +430,43 @@ pact call test_echo '{"params":["hello"]}' < /home/alice/bundle
 pact call test_peak '{"params":[]}' < /home/alice/bundle
 ```
 
-Passed: `pact tools` lists `sys_kit`, `test_echo`, `test_peak`, `test_read`; the
-second prints one line whose first text is `{"type":"outcome","outcome":"done",...}`;
-the third waits, pledge asks alice (dialog and presence check), and ends `done`
-or, if alice says no, `declined`. `pledge history --verify` shows the entries;
-`journalctl -t probe | grep call=<uuid>` shows what ran. Today `pact call` ends
-`unavailable`, because the HTTP client is not there.
+Passed: `pact tools` lists `sys_kit`, `test_echo`, `test_peak`, `test_read`; the second prints one line
+whose first text is `{"type":"outcome","outcome":"done",...}`; the third waits, pledge asks alice (dialog and
+presence check), and ends `done` or, if alice says no, `declined`. `pledge history --verify` shows the
+entries (`received` then the answer for the asked one); `journalctl -t probe | grep call=<uuid>` shows what
+ran. **This needs `pact` with its HTTP client** (p-act's, `ureq`, built in parallel): until it is merged,
+`pact call` ends `unavailable`. What I need from p-act: a `pact` binary built with that client (`cargo build
+--workspace --features p-robe/test-verbs` is how this runbook builds it; if the client needs another feature,
+tell me which), `pact call TOOL ARGUMENTS < bundle` printing the normalised result as it does now, and
+confirmation that it sends `Accept: application/json, text/event-stream`, `Content-Type: application/json`,
+`MCP-Protocol-Version: 2025-06-18` and no `Origin`, reads the stream as it arrives with its 45-second idle
+timeout, and that the HTTP/1.1 chunked decoding of `ureq` 3 hands a `text/event-stream` body to it piece by piece
+(not after it ends: the head of the response arrives at once and the comments every 15 seconds).
 
-## 6. Dependencies, and what I need decided
-
-The sandbox cannot reach crates.io, so the owner fetches. The cache of the
-sandbox's cargo holds the crates below as downloads that it may not unpack, so
-`cargo generate-lockfile --offline` resolves them (checked: 26 packages) and a
-build there does not.
-
-**`probe serve` (p-robe), in `crates/p-robe/Cargo.toml`, `[dependencies]`:**
+**The same, as a test.** `tests/stage1_http.rs` runs the real `pledge serve`, this crate's HTTP transport on a
+TCP port in the test process, and the real `pact` binary for each call; with `PROBE_STAGE1_SUDO=1` the verb is
+run through the sudo rule as in Stage A. It is ignored and gated:
 
 ```
-hyper = { version = "1.11", default-features = false, features = ["server", "http1"] }
-hyper-util = { version = "0.1.20", default-features = false, features = ["tokio"] }
-http-body-util = "0.1.5"
-bytes = "1"
-tokio = { version = "1", features = ["rt-multi-thread", "net", "time", "sync", "macros"] }
+cargo build --workspace --features p-robe/test-verbs
+PROBE_STAGE1_HTTP=1 cargo test -p p-robe --features test-verbs --test stage1_http -- --ignored --nocapture
 ```
 
-Why `hyper` and not a smaller server: the stream the service must write
-(`agent-to-service.md` section 7, `pact.md` section 7) is an SSE response whose
-head goes out at acceptance and with a comment line at least every 15 seconds,
-for as long as the person takes, and a closed connection must be noticed at
-once to cancel the call. `hyper` 1 does that with a response body fed from a
-channel and notices the client's end through the body. `tiny_http` and
-`httparse` alone would be a server written by hand, which was ruled out. The
-resolved set (in the sandbox's cache): `hyper` 1.11.0, `hyper-util` 0.1.20,
-`http-body-util` 0.1.5, `http` 1.5.0, `http-body` 1.1.0, `httparse` 1.10.1,
-`bytes` 1.12.1, `tokio` 1.54.1 (with `mio` 1.2.4, `socket2` 0.6.5),
-`pin-project-lite`, `futures-channel`, `futures-core`, `atomic-waker`,
-`itoa`, `httpdate`, `smallvec`. Nothing for TLS: between agent and service TLS
-is open for stage 2 (the decision on `approvals.md`).
+(or, through the rule, built as in A3 and run as `probe-svc` with both variables set.) Passed: `PASSED: the real
+pact called the real probe over HTTP`, and the four calls `test_echo`, `test_peak` (asked and confirmed),
+`test_peak` declined, `sys_kit` match pledge's record. Did not pass: the first assertion that failed, with the
+service's log; `a TCP port can be bound here` means the port (`PROBE_STAGE1_PORT`, default 18765) is not
+available; `pact: ...` is `pact`'s own message. **Never run by its author**: no TCP port and no `pact` HTTP
+client here.
 
-**What `pact`'s client needs (p-act's choice):** an HTTP/1.1 client over TCP
-(and `https` with a root later) that reads a response as it arrives (a
-chunked `text/event-stream`), with an idle timeout of 45 seconds on the
-read, no redirects, no proxy variables, a 4 MiB limit on the message, and that
-stops when the model cancels. It is synchronous (at most 16 waiting calls, a
-thread each, no runtime), which suggests `ureq` 3, which p-act's `pact.md`
-names as option (e); if the owner accepts `tokio` anyway (for the broker,
-`p-age`), `hyper-util`'s client would also do, at the price of a runtime in
-`pact`, which holds a key. I do not decide it; p-act's document does.
-**Please decide:** the line for `ureq` (or the alternative), and whether a
-runtime in `pact` is acceptable.
+## 6. Dependencies
 
-Then I build `probe serve` on `hyper`: a listener on `listen`, each request read
-with a 64 KiB limit and handed to `Mcp::serve` on a blocking thread, whose
-`ResponseWriter` sends each piece into the body's channel at once; a failed send
-is the client gone. The MCP layer is written for that already.
+Fetched by the owner (the sandbox cannot reach crates.io). For `probe serve`, in
+`crates/p-robe/Cargo.toml`: `hyper` 1 (`server`, `http1`), `hyper-util` 0.1 (`tokio`),
+`http-body-util`, `bytes`, `tokio` (`rt-multi-thread`, `net`, `time`, `sync`, `macros`);
+the lock pins `hyper` 1.12.0 and `hyper-util` 0.1.21. `tokio`'s `io-util` is a
+dev-dependency only, for the in-memory streams of the tests. No TLS crate: between
+agent and service TLS is open for stage 2. `pact`'s client is p-act's: `ureq` 3, no runtime.
 
 ## 7. What was run, and where
 
@@ -466,8 +478,7 @@ root, no sudo rule, no systemd, no Linux.
   `pledge serve`, `pact`'s composer and signer, the service core, the dispatcher
   in this process as a simulated root). `tests/stage1_sudo.rs` **compiles**, and
   its gate works: without `PROBE_STAGE1_SUDO=1` it does nothing and passes.
-  `cargo generate-lockfile --offline` resolved the dependency lines of section 6.
-  `sh -n` accepted the four scripts.
+    `sh -n` accepted the four scripts.
 - **Not run:** anything with real `sudo` or `visudo`; the rule's wildcards
   against a real `sudo`; `logger` as a Linux one; syslog or the journal; the
   scripts; `tests/stage1_sudo.rs` itself; `SudoRunner` (only its argument
