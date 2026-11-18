@@ -51,6 +51,8 @@ run "the form without --within is not in the rule (sudo refuses, 1)" 1 \
   "sudo -n $PROBE sys kit"
 run "the form without --until is not in the rule (sudo refuses, 1)" 1 \
   "sudo -n $PROBE --within open,none,none --call $U4 sys kit"
+run "a deadline more than ten minutes ahead is refused, so that it cannot park a process (64)" 64 \
+  "sudo -n $PROBE --within open,none,none --call $U5 --until $(( $(date +%s) + 3600 )) sys kit"
 run "a deadline already past: the verb is not started (76)" 76 \
   "sudo -n $PROBE --within open,none,none --call $U5 --until 1 sys kit"
 

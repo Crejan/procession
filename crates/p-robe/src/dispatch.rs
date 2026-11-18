@@ -28,6 +28,18 @@ pub const RC_REFUSED: u8 = 64;
 pub const RC_BUSY: u8 = 75;
 /// The call's deadline passed before its verb could start (`--until`).
 pub const RC_EXPIRED: u8 = 76;
+/// The most `--until` may lie ahead of the dispatcher's own clock: the bound a deadline has everywhere (ten
+/// minutes) with the tolerated difference of clocks (60 seconds) applied, as the service applies it, so that the
+/// flag cannot park a root process for long.
+pub const UNTIL_MAX_AHEAD_SECONDS: i64 =
+    p_act::limits::MAX_DEADLINE_AHEAD_SECONDS + p_act::limits::CLOCK_TOLERANCE_SECONDS;
+
+/// Whether `until` lies further ahead of `now` than a deadline may.
+#[must_use]
+pub fn until_too_far(until: i64, now: i64) -> bool {
+    until - now > UNTIL_MAX_AHEAD_SECONDS
+}
+
 /// How long a call that came through the service (`--call`) waits for the identity's lock.
 pub const LOCK_WAIT: std::time::Duration = std::time::Duration::from_secs(10);
 
@@ -337,6 +349,9 @@ impl<'a> Dispatcher<'a> {
         // the lock is held, by this process's clock.
         let waits = call_id.is_some();
         let now = || p_act::Timestamp::now().map_or(0, p_act::Timestamp::unix);
+        if call.until.is_some_and(|until| until_too_far(until, now())) {
+            return Err(Stop::Refused(refuse("--until is more than ten minutes ahead", Some(&call.identity))));
+        }
         if call.until.is_some_and(|until| now() >= until) {
             return Err(Stop::Expired("the deadline had passed before the call reached the dispatcher".into()));
         }
@@ -830,6 +845,31 @@ mod tests {
         let far = until(unix_now() + 600);
         let outcome = call(&sudo("jan"), &["--call", CALL, "--until", &far, "sys", "kit"]);
         assert_eq!(outcome.rc, 0, "{:?}", outcome.lines);
+    }
+
+    #[test]
+    fn until_may_not_lie_more_than_ten_minutes_and_the_tolerance_ahead() {
+        // The pure bound: 600 s, and the 60 s tolerated difference of clocks as elsewhere: 660, inclusive.
+        assert_eq!(UNTIL_MAX_AHEAD_SECONDS, 660);
+        for (ahead, too_far) in [(-5, false), (0, false), (600, false), (660, false), (661, true), (3600, true)] {
+            assert_eq!(until_too_far(1_800_000_000 + ahead, 1_800_000_000), too_far, "{ahead}");
+        }
+        // Through the dispatcher: refused, not waited for, no lock, no verb.
+        for ahead in [700, 3600, 86_400] {
+            let until = (unix_now() + ahead).to_string();
+            let outcome = call(&sudo("jan"), &["--call", CALL, "--until", &until, "sys", "kit"]);
+            assert_eq!(outcome.rc, RC_REFUSED, "{ahead}");
+            assert!(outcome.out.is_empty() && outcome.lines.len() == 1, "{:?}", outcome.lines);
+            assert!(
+                outcome.lines[0].starts_with("event=refused ")
+                    && outcome.lines[0].contains("more than ten minutes ahead"),
+                "{:?}",
+                outcome.lines
+            );
+        }
+        // Within the bound, a held lock is waited for only until then: a parked process cannot outlast it.
+        let ok = (unix_now() + 600).to_string();
+        assert_eq!(call(&sudo("jan"), &["--call", CALL, "--until", &ok, "sys", "kit"]).rc, 0);
     }
 
     #[test]

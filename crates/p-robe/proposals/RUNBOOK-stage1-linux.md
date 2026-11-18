@@ -93,7 +93,10 @@ programs have today, and what is not yet there is marked.
   waits up to 10 seconds for the one lock of the calling identity (`probe-svc`:
   one call at a time) instead of failing at once, so that a call the person has
   approved does not fail because another is finishing. `--until <seconds>` is the
-  call's deadline, passed by the service: the wait is cut at it, and **the verb is
+  call's deadline, passed by the service: **seconds since the epoch, UTC, the deadline to the second,
+  unchanged** (never a later time); the dispatcher refuses one more than 10 minutes ahead of its own
+  clock (660 seconds: ten minutes with the 60 seconds of tolerated clock difference applied, as the service
+  applies it), so that the flag cannot park a root process for long: the wait is cut at it, and **the verb is
   not started at or after it** (the dispatcher decides that itself, after it holds
   the lock, by its own clock; exit 76, `event=expired`, the service tells the agent
   `expired`). Still held after the wait: exit 75, `event=busy ... waited=10.00s`,
@@ -171,6 +174,7 @@ checks, each with its own line:
 | `run command` | exit 64: refused by the dispatcher, even with the widest rating |
 | `--call` given twice | exit 64: refused by the dispatcher |
 | `sudo -n /usr/local/bin/probe sys kit` (no flags), and the form without `--until` | exit 1: sudo itself refuses, the form is not in the rule |
+| `--until` more than ten minutes ahead | exit 64: refused, so that it cannot park a root process |
 | `--until 1` (a deadline already past) | exit 76: the verb is not started |
 | the lock held by someone else for 3 seconds (`flock`, as root), then a call with `--call` | exit 0: it waited and ran; its syslog line says `waited=` about 2 seconds |
 | the lock held for 6 seconds and the deadline 2 seconds away | exit 76 after about 2 seconds: the wait is cut at the deadline and the verb is not started (`event=expired`) |

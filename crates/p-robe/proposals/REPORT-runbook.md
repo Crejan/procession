@@ -240,3 +240,12 @@ Designer's decision, built:
   not-allowed/unavailable/done, the runner is given the call's id and deadline, and a call whose dispatcher waits past the
   deadline is `expired` with no `start` line. The in-process runner's retry loop is gone (the waiting form replaces it).
   156 unit with `test-verbs`.
+
+## Update: what `--until` is, and its bound
+
+`--until` is seconds since the epoch, UTC, the call's deadline to the second; the service passes it unchanged (a test
+compares it with the signed call's deadline, never later). The dispatcher refuses one more than **660 seconds** ahead of its own
+clock (10 minutes plus the 60 seconds of tolerated clock difference, as the service applies it to a deadline; the limit is
+inclusive): exit 64, `event=refused ... --until is more than ten minutes ahead`, before any wait. Tests: the pure bound at
+-5, 0, 600, 660, 661, 3600; through the dispatcher at 700, 3600 and 86400 seconds; 600 runs. A2 has the check. SPEC and runbook say
+what the number is.
