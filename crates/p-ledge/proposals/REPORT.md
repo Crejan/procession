@@ -617,3 +617,17 @@ failed, 1.72 s, no SKIPPED line. So a login with real `ssh` against a local `ssh
 through pledge's SSH agent socket, with session binding and a verified host, has
 run: on macOS. Not on Linux. This supersedes "written, never run" and the
 "did not run" and "still skipped" lines above; in this sandbox it still cannot run.
+
+## The flaky `real_programs` test
+
+Cause: the test harness, not the program. `Server::start` called the server ready
+when `agent.sock` connected; `pledge serve` binds `agent.sock`, `control.sock` and
+`service.sock` one after the other, so a first `pledge keys create` run in that
+gap found no control socket ("pledge serve is not running"). Reproduced under load
+(10 busy loops, the test binary in a loop): 5 of 40 runs failed, every one at the
+first `keys create`, in two different tests, never at the second `serve` of the
+blocked-program test. In the program, a bound socket queues connections until its
+accept loop runs, and "serving" is printed after all three are bound: no window in
+which a running `pledge serve` does not answer. Fix: ready now means all three sockets
+connect. Same load, 40 runs of each of the two real-binary test files: 0 failures.
+Added the missing unit test for `Message::Hello` on `service.sock`.

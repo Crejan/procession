@@ -1122,3 +1122,15 @@ fn a_request_pledge_was_holding_when_it_went_down_is_recorded_lost_at_the_next_s
     assert_eq!(lab.rig.record().iter().filter(|e| e["result"] == "lost").count(), 2);
     drop(svc);
 }
+
+#[test]
+fn a_hello_on_service_sock_is_a_protocol_error_and_ends_the_connection() {
+    let lab = Lab::new();
+    let mut svc = lab.connect();
+    write_message(&mut svc.stream, &Message::Hello, ClearancePolicy::Refused).expect("write");
+    match svc.lines.read_message(ClearancePolicy::Refused).expect("a message") {
+        Some(Message::Error(e)) => assert_eq!(e.error, p_act::exchange::ErrorCode::UnknownType),
+        other => panic!("expected an error, got {other:?}"),
+    }
+    assert!(matches!(svc.lines.read_message(ClearancePolicy::Refused), Ok(None) | Err(_)), "the connection is closed");
+}
