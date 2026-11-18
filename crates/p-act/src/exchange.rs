@@ -110,6 +110,7 @@ closed_code! {
         NotEntitled => "not-entitled",
         TooManyWaiting => "too-many-waiting",
         Busy => "busy",
+        NotReady => "not-ready",
     }
 }
 
@@ -1011,7 +1012,7 @@ mod tests {
             assert!(fits(w), "{w}");
         }
         assert_eq!(PledgeReason::ALL.len(), 14);
-        assert_eq!(BrokerReason::ALL.len(), 7);
+        assert_eq!(BrokerReason::ALL.len(), 8);
         assert_eq!(ErrorCode::ALL.len(), 10);
         for c in PledgeReason::ALL {
             assert_eq!(PledgeReason::from_wire(c.wire()), *c);

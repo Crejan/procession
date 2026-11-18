@@ -43,6 +43,8 @@ pub mod pact;
 /// Who is on the other end of a Unix socket: `p_ermit::peer`, re-exported.
 #[cfg(unix)]
 pub use p_ermit::peer;
+#[cfg(unix)]
+pub mod keygen;
 #[cfg(feature = "formats")]
 pub mod rating;
 #[cfg(unix)]
