@@ -238,6 +238,34 @@ withdrawal, a renewed certificate, the names of the person's groups) pledge
 accepts only with a signature by the key the site CA certified as `broker`.
 A request passed on needs no such signature: it carries the service's.
 
+**Stage 2 as built (step 6).** `config.json` has a `broker` member (`address`
+host:port, `server_name`, `tls_root` a PEM, `site_ca` a public key line that is not
+the key material of the TLS root). With it `pledge serve` needs a `person` and a
+`connection` key and keeps one TLS 1.3 connection to the broker on a thread of its
+own, signing in with that key over what both ends export from the connection; it
+reconnects after 1 s, doubling to 60 s with jitter. What it does with the broker's
+word:
+
+- A `standing` counts only if it verifies as `broker` against `site_ca`, is for
+  this person and this connection, and is newer than the last one. `blocked`,
+  `blocked_keys` and `withdrawn` only restrict, at once, and are kept in
+  `broker-state.json` so that a restart does not forget them; a request that waits
+  is refused `blocked` or `delegation-withdrawn`. Certificates of the person's
+  approval keys are each checked by pledge against `site_ca` and are re-checked
+  when the file is loaded; an approval then carries the certificate instead of the
+  bare key. Groups are shown, decide nothing and are not trusted from disk.
+- `carried` is ignored in this step (stage 2 reads hosts from `config.json`).
+- A request from the broker is answered on the connection and recorded with
+  `via: broker`. A lost connection cancels nothing: the broker sends it again and
+  it is answered from what pledge kept.
+- `agents start` registers the delegation with the broker before the bundle is
+  handed over. No connection, no answer or `unavailable`: refused,
+  `broker-unavailable` ("the broker could not take it, try again"); any other
+  reason: `broker-refused`. A delegation is never issued for pledge alone.
+- A withdrawal is local at once, then told to the broker and followed:
+  `not told`, `not stored yet`, `stored` in `pledge agents list`; sent again at every
+  sign-in and at most once a minute until the broker says it stored it.
+
 ## 5. Dialogs
 
 - One at a time.
@@ -362,12 +390,23 @@ involved.
 
 - **The name.** `pledge` unless a better one turns up.
 - **Whether the Secure Enclave can hold keys with and without a presence
-  check side by side**, each usable only by pledge's key holder. Assumed,
-  and not to be claimed for the Mac form until it is checked: whether a key
-  kept as a blob in a file can be used by another program of the same
-  person is check 3 of `proposals/stage2-mac.md`, and decides between a blob
-  and the keychain with an access group. Nothing of step 4 is built before
-  the owner has run that proposal's checks 1 to 5.
+  check side by side.** They can (the owner's check of 2026-11-18,
+  `proposals/stage2-mac.md`, check 0). But a key kept as a blob in a file is
+  **not** usable only by pledge's key holder (check 3): another program of
+  the same person, with another signature, loaded a copied blob of a key
+  without a presence check and signed with it, with no prompt; with a key
+  that has a presence check it raised the Touch ID prompt under its own
+  name and signed after the touch. Decided: blobs in files for stage 2, and
+  said plainly. The automatic key and the connection key are then protected
+  only against leaving the machine: any program that runs as the person and
+  can read the blob can use them. So the blob files and their directory
+  follow the strictest file rule the workspace has (the directory 0700, the
+  files 0600, owned by the person, refused otherwise), since that is their
+  only protection. For a key with a presence check the touch is the only
+  barrier and the prompt's text the person's only way to see who asks, so
+  the key holder always puts its own fixed words first. The keychain with
+  an access group is a step of its own before a site uses this. Nothing of
+  step 4 is built before the owner has run the proposal's checks 1 to 5.
 - **One desktop app for p-reserve and p-ledge, or one each.** *Proposal:*
   one each; they are two programs with two purposes, and p-ledge's is small.
 - **The interfaces**: the three sockets, the record's format. After the

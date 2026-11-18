@@ -112,13 +112,18 @@ p-robe by sudo, for one) is not reachable from the sandbox. Without this
 rule R1 means nothing: an agent that runs as its person needs nobody's
 approval.
 
-A sandbox should run the signer (`pact`, section 10) as a user that nothing
-the model starts runs as, so that the agent's key cannot be read and carried
-out. Where a sandbox does not, the key protects against the model's text and
-against accident, not against code the model runs. The design holds either
-way: every use of the key still passes the person's machine and is recorded
-there. What the separation buys is that the key cannot be handed to someone
-who then acts from elsewhere until the delegation ends or is withdrawn.
+From stage 2 on, a sandbox runs the signer (`pact`, section 10) under an
+account or in a container of its own: the model reaches it only through
+`pact`'s interface and can read neither the key nor the bundle. That is a
+requirement on how a sandbox is built (what `pact` must be given is in
+`crates/p-act/proposals/pact.md`); how it is built is a proposal of its own
+when stage 2's sandbox is taken up. In stage 1 the model and `pact` may run
+as one user in one sandbox. What that leaves open: the model can read the
+agent's key, so it can sign calls itself, past `pact`'s list of tools, and
+carry the key out. Every call still needs an approval from the person's
+machine and is recorded there, and the key ends with the delegation; what
+is exposed is everything in mode automatic, from wherever the service can
+be reached, until the delegation ends or is withdrawn.
 
 **R3. An agent may have carried out at most what its person may.** A
 delegation names some of the person's groups and can only narrow. Nobody but
@@ -284,13 +289,13 @@ request in front of a person that is not from that person's agent.
 | The sandbox leaks: the agent gets its person's account | G1 | Nothing in this design (trusted, above) | Everything the person can do on that host. R1 does not apply any more |
 | A person approves the wrong thing, or asks for more than they may | G3 | R10 at the broker. R9: the dialog shows the request as it is | An entitled person approving a wrong but permitted action. A second person's approval is later |
 | A stranger sends calls, requests or approvals | G4, G6 | An approval verifies only with a key the site CA certified for that person. R8 keeps requests away. A request verifies only with a service key that a known host certified. The broker is recognised by its certificate | Nothing known |
-| A person's machine is stolen | G4 | A confirmed approval and a new delegation need a presence check. An administrator blocks its keys at the broker; no clearance, no action | Until it is blocked, and if the thief has the unlocked session: automatic approvals for agents already running |
+| A person's machine is stolen | G4 | A confirmed approval and a new delegation need a presence check. An administrator blocks its keys at the broker; no clearance, no action | Until it is blocked: automatic approvals for agents already running. On a Mac the automatic key is usable after the first unlock since boot, so a locked screen does not stop them; what bounds them is the delegation's end and the administrator's block. |
 | A person signs as another | G5 | Each key is certified for one person by the site CA; a service checks that the approval is by the person the request names; an administrator, not the person, enters keys | An administrator entering a wrong key (trusted) |
 | Someone floods a person with dialogs | G6 | R8, checked by pledge itself; limits and muting (section 7), enforced by pledge; one dialog at a time | A person's own agent, up to those limits |
 | The broker is taken over | G3 | R1, R6, R8 are checked by pledge and by services without it | R10 is gone: a person can have carried out what the site would not let them. Withdrawals by an administrator and blocks are gone. It can refuse everything, and sees who asks for what |
 | The broker is taken over and a person's machine is stolen | G4 | The presence check for confirmed approvals | Automatic approvals, until that person's certificates run out |
 | Someone on the network | all | TLS; everything that matters is signed; calls and requests are single-use and end | Delay and loss, which end in "no" |
-| Malware in the person's session | G4 | Presence checks; pledge checks which program connects to its sockets | Automatic approvals. A dialog imitated to obtain a touch |
+| Malware in the person's session | G4 | Presence checks; pledge checks which program connects to its sockets | Automatic approvals. A dialog imitated to obtain a touch. With keys kept as blobs in files (stage 2 on a Mac) such a program can use the automatic key and the connection key itself, without pledge, and can raise a Touch ID prompt for the confirmed key under its own name (`crates/p-ledge/SPEC.md`, section 11) |
 | A service lies about what it will do, or rates dishonestly | G1, G3 | Nothing (trusted) | Stated so that nobody assumes otherwise |
 
 ## 5. By what means
@@ -518,9 +523,11 @@ Each stage is usable by itself and is the test of the one before.
    service's allowed-signers file lists the one person's two approval keys
    directly, and there is no R10 because the machine has one person. This
    proves calls, requests, approvals, ratings, deadlines and the record.
+   The model and the signer may share one user there (R2).
 2. **The person's machine is a Mac.** Keys in the Secure Enclave, presence
    checks, dialogs. The broker (`page`) between the Mac and a Linux host,
-   with its register and with hosts and persons from a file.
+   with its register and with hosts and persons from a file. The signer
+   runs apart from the model (R2).
 3. **A site.** The site CA and certificates, the roll-out from the site
    project to broker, hosts and pledge, R10 from the site's model, renewal,
    blocking.
@@ -563,7 +570,12 @@ specifications:
   never a longer one.
 - What a model can be told of a call's outcome is a closed list: `done`,
   `declined`, `expired`, `refused` (with its class), `unavailable` (nothing
-  was done) and `unknown` (the call was sent; whether it ran is not known;
+  was done, and trying again is safe), `failed` (the call was approved and
+  the action was started, and it did not complete: there is no result,
+  something may have happened on the host, and the exact cause is in the
+  service's log and the host's audit lines under the call's identifier; an
+  agent must not blindly repeat an action that changes something) and
+  `unknown` (the call was sent; whether it ran is not known;
   only the signer makes this one, and its text tells the model to find out
   by a query before repeating anything that changes something). While the
   signer waits for an answer it tells the model's client so at a fixed
@@ -595,6 +607,8 @@ specifications:
   `page`): one object, an unknown member refused, the file refused if anyone
   but its owner or root can write it. A person cannot comment in them; a
   site's roll-out renders them.
+- The model and the signer are not separated in stage 1 and are separated
+  from stage 2 on (R2 says what stage 1 leaves open).
 - The broker listens for services and pledges on one address; the first
   message says which exchange a connection carries
   (`approval-connections.md`, section 4).

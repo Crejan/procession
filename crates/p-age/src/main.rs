@@ -51,20 +51,26 @@ fn config_path<'a>(verb: &str, args: &[&'a str]) -> Option<&'a str> {
 }
 
 /// `page block|unblock|withdraw|status [--config FILE] [--key FP] [NAME|FP]`: put one command to the running
-/// broker and print what it says. Exit 0 if done and stored (status: not degraded), 1 if refused, not stored or
-/// degraded, 2 for usage, 3 if no broker answers.
+/// broker and print what it says. The exit codes are `p_age::admin::EXIT_TABLE`: 0 done, 1 refused, 2 usage,
+/// 3 no broker, 4 in force but not stored, 5 degraded (`status` only).
 fn admin(verb: &str, args: &[&str]) -> ExitCode {
-    use p_age::admin::{Command, Target, ask, render, socket_path};
+    use p_age::admin::{Command, EXIT_NO_BROKER, EXIT_TABLE, EXIT_USAGE, Target, ask, render, socket_path};
+    let synopsis = format!(
+        "usage: page {verb} [--config FILE]{}",
+        match verb {
+            "block" | "unblock" => " (NAME | --key SHA256:...)",
+            "withdraw" => " SHA256:...",
+            _ => "",
+        }
+    );
+    // Each verb's help says what the exit codes mean.
+    if args.iter().any(|a| matches!(*a, "--help" | "-h")) {
+        println!("{synopsis}\n\n{EXIT_TABLE}");
+        return ExitCode::SUCCESS;
+    }
     let usage = || {
-        eprintln!(
-            "usage: page {verb} [--config FILE]{}",
-            match verb {
-                "block" | "unblock" => " (NAME | --key SHA256:...)",
-                "withdraw" => " SHA256:...",
-                _ => "",
-            }
-        );
-        ExitCode::from(2)
+        eprintln!("{synopsis}\n\n{EXIT_TABLE}");
+        ExitCode::from(EXIT_USAGE)
     };
     let (mut config, mut key, mut rest) = ("/etc/page.json", None, Vec::new());
     let mut it = args.iter();
@@ -101,7 +107,7 @@ fn admin(verb: &str, args: &[&str]) -> ExitCode {
         Ok(config) => config,
         Err(e) => {
             eprintln!("page {verb}: {e}");
-            return ExitCode::from(2);
+            return ExitCode::from(EXIT_USAGE);
         }
     };
     match ask(&socket_path(&config.state_dir), &command) {
@@ -118,7 +124,7 @@ fn admin(verb: &str, args: &[&str]) -> ExitCode {
         }
         Err(e) => {
             eprintln!("page {verb}: {e}");
-            ExitCode::from(3)
+            ExitCode::from(EXIT_NO_BROKER)
         }
     }
 }
@@ -168,8 +174,8 @@ fn run(path: &std::path::Path) -> Result<(), String> {
     runtime.block_on(async {
         let limits = ConnLimits::new(config.max_connections, config.max_connections_per_address);
         // The administrator's verbs reach this broker over a socket in the state directory (0600, peer checked).
-        let (admin_listener, broker_uid) = p_age::admin::bind(&config.state_dir).map_err(|e| e.to_string())?;
-        tokio::spawn(p_age::admin::serve(admin_listener, broker.clone(), broker_uid));
+        let admin_listener = p_age::admin::bind(&config.state_dir).map_err(|e| e.to_string())?;
+        tokio::spawn(p_age::admin::serve(admin_listener, broker.clone()));
         let mut listeners = Vec::new();
         for address in &config.listen {
             let listener =

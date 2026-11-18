@@ -318,10 +318,10 @@ pub fn read_and_verify(path: &Path) -> Result<Report> {
                 if prev.and_then(Value::as_str) != Some(last_hash.as_str()) {
                     note("prev does not match the hash of the line before");
                 }
-                if let (Some(then), Some(now)) = (last_time, time) {
-                    if now < *then {
-                        note("time is earlier than the entry before");
-                    }
+                if let (Some(then), Some(now)) = (last_time, time)
+                    && now < *then
+                {
+                    note("time is earlier than the entry before");
                 }
             }
             (_, None) => note("no seq"),

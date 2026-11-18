@@ -604,7 +604,9 @@ where
             return None;
         }
         let person = broker.site.person(doc.person()).filter(|p| p.enabled)?;
-        let (crypto, key, sig) = (Arc::clone(&broker.crypto), person.connection_key.clone(), signed.sig);
+        // A person without keys cannot sign in.
+        let key = person.connection_key()?.clone();
+        let (crypto, sig) = (Arc::clone(&broker.crypto), signed.sig);
         let name = doc.person().to_owned();
         let ok = broker.offload(move || crypto.verify_connection(&doc, &sig, &key).is_ok()).await?;
         ok.then_some(name)

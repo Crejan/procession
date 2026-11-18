@@ -26,7 +26,7 @@ pub const MAX_MESSAGE: usize = 1024 * 1024;
 pub const PROTOCOL_VERSIONS: [&str; 3] = ["2025-06-18", "2025-03-26", "2024-11-05"];
 
 /// What the model reads once, in plain words.
-pub const INSTRUCTIONS: &str = "These tools call services on other machines. A call may need your person's approval and then waits for it, up to its deadline. The first text of every result is one line of JSON with an outcome. done: it ran; the answer follows. declined: your person said no; do not repeat it unless they ask. refused: someone said no without asking your person; not-allowed means change your plan, invalid means fix the call, try-later means wait and ask again. expired: nothing was done; you may ask again as a new call after telling your person. unavailable: nothing was done. unknown: the call was sent and whether it ran is not known; before you repeat anything that changes something, find out by a query.";
+pub const INSTRUCTIONS: &str = "These tools call services on other machines. A call may need your person's approval and then waits for it, up to its deadline. The first text of every result is one line of JSON with an outcome. done: it ran; the answer follows. declined: your person said no; do not repeat it unless they ask. refused: someone said no without asking your person; not-allowed means change your plan, invalid means fix the call, try-later means wait and ask again. expired: nothing was done; you may ask again as a new call after telling your person. unavailable: nothing was done, and trying again is safe. failed: the call was approved and the action was started, and it did not complete; there is no result and something may have happened on the host; do not repeat an action that changes something blindly, find out what happened first. unknown: the call was sent and whether it ran is not known; before you repeat anything that changes something, find out by a query.";
 
 /// Everything a session needs; shared by the sessions of one `pact serve`.
 pub struct Context {
@@ -91,7 +91,7 @@ struct Out(Mutex<Box<dyn Write + Send>>);
 
 impl Out {
     fn send(&self, message: &Value) {
-        let mut line = message.to_string().into_bytes();
+        let mut line = super::canon::bytes(message);
         line.push(b'\n');
         if let Ok(mut w) = self.0.lock() {
             // A client that has gone is noticed by the reader; there is nobody to tell here.
@@ -154,13 +154,13 @@ pub fn serve(ctx: &Arc<Context>, input: impl Read, output: impl Write + Send + '
                 };
                 let token = CancelToken::default();
                 if let Ok(mut m) = inflight.lock() {
-                    m.insert(id.to_string(), token.clone());
+                    m.insert(super::canon::line(&id), token.clone());
                 }
                 let (ctx, out, inflight) = (Arc::clone(ctx), Arc::clone(&out), Arc::clone(&inflight));
                 workers.push(std::thread::spawn(move || {
                     let result = call(&ctx, &out, &name, &params, &token);
                     if let Ok(mut m) = inflight.lock() {
-                        m.remove(&id.to_string());
+                        m.remove(&super::canon::line(&id));
                     }
                     // A cancelled request gets no response (MCP, cancellation).
                     if !token.is_cancelled() {
@@ -170,7 +170,7 @@ pub fn serve(ctx: &Arc<Context>, input: impl Read, output: impl Write + Send + '
             }
             ("notifications/cancelled", None) => {
                 if let (Some(rid), Ok(m)) = (params.get("requestId"), inflight.lock())
-                    && let Some(t) = m.get(&rid.to_string())
+                    && let Some(t) = m.get(&super::canon::line(rid))
                 {
                     t.cancel();
                 }

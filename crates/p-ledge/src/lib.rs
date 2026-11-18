@@ -10,7 +10,7 @@
 //!   of `pledge serve` and its command line.
 //!
 //! - [`approvals`], [`service_conn`], [`agents`], [`issue`], [`delegations`],
-//!   [`answers`], [`config`], [`sshsig`]: approvals with keys in
+//!   [`answers`], [`config`], [`seam`]: approvals with keys in
 //!   files (step 3): `service.sock`, the checks of `SPEC.md` section 4, the
 //!   delegations `pledge agents start` issues, the store of answers.
 //!
@@ -22,6 +22,9 @@ pub mod agent_conn;
 pub mod agents;
 pub mod answers;
 pub mod approvals;
+pub mod broker_link;
+pub mod broker_state;
+pub mod certs;
 pub mod cli;
 pub mod config;
 pub mod control;
@@ -35,12 +38,16 @@ pub mod paths;
 pub mod peer;
 pub mod policy;
 pub mod record;
+pub mod seam;
 pub mod serve;
 pub mod service_conn;
 pub mod shared;
-pub mod sshsig;
 
 #[cfg(test)]
 mod approvals_tests;
+#[cfg(test)]
+mod broker_tests;
+#[cfg(test)]
+mod broker_tls_tests;
 #[cfg(test)]
 mod testing;

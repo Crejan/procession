@@ -71,15 +71,15 @@ process that set the prompt's text: software, not hardware (sections 2 and
 
 | Key (`doc/approvals.md` section 5; `SPEC.md` section 2) | In the Secure Enclave | Presence in the key | Accessible | Type |
 |---|---|---|---|---|
-| confirmed approval | yes | yes, each signature | when unlocked | P-256 |
-| automatic approval | yes | **none** | question 4 | P-256 |
-| delegation | yes | yes, each signature | when unlocked | P-256 |
+| confirmed approval | yes | yes, each signature: Touch ID only (`.biometryAny`) | when unlocked | P-256 |
+| automatic approval | yes | **none** | after first unlock | P-256 |
+| delegation | yes | yes, each signature: Touch ID only (`.biometryAny`) | when unlocked | P-256 |
 | connection | yes | **none** | after first unlock | P-256 |
-| shared (logins, `git`/`file` signatures) | yes | yes, each signature | when unlocked | P-256 |
+| shared (logins, `git`/`file` signatures) | yes | yes, each signature: Touch ID or password (`.userPresence`) | when unlocked | P-256 |
 | bound (one program's login) | yes | **none** | after first unlock | P-256 |
 
-Which presence flag ("Touch ID only" or "Touch ID or password") is question
-1; it differs per key.
+The presence flags and the automatic key's "after first unlock" are the
+owner's decisions of 2026-11-18 (questions 1 and 4).
 
 All six can be Secure Enclave keys as far as the formats go:
 
@@ -185,6 +185,49 @@ The first five decide the design; do them before anything is built.
 | 15 | Add a finger in System Settings; sign with a `.biometryAny` key and a `.biometryCurrentSet` key made before. | The first still signs, the second is dead. |
 | 16 | Restart the Mac, log in, sign with each key before any Touch ID use. | Which keys sign, and whether the presence key asks for the password first. |
 
+### 1.6 Results of the hand checks
+
+Run by the owner on his Mac on 2026-11-18 with
+`stage2-mac-checks/sechecks.swift`; relayed by the designer. These are his
+observations. The table in `stage2-mac-checks/README.md` has them row by
+row. Not yet run: checks 1, 2, 4, 5 and the rest.
+
+| Check | Observed | What it settles |
+|---|---|---|
+| 0 (making the keys) | Five keys made (no presence, "after first unlock" and "when unlocked"; `.biometryAny`; `.userPresence`; `.biometryCurrentSet`), each with a public key line and a blob file. No prompt while making. No entitlement error | A program that is ad-hoc signed, with no bundle and no entitlement, can make and use Secure Enclave keys through CryptoKit. The **[U]** of section 4.2 about a program without an app bundle is answered for making keys and for raising the prompt (3b) |
+| 3a (a copied blob, another program, no presence) | `sechecks-other: SIGNED plain after 0.0 s`, no prompt | The **[U]** of section 1.1 is answered as expected: another program of the same user loads a copied blob and signs. A key without a presence check is exactly as protected as its blob file |
+| 3b (a copied blob, another program, Touch ID) | A Touch ID prompt that named the other program and carried its words; after the touch, `SIGNED touch after 2.6 s` | The presence check holds for a copied blob: no signature without the touch. But any program of the person can raise that prompt, under its own name and with its own text |
+
+**Decided on this (question 2):** blobs in files for stage 2, said plainly;
+the keychain with an access group is a step of its own before a site.
+
+Two consequences, both the designer's:
+
+1. **The blob files' mode and their directory are the only protection of
+   the keys without a presence check** (automatic approval, connection,
+   bound). So they follow the strictest file rule the workspace has. In
+   p-ledge that is `check_private` in `src/paths.rs`, which `KeyStore::open`
+   in `src/holder.rs` already applies to key files: not a symlink, owned by
+   this user, no permission for anyone else (0700 for the directory, 0600
+   for the file), and a key holder that refuses to start otherwise. The
+   Secure Enclave holder applies the same to its blobs, before every use
+   and not only when it starts. What this does not stop is another program
+   of the same user: check 3a is that case, and the rule cannot reach it.
+   It is what the threat table's row "malware in the person's session"
+   leaves, now observed and not only assumed.
+2. **The Touch ID prompt's text is the person's only way to see who asks.**
+   The system puts the asking program's name on the prompt (3b); the rest
+   is that program's own words. So pledge's key holder always puts its own
+   fixed words first, before anything that comes from a request, a login
+   or a delegation, and never lets such a field come before them or stand
+   alone. A prompt from any other program then differs in the name the
+   system shows and cannot be given pledge's name; a person who knows the
+   fixed words and the name can tell. Check 5 will say how much room the
+   prompt has; the fixed words must fit in what is always shown. This
+   narrows question 10's answer: the words there (service, host, action)
+   come after the fixed ones. It also makes the key holder's program name
+   matter: it is what the system shows (section 8.6, last paragraph).
+
 ## 2. The presence check
 
 ### 2.1 What a confirmed approval needs
@@ -261,7 +304,10 @@ What follows for pledge, whatever question 1 decides:
   pledge over `control.sock`; the touch happens at the Mac. That is right:
   whoever only has the person's SSH login cannot start an agent.
 
-**Password in place of Touch ID, per key** (question 1):
+**Password in place of Touch ID, per key** (question 1, decided by the
+owner on 2026-11-18: Touch ID only for confirmed approvals and delegations,
+so a Mac that cannot offer Touch ID makes no confirmed approval and starts
+no agent; Touch ID or password for the shared key). The reasons were:
 
 - *confirmed approval, delegation:* a password is weaker in exactly the two
   threats the presence check is there for. A stolen machine: the thief may
@@ -281,15 +327,16 @@ awake", so also with the screen locked: "after first unlock") and for a
 bound key (a backup at night; Atticus's reason for the same choice,
 **[A]** `SEPKey.swift`, lines 72 to 78).
 
-What it may require is an unlocked screen. `doc/approvals.md`, section 4,
-on a stolen machine: "if the thief has the unlocked session: automatic
-approvals for agents already running". Read strictly, a locked Mac makes no
-automatic approval. That is question 4.
+It does not require an unlocked screen either (question 4, decided by the
+owner on 2026-11-18): the automatic key is "after first unlock" and signs
+while the screen is locked. `doc/approvals.md`, section 4, the row on a
+stolen machine, says so now; what bounds it there is the delegation's end
+and the administrator's block.
 
 A consequence to state plainly: a key without presence in a blob file is as
-strong as the file. If check 3 shows that any program of the person can
-load the blob, then on a Mac the automatic approval key is protected
-against being carried off the machine and against nothing else. The threat
+strong as the file. Check 3a showed that any program of the person can
+load the blob (section 1.6), so on a Mac the automatic approval key is
+protected against being carried off the machine and against nothing else. The threat
 table already lists "Malware in the person's session: automatic approvals"
 as what remains.
 
@@ -595,7 +642,7 @@ All paths are under `/Users/jancre/dev/ws/atticus-develop`, tree `develop`.
 | 20 | A user certificate for the login key | `Sources/SSHCertificate.swift`, `Sources/Engine/SSHCertificateService.swift`, `Sources/CLI/SSHCertCLI.swift` | not now | `SPEC.md` section 2: not in the first version. How the certificate rides with the key (row 2, section 1.3) is the same as stage 3 needs |
 | 21 | The access history and the decision trace in the system log | `SSHAgentServer.signEventSink`, `Sources/AgentDecisionLog.swift`, `Sources/AgentPolicyTrace.swift` | not | The record is the one place |
 | 22 | SSH agent, parser, key and windows in one process | `Sources/Engine/SSHAgentServer.swift` and the app | not | `SPEC.md` section 7: reader and key holder are two processes |
-| 23 | Signing with Developer ID, hardened runtime, pinned entitlements, no sandbox | `Makefile` (`CODESIGN_FLAGS`), `Resources/Atticus.entitlements`, `tools/check-entitlements.sh` | with changes | pledge's Mac parts must be signed the same way, or `control.sock` and a bound key have nothing to check. Which team: question 8 |
+| 23 | Signing with Developer ID, hardened runtime, pinned entitlements, no sandbox | `Makefile` (`CODESIGN_FLAGS`), `Resources/Atticus.entitlements`, `tools/check-entitlements.sh` | with changes | pledge's Mac parts must be signed the same way, or `control.sock` and a bound key have nothing to check. The owner's Developer ID team, with identifiers of pledge's own (question 8, decided) |
 | 24 | A secret readable only by its own signed programs, through a keychain access group | `SECURITY.md`, "Defenses in place" (the restic password) | as an idea | Atticus does not do this for its key, only for a password. It is the known way to make a key "usable only by pledge's key holder" (question 2) |
 | 25 | The setup turns shared connections off; the server limits sessions | `SECURITY.md`, "A confirmation covers one login" | as is | `SPEC.md` section 3 says the same |
 | 26 | A manual checklist for what tests cannot reach (Touch ID, signed builds) | `tests/MANUAL_CHECKLIST.md`, items 26 to 29 | as is, as a form | Section 1.5 is the start of pledge's |
@@ -747,21 +794,21 @@ them.
 
 | # | Question | Stands | What was said |
 |---|---|---|---|
-| 1 | Password in place of Touch ID | with the owner | The designer recommends this proposal's answer: Touch ID only for confirmed approvals and delegations, so a Mac with its lid closed and no Touch ID keyboard makes none |
-| 2 | Blob in a file, or keychain with an access group | decided | After check 3, as recommended. `SPEC.md` section 11 is marked accordingly by the designer |
+| 1 | Password in place of Touch ID | decided, by the owner | Touch ID only (`.biometryAny`) for confirmed approvals and delegations. A Mac that cannot offer Touch ID makes no confirmed approval. The shared key keeps Touch ID or password |
+| 2 | Blob in a file, or keychain with an access group | decided, after check 3 | Check 3 came out as expected (section 1.6). Blobs in files for stage 2, said plainly; the keychain with an access group is a step of its own before a site. `SPEC.md` section 11 and the threat table carry the designer's record of it |
 | 3 | One key holder or two | decided | Two: one for keys with a presence check, one for keys without |
-| 4 | Does a locked screen stop automatic approvals | with the owner | The designer recommends this proposal's answer: it does not |
+| 4 | Does a locked screen stop automatic approvals | decided, by the owner | It does not. The automatic key is "after first unlock". The threat table of `doc/approvals.md` (the row on a stolen machine) says so, bounded by the delegation's end and the administrator's block |
 | 5 | Dialog and touch as one step | decided | One step: the Touch ID prompt is raised with the dialog and the touch is the yes. Keys in files keep today's two steps. The limits (one dialog at a time, the queue limit, muting after declines) apply unchanged |
 | 6 | "Admit generally" for which programs | decided | Only for Developer ID code with the hardened runtime; and, also accepted, an ad-hoc build may be admitted generally by its hash, which lasts until the binary changes |
 | 7 | Presence for what ends in no signature | decided | `LAContext.evaluatePolicy` in the key holder, said plainly to be software. Retiring a key with a presence check requires that key's signature first. No fifth key |
-| 8 | Who signs pledge's Mac programs, and as what | with the owner | Which signing identity and which identifiers |
+| 8 | Who signs pledge's Mac programs, and as what | decided, by the owner | His Developer ID team (the one Atticus is signed with), with identifiers of pledge's own for the reader, the key holder and the dialog process |
 | 9 | A request while no presence check is possible | decided | It waits until its deadline and ends `expired`; the record says why it could not be asked (locked, sensor locked out) |
 | 10 | What the Touch ID prompt says | decided, subject to check 5 | As recommended: service, host and action; user and host for a login; person, groups and validity for a delegation; never a parameter or the agent's claim |
 | 11 | A first Mac stage with `Terminal` and real keys | decided | Accepted, for the owner only |
-| 12 | One Mac app or two | with the owner | The designer recommends two apps from one Swift code base; preserve's app then gets on `control.sock` exactly `keys.create` for a bound key and `keys.list`, by a rule per command and peer |
+| 12 | One Mac app or two | decided, by the owner | Two Mac apps, from one Swift code base. preserve's app is admitted on pledge's `control.sock` for exactly `keys.create` of a bound key and `keys.list`, by a rule per command and peer |
 | 13 | Take Atticus's SwiftUI front end at all | decided | Yes, with the condition as written: it becomes preserve's Mac front end only after the logic still in its views and view models has moved into the daemon and the socket protocol offers what section 8.5 lists. The three bypasses and the prune marker (section 8.2) are the list of what goes behind the protocol first. Nothing is copied yet |
 | 14 | "Cancel by closing" in p-reserve's protocol | decided | Closing a connection cancels only what was asked as bound to it: browsing, a preview or dump for display, subscriptions. A backup run, a prune, a check and a restore are the daemon's jobs with an identifier: they go on when the connection that started them closes, are cancelled only by an explicit message naming the identifier, and a later connection can list running jobs and attach to their events |
-| 15 | The licence of what is taken from Atticus | with the owner | No view is copied before the owner has said under which terms |
+| 15 | The licence of what is taken from Atticus | decided, by the owner | Atticus is his own, so its views may be taken into procession, and what results there is under `MIT OR Apache-2.0` like the rest; the shared Swift package states that licence. Atticus itself stays as it is and under its own licence: this covers taking code from it into procession, nothing else. **This is not a go for copying.** Copying views still waits on the condition of question 13 (the logic into the daemon first, the protocol meeting section 8.5) and, for anything that touches keys, on hand checks 1 to 5 |
 | 16 | Where the dialog for a request lives | decided | As recommended: a small program in pledge's bundle that `pledge serve` starts itself, holding no key and deciding nothing. The app's window may show the same question as a second place; the answer never depends on the app |
 
 Two of these decisions add to what the sections above say:
@@ -1061,10 +1108,15 @@ components in `Components.swift`, the error alert) and little content.
 
 Two more things that are not code:
 
-- Atticus's `LICENSE` begins "Copyright (c) 2026 C-IT-WORK GmbH. All rights
-  reserved … proprietary". `crates/p-ledge/Cargo.toml` says `MIT OR
-  Apache-2.0`. Taking the views across is the owner's decision as the
-  rights holder, and has to be made (question 15).
+- The licence (question 15, decided by the owner on 2026-11-18).
+  Atticus's `LICENSE` begins "Copyright (c) 2026 C-IT-WORK GmbH. All rights
+  reserved … proprietary"; `crates/p-ledge/Cargo.toml` says `MIT OR
+  Apache-2.0`. Atticus is the owner's own, so its views may be taken into
+  procession, and what results there is under `MIT OR Apache-2.0`; the
+  shared Swift package states that licence. Atticus itself stays under its
+  own. This settles the terms and is not a go: copying waits on the
+  condition of question 13 and, for anything that touches keys, on hand
+  checks 1 to 5.
 - The views' texts are English keys with a German table
   (`Resources/de.lproj`), and some German is written into the views
   directly (`"Letztes Backup: …"` in `MenuBarPopover.swift`, `"Protokoll"`
@@ -1076,7 +1128,7 @@ Two more things that are not code:
 `crates/p-reserve/SPEC.md` lists it as open and says that setup "stays one
 flow in the desktop app although two programs are behind it".
 
-*Recommendation:* **two apps from one code base.** A Swift package with
+**Decided by the owner on 2026-11-18: two apps from one code base.** A Swift package with
 what both need (the socket client, the components, the window and menu bar
 frame), and two targets:
 
@@ -1096,8 +1148,8 @@ Why not one:
   (`control-sock.md`, section 2). One identity that may do everything, from
   starting agents to pruning backups, is the wider key. With two apps the
   socket can admit preserve's app for two commands only. That needs a rule
-  per command and peer in `control.sock`, which is not there today
-  (question 12).
+  per command and peer in `control.sock`, which is not there today and
+  is part of this decision.
 - A person who approves requests and keeps no backup on that Mac needs
   pledge alone; p-reserve works with a key file where there is no pledge.
 

@@ -17,9 +17,10 @@ use crate::hash::{Document, DocumentHash};
 use crate::limits::{CONNECTION_SECRET_BYTES, MAX_CONNECTION_DOCUMENT_BYTES, MAX_STANDING_BYTES};
 use crate::object::{Object, check_bytes};
 use crate::sign::{
-    Agent, Fingerprint, PublicKey, SignError, Signer, agent_certificate, certificate_line_blob, looks_armoured,
-    sign_broker, sign_connection, signature_to_base64, verify_broker, verify_connection,
+    Agent, Fingerprint, PublicKey, SignError, agent_certificate, certificate_line_blob, looks_armoured, sign_broker,
+    sign_connection, signature_to_base64, verify_broker, verify_connection,
 };
+use crate::sshsig::SshsigSigner;
 use crate::text;
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD;
@@ -27,6 +28,29 @@ use serde::Serialize;
 
 /// 32 random bytes: the sign-in's nonce, and the TLS exporter value.
 pub type Secret32 = [u8; CONNECTION_SECRET_BYTES];
+
+// What the two ends of the broker's TLS connection must agree on (`approval-connections.md` sections 5 and 8). `p-act`
+// has no TLS dependency; both ends use these and say them to their TLS library.
+
+/// The label of the TLS exporter whose value the sign-in carries (RFC 5705): `tls` of the connection document.
+pub const TLS_EXPORTER_LABEL: &[u8] = crate::limits::TLS_EXPORTER_LABEL.as_bytes();
+/// The exporter's context: none (`None`, not an empty context: RFC 5705 tells them apart).
+pub const TLS_EXPORTER_CONTEXT: Option<&[u8]> = None;
+/// The exporter's output length: 32 bytes, the length of `tls` and of the nonce.
+pub const TLS_EXPORTER_LENGTH: usize = CONNECTION_SECRET_BYTES;
+/// The only protocol version of both broker transports: TLS 1.3 (no 1.2, no fallback). This is its name as RFC 8446
+/// and OpenSSL spell it. `p-act` has no TLS library, so it holds no typed value: each end passes its own library's
+/// (`rustls::version::TLS13`), and this name is for logs and tests; [`is_tls_1_3`] compares a name from a library
+/// (rustls's `Debug` spells it `TLSv1_3`) so that nobody normalises it by hand.
+pub const TLS_PROTOCOL_VERSION: &str = "TLSv1.3";
+
+/// Whether `name` is TLS 1.3 as a library spells it: `TLSv1.3` or `TLSv1_3`.
+#[must_use]
+pub fn is_tls_1_3(name: &str) -> bool {
+    matches!(name, "TLSv1.3" | "TLSv1_3")
+}
+/// The crypto provider of both ends: `ring` (not `aws-lc-rs`: the C and CMake toolchain it needs).
+pub const TLS_CRYPTO_PROVIDER: &str = "ring";
 
 fn decode32(member: &'static str, s: &str) -> Result<Secret32, ParseError> {
     let bytes = STANDARD.decode(s).map_err(|_| ParseError::MalformedBase64(member))?;
@@ -107,7 +131,7 @@ impl ConnectionDocument {
     }
 
     /// Sign it with the person's connection key (a plain key).
-    pub fn sign(&self, signer: &Signer) -> Result<String, SignError> {
+    pub fn sign(&self, signer: &(impl SshsigSigner + ?Sized)) -> Result<String, SignError> {
         sign_connection(signer, &self.bytes)
     }
 
@@ -289,7 +313,7 @@ impl Standing {
     }
 
     /// Sign it with the broker's key, certified by the site CA as `broker`.
-    pub fn sign(&self, signer: &Signer) -> Result<String, SignError> {
+    pub fn sign(&self, signer: &(impl SshsigSigner + ?Sized)) -> Result<String, SignError> {
         sign_broker(signer, &self.bytes)
     }
 
@@ -380,6 +404,13 @@ pub enum ToPledge {
         delegation: Fingerprint,
         stored: bool,
     },
+    /// A signed document the broker only carries (stage 3: the list of hosts' keys), byte for byte, with the
+    /// namespace it was signed in. The broker's own signature is not on it; whoever reads it verifies it
+    /// themselves, and ignores one whose namespace they do not know. Parsed so that it is not a protocol error.
+    Carried {
+        namespace: String,
+        signed: Signed,
+    },
     /// `submit`, `cancel`, `error` of the shared exchange.
     Exchange(Box<Message>),
 }
@@ -438,6 +469,15 @@ struct Head<'a> {
 struct WithSigned<'a> {
     #[serde(flatten)]
     head: Head<'a>,
+    doc: String,
+    doc_sig: String,
+}
+
+#[derive(Serialize)]
+struct CarriedWire<'a> {
+    #[serde(flatten)]
+    head: Head<'a>,
+    namespace: &'a str,
     doc: String,
     doc_sig: String,
 }
@@ -539,8 +579,10 @@ impl FromService {
 impl ToPledge {
     /// Parse a line from the broker.
     pub fn parse(line: &[u8]) -> Result<ToPledge, ExchangeError> {
-        let Some((kind, mut o)) =
-            broker_object(line, &["challenge", "ready", "notice", "registered", "not-registered", "withdrawn"])?
+        let Some((kind, mut o)) = broker_object(
+            line,
+            &["challenge", "ready", "notice", "registered", "not-registered", "withdrawn", "carried"],
+        )?
         else {
             return Ok(ToPledge::Exchange(Box::new(Message::parse(line, ClearancePolicy::Refused)?)));
         };
@@ -548,6 +590,15 @@ impl ToPledge {
             "challenge" => ToPledge::Challenge(decode32("nonce", &o.take_string("nonce")?)?),
             "ready" => ToPledge::Ready,
             "notice" => ToPledge::Notice(take_signed(&mut o)?),
+            "carried" => {
+                let namespace = o.take_string("namespace")?;
+                // A namespace is printable ASCII without spaces, as SSHSIG writes them; which ones are known is the reader's.
+                if namespace.is_empty() || namespace.len() > 64 || !namespace.bytes().all(|b| (0x21..0x7f).contains(&b))
+                {
+                    return Err(ExchangeError::Malformed(ParseError::MalformedName("namespace")));
+                }
+                ToPledge::Carried { namespace, signed: take_signed(&mut o)? }
+            }
             "registered" => ToPledge::Registered(take_fingerprint(&mut o, "delegation")?),
             "withdrawn" => {
                 let delegation = take_fingerprint(&mut o, "delegation")?;
@@ -571,6 +622,17 @@ impl ToPledge {
             ToPledge::Challenge(n) => line(&WithText { nonce: Some(STANDARD.encode(n)), ..text_message("challenge") }),
             ToPledge::Ready => line(&head("ready")),
             ToPledge::Notice(s) => signed_line("notice", s),
+            ToPledge::Carried { namespace, signed } => {
+                if !looks_armoured(&signed.sig) {
+                    return Err(EncodeError::NotArmoured("doc_sig"));
+                }
+                line(&CarriedWire {
+                    head: head("carried"),
+                    namespace,
+                    doc: STANDARD.encode(&signed.doc),
+                    doc_sig: signature_to_base64(&signed.sig),
+                })
+            }
             ToPledge::Registered(fp) => {
                 line(&WithText { delegation: Some(fp.to_string()), ..text_message("registered") })
             }
@@ -1347,5 +1409,80 @@ mod tests {
         assert_eq!(Standing::parse_unverified(with_cert), Err(ParseError::ControlCharacter("certificates".into())));
         let key = standing("", "jan").replace(r#""blocked_keys":[]"#, r#""blocked_keys":["SHA256:\u202e"]"#);
         assert_eq!(Standing::parse_unverified(key), Err(ParseError::BidiMark("blocked_keys".into())));
+    }
+
+    #[test]
+    fn the_tls_agreements_are_the_documents() {
+        // Section 5: label `EXPORTER-procession-connection-v1`, no context, 32 bytes; sections 1 and 8: TLS 1.3 only, `ring`.
+        assert_eq!(TLS_EXPORTER_LABEL, b"EXPORTER-procession-connection-v1");
+        assert_eq!(TLS_EXPORTER_CONTEXT, None);
+        assert_eq!(TLS_EXPORTER_LENGTH, 32);
+        assert_eq!(TLS_EXPORTER_LENGTH, std::mem::size_of::<Secret32>());
+        assert_eq!(TLS_PROTOCOL_VERSION, "TLSv1.3");
+        assert!(is_tls_1_3(TLS_PROTOCOL_VERSION) && is_tls_1_3("TLSv1_3"));
+        for other in ["TLSv1.2", "TLSv1_2", "tlsv1.3", "TLSv1.3 ", "", "TLS1.3", "SSLv3"] {
+            assert!(!is_tls_1_3(other), "{other:?}");
+        }
+        assert_eq!(TLS_CRYPTO_PROVIDER, "ring");
+        assert_eq!(TLS_EXPORTER_LABEL, crate::limits::TLS_EXPORTER_LABEL.as_bytes());
+    }
+
+    #[test]
+    fn a_carried_document_is_parsed_and_its_bytes_kept() {
+        let doc = br#"{"v":1,"type":"hosts"}"#.to_vec();
+        let m = ToPledge::Carried {
+            namespace: "hosts-v1@procession".into(),
+            signed: Signed { doc: doc.clone(), sig: SIG.into() },
+        };
+        let line = m.encode().unwrap();
+        assert_eq!(
+            line,
+            format!(
+                "{{\"schema_version\":1,\"type\":\"carried\",\"namespace\":\"hosts-v1@procession\",\"doc\":\"{}\",\"doc_sig\":\"{}\"}}\n",
+                STANDARD.encode(&doc),
+                signature_to_base64(SIG)
+            )
+            .into_bytes()
+        );
+        let ToPledge::Carried { namespace, signed } = ToPledge::parse(&line[..line.len() - 1]).unwrap() else {
+            panic!()
+        };
+        assert_eq!((namespace.as_str(), signed.doc, signed.sig.as_str()), ("hosts-v1@procession", doc, SIG));
+        // A namespace its reader does not know is still parsed (the reader ignores it).
+        let other = String::from_utf8(line.clone()).unwrap().replace("hosts-v1@procession", "future-v9@procession");
+        assert!(
+            matches!(ToPledge::parse(other.trim_end().as_bytes()), Ok(ToPledge::Carried { namespace, .. }) if namespace == "future-v9@procession")
+        );
+        // Refusals: members, namespace shape, base64, signature, strings.
+        let text = String::from_utf8(line).unwrap();
+        let text = text.trim_end();
+        let swap = |from: &str, to: &str| text.replacen(from, to, 1).into_bytes();
+        assert_eq!(
+            ToPledge::parse(&swap(r#","namespace":"hosts-v1@procession""#, "")),
+            Err(ExchangeError::Malformed(ParseError::MissingMember("namespace")))
+        );
+        assert_eq!(
+            ToPledge::parse(&swap(r#""doc_sig""#, r#""x":1,"doc_sig""#)),
+            Err(ExchangeError::Malformed(ParseError::UnknownMember("x".into())))
+        );
+        for bad in ["", "a b", "a\\u0000b", "a\\u202eb", &"a".repeat(65), "é"] {
+            assert!(ToPledge::parse(&swap("hosts-v1@procession", bad)).is_err(), "{bad:?}");
+        }
+        assert_eq!(ToPledge::parse(&swap(&STANDARD.encode(m_doc()), "!!!")), Err(ExchangeError::BadBase64("doc")));
+        assert!(matches!(
+            ToPledge::parse(&swap(&signature_to_base64(SIG), &STANDARD.encode("plain"))),
+            Err(ExchangeError::BadSignature("doc_sig"))
+        ));
+        // It is the broker's message: a pledge does not send it, a service does not read it.
+        assert_eq!(FromPledge::parse(text.as_bytes()), Err(ExchangeError::UnknownType));
+        assert_eq!(FromService::parse(text.as_bytes()), Err(ExchangeError::UnknownType));
+        assert!(matches!(
+            ToPledge::Carried { namespace: "x".into(), signed: Signed { doc: vec![], sig: "no".into() } }.encode(),
+            Err(EncodeError::NotArmoured(_))
+        ));
+    }
+
+    fn m_doc() -> Vec<u8> {
+        br#"{"v":1,"type":"hosts"}"#.to_vec()
     }
 }

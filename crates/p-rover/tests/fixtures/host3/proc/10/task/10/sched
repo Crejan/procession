@@ -1,0 +1,6 @@
+t (10, #threads: 1)
+-----
+nr_switches                                  :                 1000
+nr_voluntary_switches                        :                  900
+nr_involuntary_switches                      :                  100
+se.nr_migrations                             :                    5

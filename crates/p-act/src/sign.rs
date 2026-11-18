@@ -27,6 +27,7 @@ use crate::clearance::Clearance;
 use crate::error::ParseError;
 use crate::hash::Document;
 use crate::request::Request;
+use crate::sshsig::SshsigSigner;
 use crate::text;
 use base64::Engine as _;
 use base64::engine::general_purpose::{STANDARD, STANDARD_NO_PAD};
@@ -127,6 +128,18 @@ pub enum SignError {
     BadGroups(&'static str),
     #[error("`{0}` is not a fingerprint like SHA256:<43 base64 characters>")]
     MalformedFingerprint(String),
+    #[error("the certificate is not valid yet")]
+    CertificateNotYetValid,
+    #[error("the certificate has expired")]
+    CertificateExpired,
+    #[error("`{0}` is not an approval key's name, `<person>:confirmed` or `<person>:automatic`")]
+    NotAnApprovalName(String),
+    #[error("`{0}` is a name the site CA must never certify for a person")]
+    ReservedName(String),
+    #[error("a signer's raw signature is refused: {0}")]
+    RawSignature(&'static str),
+    #[error("the key holder failed: {0}")]
+    Holder(String),
     #[error("the signature carries a certificate, and a plain key was expected")]
     UnexpectedCertificate,
     #[error("ssh-keygen did not accept the certificate: {0}")]
@@ -164,6 +177,12 @@ pub enum SignError {
 pub struct PublicKey(String);
 
 impl PublicKey {
+    /// The public key of a key's wire form (a key's, not a certificate's), if it is of a supported type.
+    pub(crate) fn from_blob(blob: &[u8]) -> Result<PublicKey, SignError> {
+        let kind = key_type(blob).ok_or_else(|| SignError::MalformedPublicKey(String::new()))?;
+        PublicKey::parse(&format!("{kind} {}", STANDARD.encode(blob)))
+    }
+
     /// From a `.pub` file's line: `<type> <base64> [comment]`.
     pub fn parse(line: &str) -> Result<PublicKey, SignError> {
         let bad = || SignError::MalformedPublicKey(line.trim_end().to_owned());
@@ -240,6 +259,12 @@ impl PublicKey {
     }
 }
 
+impl SshsigSigner for Signer {
+    fn sign(&self, namespace: Namespace, message: &[u8]) -> Result<String, SignError> {
+        self.sign_with_keygen(namespace, message)
+    }
+}
+
 /// A private key file to sign with, and its certificate if it has one.
 #[derive(Debug, Clone)]
 pub struct Signer {
@@ -263,7 +288,7 @@ impl Signer {
         if cert.is_file() { Ok(Signer { file: cert }) } else { Err(SignError::NotCertified) }
     }
 
-    fn sign(&self, namespace: Namespace, bytes: &[u8]) -> Result<String, SignError> {
+    fn sign_with_keygen(&self, namespace: Namespace, bytes: &[u8]) -> Result<String, SignError> {
         let out = run(
             &[
                 OsStr::new("-Y"),
@@ -416,6 +441,8 @@ pub struct Certificate {
     /// The fingerprint of the key the certificate says signed it. **A claim**: nothing was verified.
     /// [`certificate_issuer`] has `ssh-keygen` verify the certificate's signature.
     pub issuer: Fingerprint,
+    /// The certified key's wire form, without the certificate.
+    pub key_blob: Vec<u8>,
 }
 
 pub(crate) fn put_string(out: &mut Vec<u8>, s: &[u8]) {
@@ -450,7 +477,7 @@ fn name_data_list(list: &[u8], unwrap_value: bool) -> Option<Vec<(String, Vec<u8
 }
 
 /// The type name of a public key blob.
-fn key_type(blob: &[u8]) -> Option<String> {
+pub(crate) fn key_type(blob: &[u8]) -> Option<String> {
     String::from_utf8(Reader(blob).string()?.to_vec()).ok()
 }
 
@@ -546,6 +573,7 @@ pub(crate) fn certificate_from_blob(blob: &[u8]) -> Result<Certificate, SignErro
         key_type,
         cert_type,
         issuer,
+        key_blob: plain,
     })
 }
 
@@ -687,7 +715,7 @@ pub fn request_person(request: &Request) -> Result<String, SignError> {
 // ---------------------------------------------------------------------------
 
 /// Sign a call with the agent's key, certified by its person's delegation key.
-pub fn sign_call(signer: &Signer, call: &Call) -> Result<String, SignError> {
+pub fn sign_call(signer: &(impl SshsigSigner + ?Sized), call: &Call) -> Result<String, SignError> {
     signer.sign(Namespace::Call, call.as_bytes())
 }
 
@@ -708,7 +736,7 @@ pub fn verify_call_agent(call: &Call, sig: &str, delegation_key: &PublicKey) -> 
 }
 
 /// Sign a request with the service's key, certified by its host's key.
-pub fn sign_request(signer: &Signer, request: &Request) -> Result<String, SignError> {
+pub fn sign_request(signer: &(impl SshsigSigner + ?Sized), request: &Request) -> Result<String, SignError> {
     signer.sign(Namespace::Request, request.as_bytes())
 }
 
@@ -750,7 +778,7 @@ impl ApprovalKind {
 
 /// An approval is the signature over the request's bytes. `signer` holds the
 /// person's confirmed or automatic approval key, certified by the site CA.
-pub fn sign_approval(signer: &Signer, request: &Request) -> Result<String, SignError> {
+pub fn sign_approval(signer: &(impl SshsigSigner + ?Sized), request: &Request) -> Result<String, SignError> {
     signer.sign(Namespace::Approval, request.as_bytes())
 }
 
@@ -796,7 +824,7 @@ pub fn verify_approval(request: &Request, sig: &str, trust: ApprovalTrust<'_>) -
 }
 
 /// Sign a clearance with the broker's key, certified by the site CA as `broker`.
-pub fn sign_clearance(signer: &Signer, clearance: &Clearance) -> Result<String, SignError> {
+pub fn sign_clearance(signer: &(impl SshsigSigner + ?Sized), clearance: &Clearance) -> Result<String, SignError> {
     signer.sign(Namespace::Clearance, clearance.as_bytes())
 }
 
@@ -814,7 +842,7 @@ pub fn verify_clearance(clearance: &Clearance, sig: &str, site_ca: &PublicKey) -
 
 /// Sign a connection document (`approval-connections.md` section 5, sign-in) with the person's
 /// connection key, a plain key: `connection-v1@procession`.
-pub fn sign_connection(signer: &Signer, document: &[u8]) -> Result<String, SignError> {
+pub fn sign_connection(signer: &(impl SshsigSigner + ?Sized), document: &[u8]) -> Result<String, SignError> {
     signer.sign(Namespace::Connection, document)
 }
 
@@ -843,7 +871,7 @@ pub fn verify_connection(
 
 /// Sign what the broker says in its own name (the standing) with the broker's key, certified by the
 /// site CA as `broker`: `broker-v1@procession`.
-pub fn sign_broker(signer: &Signer, document: &[u8]) -> Result<String, SignError> {
+pub fn sign_broker(signer: &(impl SshsigSigner + ?Sized), document: &[u8]) -> Result<String, SignError> {
     signer.sign(Namespace::Broker, document)
 }
 
@@ -904,4 +932,103 @@ pub fn verify_agent_certificate(line: &str, delegation_key: &PublicKey) -> Resul
         return Err(SignError::WrongIssuer);
     }
     Ok(agent)
+}
+
+// ---------------------------------------------------------------------------
+// An approval key's certificate, against the site CA
+// ---------------------------------------------------------------------------
+
+/// What a verified certificate of an approval key says.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ApprovalCertificate {
+    /// The person: the part of the one principal before the `:`.
+    pub person: String,
+    /// `confirmed` or `automatic`: the part after it.
+    pub kind: ApprovalKind,
+    /// The key the certificate certifies (Ed25519 or ECDSA P-256).
+    pub key: PublicKey,
+    /// The certificate's label; never to decide on.
+    pub key_id: String,
+    /// Seconds since the Unix epoch.
+    pub valid_after: u64,
+    /// Seconds since the Unix epoch (the largest value for "forever").
+    pub valid_before: u64,
+}
+
+impl ApprovalCertificate {
+    /// Whether this certificate is for `key`.
+    #[must_use]
+    pub fn certifies(&self, key: &PublicKey) -> bool {
+        self.key == *key
+    }
+}
+
+/// The names the site CA must never certify for a person (formats section 7).
+const RESERVED_PERSONS: [&str; 2] = ["broker", "hosts"];
+
+fn shown(s: &str) -> String {
+    s.chars().take(64).collect()
+}
+
+/// A certificate of an approval key, as the issuer made it (the line of a `-cert.pub` file), checked against the
+/// site CA's key `site_ca` at the time `now`, for pledge loading certificates from a standing or from disk and for
+/// the broker's separate input. It is accepted only if **all** of this holds:
+///
+/// - it is one certificate line, of an Ed25519 or ECDSA P-256 key, issued by an Ed25519 or P-256 key;
+/// - it is a user certificate with **one** principal, `<person>:confirmed` or `<person>:automatic`, `<person>` being a
+///   person's name and not one the CA never certifies (`broker`, `hosts`), and **no critical option**;
+/// - **its signature is good and is the site CA's, and no other key's**: `ssh-keygen -L` verifies the certificate's
+///   signature and the issuer it prints is compared with `site_ca` ([`certificate_issuer`]);
+/// - `now` is not before its start and before its end (the caller gives the time; ends are exclusive, as `ssh-keygen`
+///   treats them).
+///
+/// Which key it certifies, and for whom, is in the result: the caller checks it is the key and the person it expects
+/// ([`ApprovalCertificate::certifies`], `person`). Extensions are not judged: the documents say nothing of them for
+/// approval keys.
+pub fn verify_approval_certificate(
+    line: &str,
+    site_ca: &PublicKey,
+    now: crate::time::Timestamp,
+) -> Result<ApprovalCertificate, SignError> {
+    let cert = certificate_from_blob(&certificate_line_blob(line)?)?;
+    if cert.cert_type != 1 {
+        return Err(SignError::NotUserCertificate);
+    }
+    if let Some((name, _)) = cert.critical_options.first() {
+        return Err(SignError::CriticalOption(name.clone()));
+    }
+    let principal = match <[String; 1]>::try_from(cert.principals.clone()) {
+        Ok([p]) => p,
+        Err(many) => return Err(SignError::PrincipalCount { found: many.len() }),
+    };
+    let (person, kind) = match principal.rsplit_once(':') {
+        Some((person, "confirmed")) => (person, ApprovalKind::Confirmed),
+        Some((person, "automatic")) => (person, ApprovalKind::Automatic),
+        _ => return Err(SignError::NotAnApprovalName(shown(&principal))),
+    };
+    if !text::is_name(person) {
+        return Err(SignError::NotAnApprovalName(shown(&principal)));
+    }
+    if RESERVED_PERSONS.contains(&person) {
+        return Err(SignError::ReservedName(person.to_owned()));
+    }
+    // The signature and the issuer, by `ssh-keygen`, before anything of the certificate is believed.
+    if certificate_issuer(line)? != site_ca.fingerprint() {
+        return Err(SignError::WrongIssuer);
+    }
+    let now = u64::try_from(now.unix()).unwrap_or(0);
+    if now < cert.valid_after {
+        return Err(SignError::CertificateNotYetValid);
+    }
+    if now >= cert.valid_before {
+        return Err(SignError::CertificateExpired);
+    }
+    Ok(ApprovalCertificate {
+        person: person.to_owned(),
+        kind,
+        key: PublicKey::from_blob(&cert.key_blob)?,
+        key_id: cert.key_id,
+        valid_after: cert.valid_after,
+        valid_before: cert.valid_before,
+    })
 }

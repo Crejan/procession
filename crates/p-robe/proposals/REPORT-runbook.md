@@ -355,3 +355,30 @@ program was right and the test's setup leaned on the umask. Modes are now writte
 002 and under 077, with and without `test-verbs`: all pass. **a3's `test read` case cannot meet it:** it reads `/etc/sudoers.d/probe-svc` (made by `a1` with
 `install -o root -g root -m 0440`), and in the sudo run the sandbox of `test read` is not set (`PROBE_TEST_SANDBOX` is dropped by `env_reset` and ignored by a root
 process), so no entry matches and the directory rule is never reached: the call is rated at the worst whatever the umask.
+
+## Update: exit 70 and the outcome `failed`
+
+**Dispatcher.** `RC_FAILED = 70`: a verb that was started and gave no usable result. Today: a verb code other than 0 (`cause=verb-code:N`)
+and an answer whose reader has gone (`cause=answer-lost`; a cut at the cap with its `truncated` record is still a result). The `done` line says
+`rc=70 cause=...` and carries `call=`. A verb's own code never becomes the dispatcher's. (`prover` causes: SPEC, "A verb that runs `prover`".)
+**Service/agent.** `Outcome::Failed`, word `failed`, no reason, no `rc`, `isError` true; `agent-to-service.md` section 6 has the row and one sentence.
+`unavailable` is now only: sudo cannot be started or refused (`1`), dispatcher 3.
+
+| Case | Before | Now (agent / exact code in the log) |
+|---|---|---|
+| verb exits with a code other than 0 (test verbs: `test fail`, `test read` of an unreadable file) | `done`, `rc` N | `failed` / `dispatcher-failed` (audit `cause=verb-code:N`) |
+| reader of the answer gone | `done`, `rc` 0 | `failed` / `dispatcher-failed` (`cause=answer-lost`) |
+| verb killed at the run limit (600 s) | `unavailable` / `run-limit` | `failed` / `run-limit` |
+| dispatcher killed by a signal (after `event=start`, or not known) | `done`, `rc` 255 | `failed` / `dispatcher-signal:N` |
+| dispatcher exits with a code nobody defined (2, 101, 255...) | `done`, `rc` N | `failed` / `dispatcher-code:N` |
+| answer over 3 MiB, not text, wait/read error after sudo started | `unavailable` / `run:...` (over 3 MiB: silently cut) | `failed` / `run-lost:...` |
+| sudo refuses (exit 1) | `done`, `rc` 1 (!) | `unavailable` / `sudo-refused` |
+| sudo cannot be started | `unavailable` | `unavailable` (unchanged) |
+| dispatcher 64 / 75 / 76 / 3 | `refused` / `try-later` / `expired` / `unavailable` | unchanged |
+
+`done` now always has `rc` 0. **Also changed:** a killed `sudo` leaves its child running (SIGKILL is not relayed, and the service's account cannot signal root's
+processes); the service no longer waits for the pipe then (one second, then it answers `failed`).
+**Tests:** dispatcher (`test fail` codes, answer lost, cap cut unchanged), runner with fake `sudo` scripts (exit 70, signal, run limit, over the limit,
+not text, not started), `outcome::dispatcher` per code, service (each runner result; `test fail` end to end with the audit line), MCP result, stage1 case 1b.
+**Stage 1:** case 1b ends `failed` for the service, but `pact` (p-act) does not know the word and says `unknown`; the test accepts both until p-act passes it on (the
+service's log and the audit line are checked either way). Stage A scripts are untouched: none of them expects a verb code.

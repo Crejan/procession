@@ -91,7 +91,11 @@ fn the_real_pact_calls_the_real_probe_over_http() {
     fs::create_dir_all(dir.join("used")).unwrap();
     fs::create_dir_all(dir.join("locks")).unwrap();
     let runner: Box<dyn Runner> = if std::env::var("PROBE_STAGE1_SUDO").as_deref() == Ok("1") {
-        Box::new(SudoRunner { sudo: "/usr/bin/sudo".into(), probe: "/usr/local/bin/probe".into() })
+        Box::new(SudoRunner {
+            sudo: "/usr/bin/sudo".into(),
+            probe: "/usr/local/bin/probe".into(),
+            limit: p_robe::runner::RUN_LIMIT,
+        })
     } else {
         Box::new(InProcess {
             audit_file: dir.join("dispatcher.log"),

@@ -45,18 +45,18 @@ fn deadlines(text: &str) -> Vec<(Until, String)> {
             continue;
         }
         // `--until <value>` in a command, or `NAME=$(( $(date +%s) + N ))` assigning a deadline variable.
-        if let Some(at) = line.find("--until ") {
-            if let Some(until) = parse_until(&line[at + "--until ".len()..]) {
-                let context = lines[index.saturating_sub(3)..=index].join("\n");
-                found.push((until, context));
-            }
+        if let Some(at) = line.find("--until ")
+            && let Some(until) = parse_until(&line[at + "--until ".len()..])
+        {
+            let context = lines[index.saturating_sub(3)..=index].join("\n");
+            found.push((until, context));
         }
-        if let Some((name, value)) = line.split_once("=$(( $(date +%s) + ") {
-            if name.chars().all(|c| c.is_ascii_uppercase() || c == '_') {
-                let n: String = value.chars().take_while(char::is_ascii_digit).collect();
-                let context = lines[index.saturating_sub(1)..=index].join("\n");
-                found.push((Until::Ahead(n.parse().unwrap()), format!("{name}\n{context}")));
-            }
+        if let Some((name, value)) = line.split_once("=$(( $(date +%s) + ")
+            && name.chars().all(|c| c.is_ascii_uppercase() || c == '_')
+        {
+            let n: String = value.chars().take_while(char::is_ascii_digit).collect();
+            let context = lines[index.saturating_sub(1)..=index].join("\n");
+            found.push((Until::Ahead(n.parse().unwrap()), format!("{name}\n{context}")));
         }
     }
     found

@@ -1,114 +1,29 @@
-//! Reading a program's settings file, the one way for `pledge`, `probe`, `page` and `pact`'s siblings:
-//! **one JSON object**, **no unknown member**, and **a file that nobody but its owner (and root) can
-//! write**.
+//! Reading a program's settings file. The checks on the file (a regular file, owned by root or the running user, no
+//! group or other write bit, a size limit, errors that say what to do and hold no value from the file) and the TOML
+//! reader are the crate `p-ermit`, re-exported here: `SettingsError`, `read_checked`, `check_owner_and_mode`,
+//! `DEFAULT_MAX_BYTES`, and with the feature `toml` `read_toml`, `read_toml_optional`, `parse_toml`.
 //!
-//! - *One object*: the file is one JSON object and nothing else: no array, no second value, no trailing
-//!   text, no byte order mark. A member that appears twice at the top is refused (`serde` alone would keep
-//!   the last).
-//! - *No unknown member*: this function cannot know the members, so the caller's type must say so:
-//!   `#[serde(deny_unknown_fields)]` on it and on every struct inside it (a type that does not would
-//!   let an unknown member through, and nothing here can tell). The error then is
-//!   [`SettingsError::Invalid`], with `serde`'s text, which names the member and holds no value.
-//! - *Who can write it*: the file is opened first and the checks are on the open file (no gap between the
-//!   check and the read). It must be a regular file, owned by root or by the user running the program, with
-//!   no group or other write permission. A file somebody else can replace or edit is a way to change what a
-//!   program that runs with more rights does. (The directory it is in matters as much; this function does
-//!   not look at it. Access control lists are not looked at either.)
+//! What this module adds is **JSON** (feature `formats`, on by default) for pledge, probe and page: [`read`],
+//! [`read_optional`], [`read_limited`] and [`parse`]: one JSON object and nothing else (no array, no second value, no
+//! trailing text, no byte order mark); a member that appears twice at the top is refused (`serde` alone would keep
+//! the last); an unknown member is refused by the caller's `#[serde(deny_unknown_fields)]`; an error names a key and
+//! says where, never a value.
 
-use crate::error::ParseError;
-use crate::object::Object;
-use serde::de::DeserializeOwned;
-use std::fs::File;
-use std::io::Read;
-use std::os::unix::fs::{MetadataExt, PermissionsExt};
+pub use p_ermit::settings::*;
+
+#[cfg(feature = "formats")]
 use std::path::Path;
-use thiserror::Error;
 
-/// A settings file is at most this long unless the caller says otherwise.
-pub const DEFAULT_MAX_BYTES: u64 = 1024 * 1024;
-
-/// Why a settings file was refused. Never holds the file's content.
-#[derive(Debug, Error)]
-pub enum SettingsError {
-    /// There is no such file (or a directory on the way is missing): for the caller to decide what that means
-    /// (an empty configuration, "none", or an error), without looking at an I/O error's kind.
-    #[error("{0} does not exist")]
-    NotFound(String),
-    #[error("cannot read {path}: {source}")]
-    Io { path: String, source: std::io::Error },
-    #[error("{0} is not a regular file")]
-    NotARegularFile(String),
-    #[error("{path} can be written by someone other than its owner (mode {mode:04o}); a settings file must not be writable by its group or by others: run `chmod 600 {}`", shell_quote(.path))]
-    WritableByOthers { path: String, mode: u32 },
-    #[error("{path} is owned by user {uid}, who is neither root nor the user running this program; a settings file must be owned by root or by the user that runs the program: as root, run `chown <that user> {}`", shell_quote(.path))]
-    WrongOwner { path: String, uid: u32 },
-    #[error("{0} is larger than the limit")]
-    TooLarge(String),
-    #[error("not one JSON object: {0}")]
-    NotAnObject(ParseError),
-    #[error("the file has a byte order mark")]
-    ByteOrderMark,
-    #[error("the file is not UTF-8")]
-    NotUtf8,
-    #[error("{0}")]
-    Invalid(String),
-}
-
-/// `path` as one word for a shell, for the remedy in a message: left alone if it has only safe characters, else in
-/// single quotes. It is the caller's own argument, never a value from the file.
-fn shell_quote(path: &str) -> String {
-    if !path.is_empty()
-        && path.bytes().all(|b| {
-            b.is_ascii_alphanumeric()
-                || matches!(b, b'/' | b'.' | b'_' | b'-' | b'+' | b',' | b':' | b'@' | b'%' | b'=')
-        })
-    {
-        path.to_owned()
-    } else {
-        format!("'{}'", path.replace('\'', "'\\''"))
-    }
-}
-
-/// Whether a file with this owner and mode may be trusted by a program running as `euid`: owned by root
-/// or by `euid`, and not writable by its group or by others.
-pub fn check_owner_and_mode(path: &str, uid: u32, mode: u32, euid: u32) -> Result<(), SettingsError> {
-    if mode & 0o022 != 0 {
-        return Err(SettingsError::WritableByOthers { path: path.to_owned(), mode: mode & 0o7777 });
-    }
-    if uid != 0 && uid != euid {
-        return Err(SettingsError::WrongOwner { path: path.to_owned(), uid });
-    }
-    Ok(())
-}
-
-fn effective_uid() -> u32 {
-    // SAFETY: `geteuid` has no arguments and cannot fail.
-    unsafe { libc::geteuid() }
-}
-
-/// Read the settings file at `path` into `T`, with the rules above and at most `max_bytes`.
-pub fn read_limited<T: DeserializeOwned>(path: &Path, max_bytes: u64) -> Result<T, SettingsError> {
-    let shown = path.display().to_string();
-    let io = |source| SettingsError::Io { path: shown.clone(), source };
-    let file = File::open(path).map_err(|e| {
-        if e.kind() == std::io::ErrorKind::NotFound { SettingsError::NotFound(shown.clone()) } else { io(e) }
-    })?;
-    let meta = file.metadata().map_err(io)?;
-    if !meta.is_file() {
-        return Err(SettingsError::NotARegularFile(shown));
-    }
-    check_owner_and_mode(&shown, meta.uid(), meta.permissions().mode(), effective_uid())?;
-    let mut bytes = Vec::new();
-    file.take(max_bytes + 1).read_to_end(&mut bytes).map_err(io)?;
-    if u64::try_from(bytes.len()).unwrap_or(u64::MAX) > max_bytes {
-        return Err(SettingsError::TooLarge(shown));
-    }
-    parse(&bytes)
+/// Read the JSON settings file at `path` into `T`, with the rules above and at most `max_bytes`.
+#[cfg(feature = "formats")]
+pub fn read_limited<T: serde::de::DeserializeOwned>(path: &Path, max_bytes: u64) -> Result<T, SettingsError> {
+    parse(&read_checked(path, max_bytes)?)
 }
 
 /// As [`read`], but a file that does not exist is `Ok(None)`. Every other problem, a file that is there and
 /// refused included, is an error: only absence is not.
-pub fn read_optional<T: DeserializeOwned>(path: &Path) -> Result<Option<T>, SettingsError> {
+#[cfg(feature = "formats")]
+pub fn read_optional<T: serde::de::DeserializeOwned>(path: &Path) -> Result<Option<T>, SettingsError> {
     match read(path) {
         Ok(v) => Ok(Some(v)),
         Err(SettingsError::NotFound(_)) => Ok(None),
@@ -117,24 +32,24 @@ pub fn read_optional<T: DeserializeOwned>(path: &Path) -> Result<Option<T>, Sett
 }
 
 /// [`read_limited`] with [`DEFAULT_MAX_BYTES`].
-pub fn read<T: DeserializeOwned>(path: &Path) -> Result<T, SettingsError> {
+#[cfg(feature = "formats")]
+pub fn read<T: serde::de::DeserializeOwned>(path: &Path) -> Result<T, SettingsError> {
     read_limited(path, DEFAULT_MAX_BYTES)
 }
 
-/// The same reading of a document that is already in memory (for tests, and for a file read some other way).
-pub fn parse<T: DeserializeOwned>(bytes: &[u8]) -> Result<T, SettingsError> {
-    if bytes.starts_with(&[0xEF, 0xBB, 0xBF]) {
-        return Err(SettingsError::ByteOrderMark);
-    }
-    let text = std::str::from_utf8(bytes).map_err(|_| SettingsError::NotUtf8)?;
+/// The same reading of a JSON document that is already in memory (for tests, and for a file read some other way).
+#[cfg(feature = "formats")]
+pub fn parse<T: serde::de::DeserializeOwned>(bytes: &[u8]) -> Result<T, SettingsError> {
+    let text = text_of(bytes)?;
     // One object, nothing after it, no member twice at the top.
-    Object::parse(text, "").map_err(SettingsError::NotAnObject)?;
+    crate::object::Object::parse(text, "").map_err(|e| SettingsError::NotAnObject(e.to_string()))?;
     serde_json::from_str(text).map_err(|e| SettingsError::Invalid(describe(&e)))
 }
 
 /// What is wrong, without any value from the file: `serde` writes the offending value into some messages
 /// (`invalid type: string "..."`), and a settings file may hold a secret. Names of members are kept (they are
 /// the caller's own, or what tells a person which one to remove); values are not.
+#[cfg(feature = "formats")]
 fn describe(e: &serde_json::Error) -> String {
     let message = e.to_string();
     let first = message.split(" at line ").next().unwrap_or("");
@@ -146,11 +61,22 @@ fn describe(e: &serde_json::Error) -> String {
     }
 }
 
-#[cfg(test)]
+/// The text of a settings file: no byte order mark, UTF-8.
+#[cfg(feature = "formats")]
+fn text_of(bytes: &[u8]) -> Result<&str, SettingsError> {
+    if bytes.starts_with(&[0xEF, 0xBB, 0xBF]) {
+        return Err(SettingsError::ByteOrderMark);
+    }
+    std::str::from_utf8(bytes).map_err(|_| SettingsError::NotUtf8)
+}
+
+#[cfg(all(test, feature = "formats"))]
 mod tests {
     use super::*;
     use serde::Deserialize;
+    use std::fs::File;
     use std::io::Write;
+    use std::os::unix::fs::PermissionsExt;
 
     #[derive(Debug, Deserialize, PartialEq)]
     #[serde(deny_unknown_fields)]
@@ -333,7 +259,7 @@ mod tests {
         let r = read_optional::<Strict>(&locked.join("s.json"));
         std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o700)).unwrap();
         // (As root the directory is searchable anyway.)
-        assert!(matches!(r, Err(SettingsError::Io { .. })) || effective_uid() == 0, "{r:?}");
+        assert!(matches!(r, Err(SettingsError::Io { .. })) || unsafe { libc::geteuid() } == 0, "{r:?}");
     }
 
     #[test]
@@ -360,9 +286,5 @@ mod tests {
         // The path is one word for a shell, whatever it holds.
         let text = check_owner_and_mode("/tmp/it's here/s.json", 0, 0o666, 1000).unwrap_err().to_string();
         assert!(text.contains(r#"chmod 600 '/tmp/it'\''s here/s.json'"#), "{text}");
-        assert_eq!(shell_quote("/etc/a-b_c.d/s.json"), "/etc/a-b_c.d/s.json");
-        assert_eq!(shell_quote(""), "''");
-        assert_eq!(shell_quote("a b"), "'a b'");
-        assert_eq!(shell_quote("$(x)"), "'$(x)'");
     }
 }

@@ -154,7 +154,8 @@ text content.
 | `refused` | `not-allowed` | the delegation, the site's rules or the person's ceilings do not allow it | change the plan; do not repeat |
 | `refused` | `invalid` | the call itself is wrong: unknown action, arguments not accepted, a deadline in the past or too far, an identifier used before | fix the call |
 | `refused` | `try-later` | too many requests waiting, or the agent is muted for a while | wait, then ask again |
-| `unavailable` | none | nobody could be asked, or nothing was done for a reason on the service's side | the same as `expired` |
+| `unavailable` | none | nobody could be asked, or nothing was done for a reason on the service's side: **certainly nothing was started** | the same as `expired` |
+| `failed` | none | the call was carried out and did not complete; no result; the exact cause is in the service's log and the host's audit lines under the call's identifier | not repeat it unchanged; find out what the host did, by a query, before anything that changes something |
 
 **Mapping.** Pledge and the broker give the service exact codes; the service
 maps them and writes the exact one, with who said it (`by`), to its audit line.
@@ -166,6 +167,7 @@ The agent never sees the exact code.
 | `invalid-call`, `mismatch` (the body differs from the call), `malformed`, `deadline-past`, `deadline-too-far`, `call-used`, `not-showable` | `refused` / `invalid` |
 | `limit`, `muted` | `refused` / `try-later` |
 | `service-mismatch` (this service's key or certificate is wrong: an operator must act), `approval-invalid` (what came back did not verify; nothing ran), pledge's `unavailable`, no route to pledge or the broker | `unavailable` |
+| the dispatcher's 70, a signal, the run limit, a result that was lost, a code nobody defined (the verb may have started) | `failed` |
 | pledge's `declined` | `declined` |
 | `expired`, the service's own deadline | `expired` |
 
@@ -182,7 +184,7 @@ designer accepts it, it joins this list as `pact`-made (`review-pact.md`).
 `instructions` (in `initialize`) says in plain words what the table says: a
 call may need your person's approval and waits for it until its deadline;
 `declined` and `refused` are decisions, do not repeat them unchanged;
-`expired` and `unavailable` mean nothing happened.
+`expired` and `unavailable` mean nothing happened; `failed` means it was started and gave no result.
 
 ## 7. Waiting, cancelling, dropping
 
@@ -203,7 +205,7 @@ call may need your person's approval and waits for it until its deadline;
   the transport's own cancel flag. The final message is at most 4 MiB (`pact`'s
   limit): the dispatcher caps a verb's answer at 1 MiB, wrapping at most doubles
   it, and a compile-time assertion keeps it so. A verb is killed after 10
-  minutes (`RUN_LIMIT`), which is `unavailable`; a limit per verb in the table
+  minutes (`RUN_LIMIT`), which is `failed`; a limit per verb in the table
   is not built.
 - **A cancelled or dropped call is not run.** `notifications/cancelled`, or the
   connection closing, before the verb started: the service closes its

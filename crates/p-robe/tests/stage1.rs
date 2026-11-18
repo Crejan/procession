@@ -121,7 +121,7 @@ fn the_real_parts_against_each_other() {
     let (agent, dropped) = pact(&bundle, &transport, Settings::new(120, None));
     assert!(dropped.is_empty(), "pact dropped tools of this service: {dropped:?}");
     let names: Vec<String> = agent.catalogue.read().unwrap().tools.iter().map(|t| t.name.clone()).collect();
-    for expected in ["test_echo", "test_peak", "test_read", "sys_kit"] {
+    for expected in ["test_echo", "test_fail", "test_peak", "test_read", "sys_kit"] {
         assert!(names.contains(&expected.to_string()), "{expected} not in {names:?}");
     }
     let call = |ctx: &Context, tool: &str, params: &[&str]| told(&call_once(ctx, tool, &json!({"params": params})));
@@ -131,6 +131,28 @@ fn the_real_parts_against_each_other() {
     let echo = call(&agent, "test_echo", &["a=1"]);
     assert!(is(&echo, "done", None) && echo.rc == Some(0), "{echo:?} {:?}", log.lock().unwrap());
     assert!(echo.rest[0].contains("\"args\":[\"a=1\"]"), "{echo:?}");
+    expected.push(("approved", None));
+
+    // 1b. `test fail`: approved (harmless), started, and it exits with a code of its own: the call was carried
+    // out and did not complete, which an agent is told as `failed`, with no result and no code. The cause is
+    // in the log and in the host's audit line under the call's identifier.
+    let failed = call(&agent, "test_fail", &["2"]);
+    // `pact` (p-act) does not know the word `failed` yet and says `unknown` for it; until it passes it on, both
+    // are accepted here, and what the service did is checked by its log and the host's audit line below. After
+    // that: `assert!(is(&failed, "failed", None))` alone.
+    assert!(
+        (is(&failed, "failed", None) || is(&failed, "unknown", None)) && failed.rc.is_none(),
+        "{failed:?} {:?}",
+        log.lock().unwrap()
+    );
+    assert!(log.lock().unwrap().iter().any(|l| l.contains("dispatcher-failed")), "{:?}", log.lock().unwrap());
+    let audit_text = std::fs::read_to_string(dir.join("dispatcher.log")).unwrap();
+    assert!(
+        audit_text
+            .lines()
+            .any(|l| l.starts_with("event=done ") && l.contains(" rc=70 ") && l.contains("cause=verb-code:2")),
+        "{audit_text}"
+    );
     expected.push(("approved", None));
 
     // 2. `test peak`: the top of a scale: asked, the presence check, the confirmed key, done.

@@ -1,0 +1,35 @@
+[package]
+name = "p-rover"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.91"
+description = "Diagnoses realtime behaviour of a Linux host: threads, scheduling, IRQs, NICs, clocks, boot configuration; one command per question"
+license = "MIT OR Apache-2.0"
+keywords = ["realtime", "preempt-rt", "diagnostics", "irq", "isolcpus"]
+categories = ["command-line-utilities", "os::linux-apis"]
+include = ["src/**"]
+publish = false
+
+[lib]
+name = "p_rover"
+path = "src/lib.rs"
+
+[[bin]]
+name = "prover"
+path = "src/main.rs"
+
+[dependencies]
+p-roc = { path = "../p-roc" }
+# The strict settings reader (owner and mode of the file, unknown keys refused); feature `toml` of p-act is off by default.
+p-act = { path = "../p-act", version = "0.0.0", features = ["toml"] }
+clap = { version = "4", features = ["derive"] }
+globset = "0.4"
+humantime = "2"
+libc = "0.2"
+serde = { version = "1", features = ["derive"] }
+# raw_value: records keep their struct field order. p-act already enables this feature workspace-wide.
+serde_json = { version = "1", features = ["raw_value"] }
+thiserror = "2"
+
+[dev-dependencies]
+tempfile = "3"

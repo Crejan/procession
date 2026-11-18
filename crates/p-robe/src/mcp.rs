@@ -360,10 +360,10 @@ fn tool_result(outcome: &Outcome, call_id: &str) -> Value {
     }
     line = line.str("id", call_id);
     let mut content = vec![json!({"type": "text", "text": line.line()})];
-    if let Outcome::Done { answer, .. } = outcome {
-        if !answer.is_empty() {
-            content.push(json!({"type": "text", "text": answer.trim_end()}));
-        }
+    if let Outcome::Done { answer, .. } = outcome
+        && !answer.is_empty()
+    {
+        content.push(json!({"type": "text", "text": answer.trim_end()}));
     }
     json!({"content": content, "isError": !matches!(outcome, Outcome::Done { rc: 0, .. })})
 }
@@ -462,6 +462,11 @@ mod tests {
             "{\"type\":\"outcome\",\"outcome\":\"refused\",\"reason\":\"try-later\",\"id\":\"i\"}"
         );
         assert_eq!(refused["content"].as_array().unwrap().len(), 1);
+        // A call that was carried out and did not complete: an error, no code, no result.
+        let failed = tool_result(&Outcome::Failed, "i");
+        assert_eq!(failed["isError"], true);
+        assert_eq!(failed["content"][0]["text"], "{\"type\":\"outcome\",\"outcome\":\"failed\",\"id\":\"i\"}");
+        assert_eq!(failed["content"].as_array().unwrap().len(), 1);
         assert_eq!(
             tool_result(&Outcome::Declined, "i")["content"][0]["text"],
             "{\"type\":\"outcome\",\"outcome\":\"declined\",\"id\":\"i\"}"

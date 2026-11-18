@@ -13,11 +13,17 @@ publish = false
 [features]
 # Everything but `peer`: the signed formats, the exchange, the signatures. On by default, so a crate that depends on
 # `p-act` as before gets what it had; a crate that wants only `p_act::peer` (who is on the other end of a Unix
-# socket) says `default-features = false` and has `libc` and nothing else.
+# socket) says `default-features = false` and has `libc` and `p-ermit` (which has libc) and nothing else.
 default = ["formats"]
 formats = ["dep:base64", "dep:serde", "dep:serde_json", "dep:ring", "dep:tempfile", "dep:thiserror"]
 # The agent-side signer `pact` (proposals/pact.md): the library the binary is made of, and the binary.
 pact = ["formats", "dep:ureq"]
+# For tests only, never for a release: turns on `serde_json`'s `preserve_order` for the whole build, which any crate
+# of a workspace can do to everyone. `cargo test -p p-act --features guard-preserve-order` fails if anything in `p-act`
+# depends on the order of a JSON map (see the report on member order).
+guard-preserve-order = ["formats", "serde_json/preserve_order"]
+# TOML settings files (`p_act::settings::read_toml`): `toml` 0.9 and `serde`, and nothing of `formats`. Off by default.
+toml = ["p-ermit/toml"]
 # TLS for `pact`'s HTTP client (stage 2). Without it `pact` speaks plain http only.
 pact-tls = ["pact", "ureq/rustls", "dep:rustls"]
 
@@ -28,6 +34,8 @@ required-features = ["pact"]
 
 [dependencies]
 libc = "0.2"
+# The checks on a settings file and the peer lookup of a Unix socket, which `p_act::settings` and `p_act::peer` re-export.
+p-ermit = { path = "../p-ermit", version = "0.1.0" }
 ureq = { version = "3", default-features = false, optional = true }
 # Only to recognise a refused certificate in an error of the TLS handshake (feature pact-tls).
 rustls = { version = "0.23", default-features = false, optional = true }

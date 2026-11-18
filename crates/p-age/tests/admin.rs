@@ -111,7 +111,7 @@ async fn a_block_that_cannot_be_stored_says_so_and_stays_in_force_and_lifting_it
         return;
     }
     let (code, _, err) = page(&config, &["block", "jan"]).await;
-    assert_eq!(code, 1);
+    assert_eq!(code, 4, "in force but not stored");
     assert!(err.starts_with("blocked, NOT stored: permission-denied"), "{err}");
     // in force all the same
     let mut c = open_pledge(&w).await;
@@ -119,7 +119,7 @@ async fn a_block_that_cannot_be_stored_says_so_and_stays_in_force_and_lifting_it
     assert_eq!(c.recv().await["error"], "blocked");
     // the broker is degraded, and status says so and exits 1
     let (code, out, _) = page(&config, &["status"]).await;
-    assert_eq!(code, 1);
+    assert_eq!(code, 5, "degraded");
     assert!(out.contains("degraded: yes (permission-denied)") && out.contains("blocked persons: jan"), "{out}");
     // lifting permits: refused, and the block stays
     let (code, _, err) = page(&config, &["unblock", "jan"]).await;
@@ -166,7 +166,7 @@ async fn a_withdrawal_by_the_administrator_ends_the_delegation_and_is_in_the_sta
         return;
     }
     let (code, _, err) = page(&config, &["withdraw", &fp]).await;
-    assert_eq!(code, 1);
+    assert_eq!(code, 4);
     assert!(err.starts_with("withdrawn, NOT stored: permission-denied"), "{err}");
     unlock_state_dir(&w);
 }
@@ -357,9 +357,9 @@ async fn a_stale_socket_is_replaced_and_one_that_answers_is_not() {
         tokio::time::sleep(Duration::from_millis(50)).await;
         bound = p_age::admin::bind(dir);
     }
-    let (listener, uid) = bound.unwrap();
+    let listener = bound.unwrap();
     assert_eq!(std::fs::metadata(&path).unwrap().permissions().mode() & 0o777, 0o600);
-    tokio::spawn(p_age::admin::serve(listener, std::sync::Arc::clone(&w.broker), uid));
+    tokio::spawn(p_age::admin::serve(listener, std::sync::Arc::clone(&w.broker)));
     // a broker that answers: the second does not take its place
     assert!(matches!(p_age::admin::bind(dir), Err(p_age::admin::BindError::InUse(_))));
     assert!(path.exists());
@@ -405,11 +405,45 @@ fn commands_and_answers_are_read_as_strictly_as_everything_else() {
 }
 
 #[test]
-fn a_peer_is_allowed_only_if_its_user_is_root_or_the_brokers_and_one_that_cannot_be_read_is_not() {
-    use p_age::admin::peer_allowed;
-    assert!(peer_allowed(Ok(0), 501));
-    assert!(peer_allowed(Ok(501), 501));
-    assert!(!peer_allowed(Ok(502), 501));
-    assert!(!peer_allowed(Err(std::io::Error::from(std::io::ErrorKind::Unsupported)), 501));
-    assert!(!peer_allowed(Err(std::io::Error::other("no credentials")), 0));
+fn a_peer_is_served_only_through_p_act_peer_and_one_whose_credentials_cannot_be_read_is_dropped() {
+    use p_act::peer::{LOG_INTERVAL, Throttle};
+    use p_age::admin::admit_peer;
+    let mut throttle = Throttle::new("page", LOG_INTERVAL);
+    let mut lines = Vec::new();
+    // a socket pair: the peer is this very process, the broker's own user, and is admitted
+    let (a, _b) = std::os::unix::net::UnixStream::pair().unwrap();
+    assert!(admit_peer(&a, &mut throttle, &mut |l| lines.push(l.to_owned())));
+    assert!(lines.is_empty());
+    // something whose credentials cannot be read (not a socket at all) is dropped, and the refusal is one line
+    let file = std::fs::File::open("/dev/null").unwrap();
+    assert!(!admit_peer(&file, &mut throttle, &mut |l| lines.push(l.to_owned())));
+    assert_eq!(lines.len(), 1, "{lines:?}");
+    assert!(lines[0].contains("admin socket") && lines[0].contains("dropped"), "{lines:?}");
+    // the policy is the broker's own user or root: `OwnUserOrRoot`, no list of users is needed
+    assert_eq!(p_age::admin::POLICY, p_act::peer::Policy::OwnUserOrRoot);
+    assert!(p_age::admin::POLICY.admits_with(0, 501) && p_age::admin::POLICY.admits_with(501, 501));
+    assert!(!p_age::admin::POLICY.admits_with(502, 501));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn each_verbs_help_and_its_usage_say_what_the_exit_codes_mean() {
+    let w = World::new();
+    let config = config_file(&w);
+    for verb in ["block", "unblock", "withdraw", "status"] {
+        let (code, out, _) = page(&config, &[verb, "--help"]).await;
+        assert_eq!(code, 0, "{verb}");
+        for line in [
+            "0  done (and stored, where something is stored)",
+            "1  refused",
+            "2  usage",
+            "3  no broker answers",
+            "4  in force but NOT stored (block, withdraw)",
+            "5  the broker is degraded (`status` only)",
+        ] {
+            assert!(out.contains(line), "{verb}: {out}");
+        }
+    }
+    let (code, _, err) = page(&config, &["block"]).await;
+    assert_eq!(code, 2);
+    assert!(err.contains("5  the broker is degraded"), "{err}");
 }

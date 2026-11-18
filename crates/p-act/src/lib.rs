@@ -12,7 +12,8 @@
 //! - [`sign`]: signing and verifying with `ssh-keygen -Y`, one function per
 //!   document type and direction, and reading the person out of a signature.
 //! - [`DocumentHash`]: `sha256:<hex>` of a document's bytes.
-//! - [`peer`]: who is on the other end of a Unix socket (the only module without the feature `formats`).
+//! - [`peer`] and [`settings`]: who is on the other end of a Unix socket, and the checks on a settings file; the crate
+//!   `p-ermit`, re-exported (they need nothing of the feature `formats`).
 
 #[cfg(feature = "formats")]
 mod error;
@@ -39,14 +40,17 @@ pub mod exchange;
 pub mod limits;
 #[cfg(feature = "pact")]
 pub mod pact;
+/// Who is on the other end of a Unix socket: `p_ermit::peer`, re-exported.
 #[cfg(unix)]
-pub mod peer;
+pub use p_ermit::peer;
 #[cfg(feature = "formats")]
 pub mod rating;
-#[cfg(all(feature = "formats", unix))]
+#[cfg(unix)]
 pub mod settings;
 #[cfg(feature = "formats")]
 pub mod sign;
+#[cfg(feature = "formats")]
+pub mod sshsig;
 
 #[cfg(feature = "formats")]
 pub use call::{Call, CallContent, CallId, NotShowable, ServiceId};

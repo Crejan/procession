@@ -1,0 +1,9 @@
+Name:	irq/126-lan0-TxRx-1
+Tgid:	12
+Pid:	12
+Uid:	0	0	0	0
+Gid:	0	0	0	0
+Groups:	0
+Cpus_allowed_list:	3
+voluntary_ctxt_switches:	0
+nonvoluntary_ctxt_switches:	0

@@ -183,10 +183,10 @@ impl Policy {
             Some(Purpose::Shared) => {}
         }
         // A shared key signs SSHSIG only in the namespaces it is offered for.
-        if let Some(namespace) = asked.strip_prefix("sshsig ") {
-            if !SHARED_NAMESPACES.contains(&namespace) {
-                return Verdict::Refuse(Reason::KeyNotOffered);
-            }
+        if let Some(namespace) = asked.strip_prefix("sshsig ")
+            && !SHARED_NAMESPACES.contains(&namespace)
+        {
+            return Verdict::Refuse(Reason::KeyNotOffered);
         }
         match self.standing.get(&request.program) {
             Some(Standing::Blocked) => Verdict::Refuse(Reason::Blocked),

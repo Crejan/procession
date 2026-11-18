@@ -5,9 +5,15 @@
 //! OS. A scan returns what it read plus the sources it could not
 //! ([`Unreadable`]) instead of failing as a whole.
 
-pub mod cpuset;
+pub mod change;
+pub mod cmdline;
 pub mod cpus;
+pub mod cpuset;
 pub mod error;
+pub mod fd;
+pub mod irq;
+pub mod net;
+pub mod pci;
 pub mod root;
 pub mod sys;
 pub mod task;

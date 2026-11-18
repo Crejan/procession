@@ -1,5 +1,5 @@
 //! What the model is told: the closed list `done`, `declined`, `expired`,
-//! `refused` (with its class), `unavailable`, `unknown`. Only words from this
+//! `refused` (with its class), `unavailable`, `failed`, `unknown`. Only words from this
 //! list ever reach the model; nothing a service or a transport said is copied.
 
 use super::transport::TransportError;
@@ -11,6 +11,9 @@ pub const MAX_ANSWER_TEXT: usize = 1024 * 1024;
 
 /// What the text of an `unknown` outcome adds.
 pub const UNKNOWN_TEXT: &str = "The call was sent, and whether it ran is not known. Before you repeat anything that changes something, find out whether it happened, by a query. Ask your person if you cannot tell.";
+
+/// What the text of a `failed` outcome adds: the action was started and did not complete.
+pub const FAILED_TEXT: &str = "The call was approved and the action was started, and it did not complete. There is no result, and something may have happened on the host. Do not repeat it blindly if it changes anything: find out what happened first, by a query, and ask your person if you cannot tell. The cause is in the service's log and the host's audit lines, under this call's identifier.";
 
 /// Why a service or `pact` refused.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -47,8 +50,12 @@ pub enum Outcome {
     Declined,
     Expired,
     Refused(Class),
-    /// Nobody could be asked, or nothing was done for a reason on the service's side.
+    /// Nobody could be asked, or nothing was done for a reason on the service's side. Trying again is safe.
     Unavailable,
+    /// The call was approved and the action was started, and it did not complete: no result, something may have
+    /// happened on the host. Distinct from `Unavailable` (nothing was done) and `Unknown` (only `pact` can say
+    /// it was sent without knowing whether it ran). Only a service says this one.
+    Failed,
     /// The call was sent; whether it ran is not known. Only `pact` makes this.
     Unknown,
 }
@@ -87,6 +94,7 @@ pub fn outcome_line(outcome: Outcome, id: Option<&CallId>) -> String {
         Outcome::Expired => ("expired", None, None),
         Outcome::Refused(c) => ("refused", Some(c.word()), None),
         Outcome::Unavailable => ("unavailable", None, None),
+        Outcome::Failed => ("failed", None, None),
         Outcome::Unknown => ("unknown", None, None),
     };
     o.insert("outcome".into(), json!(word));
@@ -99,14 +107,16 @@ pub fn outcome_line(outcome: Outcome, id: Option<&CallId>) -> String {
     if let Some(rc) = rc {
         o.insert("rc".into(), json!(rc));
     }
-    Value::Object(o).to_string()
+    super::canon::line(&Value::Object(o))
 }
 
 fn result(outcome: Outcome, id: Option<&CallId>, answer: Vec<String>) -> ModelResult {
     let mut texts = vec![outcome_line(outcome, id)];
     texts.extend(answer);
-    if outcome == Outcome::Unknown {
-        texts.push(UNKNOWN_TEXT.to_owned());
+    match outcome {
+        Outcome::Unknown => texts.push(UNKNOWN_TEXT.to_owned()),
+        Outcome::Failed => texts.push(FAILED_TEXT.to_owned()),
+        _ => {}
     }
     let is_error = !matches!(outcome, Outcome::Done { rc: 0 });
     ModelResult { outcome, texts, is_error }
@@ -163,6 +173,8 @@ pub fn from_response(response: &Value, id: &CallId) -> (ModelResult, Option<Stri
         Some("declined") => Outcome::Declined,
         Some("expired") => Outcome::Expired,
         Some("unavailable") => Outcome::Unavailable,
+        // Whatever else the service puts in it (a reason, a detail) is not passed on: the cause is in its own log.
+        Some("failed") => Outcome::Failed,
         Some("refused") => match word("reason").and_then(Class::from_word) {
             Some(c) => Outcome::Refused(c),
             None => {
@@ -211,6 +223,7 @@ mod tests {
             ("declined", "", Outcome::Declined),
             ("expired", "", Outcome::Expired),
             ("unavailable", "", Outcome::Unavailable),
+            ("failed", "", Outcome::Failed),
             ("refused", r#","reason":"not-allowed""#, Outcome::Refused(Class::NotAllowed)),
             ("refused", r#","reason":"invalid""#, Outcome::Refused(Class::Invalid)),
             ("refused", r#","reason":"try-later""#, Outcome::Refused(Class::TryLater)),
@@ -326,5 +339,52 @@ mod tests {
         );
         assert!(outcome_line(Outcome::Done { rc: 2 }, None).contains(r#""rc":2"#));
         assert_eq!(ModelResult::model_error("no")["isError"], true);
+    }
+
+    #[test]
+    fn failed_is_its_own_word_with_its_own_text_and_nothing_of_the_services() {
+        let r = map(&line("failed", ""), &[]);
+        assert_eq!(r.outcome, Outcome::Failed);
+        assert!(r.is_error);
+        assert_eq!(r.texts.len(), 2);
+        let first: Value = serde_json::from_str(&r.texts[0]).unwrap();
+        assert_eq!((first["outcome"].clone(), first["id"].clone()), (json!("failed"), json!(id().as_str())));
+        assert!(first.get("reason").is_none() && first.get("rc").is_none());
+        assert_eq!(r.texts[1], FAILED_TEXT);
+        // The text says what the model must do, and what it must not.
+        for needed in [
+            "did not complete",
+            "no result",
+            "something may have happened",
+            "Do not repeat it blindly",
+            "find out what happened first",
+            "audit lines",
+            "identifier",
+        ] {
+            assert!(FAILED_TEXT.contains(needed), "{needed}");
+        }
+        // Not `unavailable` (nothing was done) and not `unknown` (only `pact` says that).
+        assert_ne!(r.outcome, Outcome::Unavailable);
+        assert!(!FAILED_TEXT.contains("trying again is safe") && !FAILED_TEXT.contains("not known"));
+        // What a service adds to it (a reason, a code, a cause, further texts) never reaches the model.
+        let r =
+            map(&line("failed", r#","reason":"disk-on-fire","rc":9,"cause":"secret""#), &["detail from the service"]);
+        assert_eq!(r.outcome, Outcome::Failed);
+        let shown = r.texts.concat();
+        assert!(
+            !shown.contains("disk-on-fire")
+                && !shown.contains("secret")
+                && !shown.contains("detail from the service")
+                && !shown.contains("\"rc\""),
+            "{shown}"
+        );
+        assert_eq!(
+            outcome_line(Outcome::Failed, Some(&id())),
+            format!(r#"{{"id":"{}","outcome":"failed","type":"outcome"}}"#, id())
+        );
+        // The outcome word of another call is not this call's failure.
+        let other =
+            format!(r#"{{"type":"outcome","outcome":"failed","id":"{}"}}"#, "3f2b6c1e-8a57-4d0e-9b1a-5c2e7d9f0a12");
+        assert_eq!(map(&other, &[]).outcome, Outcome::Unknown);
     }
 }

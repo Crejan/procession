@@ -794,3 +794,61 @@ that the lookup succeeded for that connection. `pledge history` (text) prints `p
 `received` and `request` lines. Tests: unit (the three entries, the history line) and
 `real_approvals` against the real binary (uid equals the test's own, pid > 0, program is the test
 binary).
+
+## Step 6: pledge's connection to the broker (stage 2)
+
+**Built** (`config.rs` `broker`, `broker_state.rs`, `certs.rs`, `broker_link.rs`, wiring in
+`approvals.rs`, `agents.rs`, `control.rs`, `serve.rs`, `cli.rs`), as in
+`proposals/broker-connection.md` with the designer's decisions: blocking rustls (TLS 1.3, ring) on
+a link thread ticking every 50 ms; sign-in with the `connection` key (a new key purpose,
+`keys create connection`) over the exporter binding; standing verified as `broker` with the site CA,
+`accepted_by(person, nonce, last n)`; restrictions persisted in `broker-state.json`; certificates
+of the approval keys verified by pledge against the CA (ssh-keygen) and re-verified on load; an
+approval carries the certificate; registration before the bundle and withdrawal told to the broker
+and followed until stored; backoff 1 s to 60 s with jitter; `carried` ignored. New codes
+`broker-unavailable` and `broker-refused`. Stage 1 behaves as before when `broker` is absent.
+
+**Tests.** `broker_tests.rs` (14): the session driven line by line with the broker played by the
+tests (real ssh-keygen signatures, a throwaway CA, real approvals checked against the CA's one
+line). `broker_tls_tests.rs` (7): p-age's real `Broker`, `serve_tls` and `serve_connection` as a
+dev-dependency, real TLS 1.3 both sides over Unix sockets: sign-in and standing, registration, a
+service's request answered through the broker with the approval verified against the site CA and
+the broker's clearance read, repeat from the store, a delegation the site does not certify refused
+(`broker-refused`), a person with another key never getting in and pledge trying again, a cut
+connection made again, a block and its lifting, a withdrawal stored at the broker. These show the
+two copies agree. **Never run over TCP:** `TcpStream::connect_timeout`, name resolution of
+`address`, a real network's timeouts and the `TCP_NODELAY` path; the code after the connect is the
+same generic `Wire` code the tests run. The service side of the test is p-age's in-memory
+`serve_connection`, not a service process.
+
+**What p-act lacks (reported, not written).** `ToPledge` has no `carried` variant (the line is read
+as raw JSON and ignored); no verifier for an approval's certificate (pledge's `certs.rs` does it with
+ssh-keygen); the TLS exporter label and version constants and a client configuration live in p-age
+(tokio), so pledge has about 15 lines of its own rustls client config; `ConnectionDocument::sign`
+needs a key file, so pledge signs through its key holder and builds the SSHSIG itself
+(`sign_connection_document`; `sshsig.rs` stays until the signer seam is merged).
+`cargo clippy -p p-act --features pact` stops on a `collapsible_if` in `pact/mcp.rs:172`
+(p-ledge itself is clean with `--no-deps`).
+
+## Integration follow-ups: peer, seam, blocked keys
+
+- **`p_act::peer`** replaces `peer.rs`/`Throttle` of pledge (what stays is `peer::Seen`, the record's shape).
+  Behaviour unchanged: all three sockets drop an unreadable peer; `agent.sock` and `control.sock` also another
+  user (`Policy::OwnUser`); `service.sock` takes any readable user (`AnyReadable`); log lines are word for word
+  (label `pledge`). One difference of no consequence: the program path is now read for every admitted peer
+  (also on `control.sock`), where it was read only on `agent.sock`. `p-robe` stage 1 passed unchanged.
+- **The signer seam** (`p_act::sshsig`): pledge's key holder is a `KeyHolder` (`seam.rs`) behind `HolderSigner`;
+  approvals, the connection document and the certificate probe go through it; `sshsig.rs` is deleted. The holder
+  still answers with an SSH signature blob; `seam.rs` reads it into a `RawSignature` and `p-act` writes the file.
+  **Which writer each recorded run used:** every run recorded up to this commit (the owner's Stage A, the Linux
+  Debian run, the macOS sshd run) used pledge's own `sshsig.rs`; runs from this commit on use `p-act`'s. For an
+  Ed25519 key the bytes are the same: pinned by `seam::tests::for_an_ed25519_key_the_approval_is_byte_for_byte_…`
+  against a copy of the old writer. ECDSA signatures are random, so only verification (`ssh-keygen -Y verify`)
+  can be pinned for them, and is by the existing tests.
+- **Blocked keys** (designer): a blocked approval key is not signed with; the agent hears `blocked`, the record's
+  `request` entry carries `why` with pledge's own exact reason (which key, blocked by the broker) and
+  `pledge history` prints it. A blocked delegation key issues nothing (`agents.start` is `refused`, event
+  `issuing-refused`, a line on stderr) and nothing under its delegations is signed. A sign-in the broker
+  refuses with `error blocked` is its own ending (`End::Blocked`): event `broker-signin-refused` and a line on
+  stderr once, then a retry every 10 minutes, not the 1 s to 60 s backoff.
+- `control-sock.md` section 8: the note on `stage2-mac.md` 8.5 (no protocol change).

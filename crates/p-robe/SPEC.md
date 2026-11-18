@@ -103,7 +103,9 @@ approval dialog and what the site's sudo rule may name are derived from that
 table.
 
 - **Built on this workspace.** A verb calls `prover`, `pusher`, `player`,
-  `plumber` or `preserve` and passes their JSON through.
+  `plumber` or `preserve`. **The dispatcher wraps what the tool prints; the
+  tool keeps its own format and gets no second one.** How, for `prover`, is in
+  "A verb that runs `prover`" below.
 - **Rated for the worst case** (`doc/approvals.md`, R4). The table holds
   each verb's worst rating over every parameter it accepts. For a concrete
   call the service may rate lower only by a rule that stands in the table
@@ -113,6 +115,74 @@ table.
   output. Rated at the top of every scale always, so it is never approved
   automatically. It exists so that a missing verb does not become a reason
   to give an agent a login. Stage 4.
+
+## A verb that runs `prover`
+
+`prover` prints **one JSON object** (its own SPEC: `schema_version`, `subcommand`,
+`host`, `started_at`, `mode`, `cost`, `unreadable`, `records`, `restored`,
+`findings`) and exits 0, 1, 2, 3 or 4. The dispatcher is the boundary: it owns
+the byte cap and the line convention, and `prover` is changed for neither.
+
+**The row** names the whole fixed command: the absolute path (`/usr/local/bin/prover`),
+the words that never change (`irq --format json`), a map from each agent-facing
+parameter to the flag it becomes, the `subcommand` the object must carry, and
+which exit codes are results. Nothing from an agent is placed in the command but
+the mapped values, as plain words the dispatcher puts after the flag it chose; no
+argument of an agent starts with `-`, as everywhere. The tool runs with a cleared
+environment, no standard input, as root through the same sudo rule.
+
+**The agent-facing parameters**, plain words (`key=value`), each a number in a range
+the row states:
+
+| Verb | Parameter | Becomes | Range |
+|---|---|---|---|
+| `rt procs` | `max=N` | `--max N` | 1 to 10000 |
+| `rt irq` | `duration=N` (seconds) | `--duration Ns` | 1 to 30 |
+| `rt irq` | `top=N` | `--top N` | 1 to 1000 |
+
+Both are optional and contribute nothing to the rating (`prover procs` and
+`prover irq` read; they change nothing).
+
+**The dispatcher reads the object with a size limit of its own** (4 MiB), parses it
+and checks it is the object the row expects (`schema_version` 1, `subcommand` the
+row's). It then writes the output convention, one JSON object per line:
+
+1. the header (`type` `header`, `schema_version`, `noun`, `verb`, `host`, `ts`) with
+   the tool's `subcommand`, `started_at`, `mode` and `cost` added;
+2. one line per entry of `unreadable`: `{"type":"unreadable","source":...,"reason":...}`
+   (what the tool could not read, so that an agent does not take a hole for an empty
+   place);
+3. one line per entry of `records`, **as the tool wrote it** (it carries its own `type`);
+4. one line per entry of `restored` (`type` `restored`);
+5. one line per entry of `findings`: `{"type":"finding","id":...,"severity":...,
+   "subject":...,"evidence":...,"recommendation":...,"changes":...}`;
+6. the trailer: `{"type":"trailer","rc":N,"result":"info|warnings|critical|failed-diagnostic",
+   "records":n,"findings":n,"unreadable":n,"truncated":false}`.
+
+The types `header`, `unreadable`, `restored`, `finding`, `trailer` and `error` are the
+dispatcher's: a record of the tool with one of them is a disagreement (below). The
+cap of 1 MiB on the answer (`ANSWER_CAP`) applies to these lines as to any answer: past it
+the output ends with a `truncated` record and the trailer's `truncated` is `true`.
+
+**Exit codes.** The dispatcher's own exit code says only what the dispatcher did: 0 it
+ran, 64 refused, 75 busy, 76 expired, 3 no audit line could be written. **The tool's
+code never becomes the dispatcher's**; it travels in the output, as `rc`:
+
+| Tool exit | The call | In the output |
+|---|---|---|
+| 0, 1, 2 (the row's result codes: nothing above info, warnings, critical) | `done` | the lines above, trailer `rc` 0/1/2 and `result` `info`/`warnings`/`critical` |
+| 3 (the diagnostic itself failed) | `done` | the lines the tool gave, trailer `rc` 3 and `result` `failed-diagnostic`: an agent must not read an empty answer as "all fine" |
+| 4, any other code, a signal, a timeout | **failed** | no tool lines; one `error` record with a `code` (`tool-refused` for 4: the row and the tool disagree about the arguments; `tool-failed`, `tool-killed`, `tool-timeout`), then the trailer with `result` `failed` |
+| not one JSON object, over the limit, the wrong `subcommand` or `schema_version`, a record of a reserved type | **failed** | no tool lines; one `error` record (`not-an-object`, `object-too-large`, `wrong-object`, `reserved-type`), trailer `result` `failed` |
+
+A failed call never ends with half an output. The dispatcher's exit code for a verb that was
+started and did not produce a usable result is **70** (decided; not 2): a tool code outside the row's
+result codes, a signal, a timeout, a bad or too large object, a reserved record type. The `done` audit
+line carries `rc=70` and `cause=` (today `verb-code:N` and `answer-lost`; `tool-killed`, `tool-timeout`,
+`not-an-object`, `object-too-large`, `wrong-object`, `reserved-type` with `prover`). The service tells the
+agent `failed` (not `unavailable`: that is only for a verb that certainly did not start) and logs the cause
+under the call's identifier. A verb of this program, until `prover` rows exist, is on the same rule: a code
+other than 0 is 70.
 
 The first table (`src/main.rs`); the ratings are proposals:
 

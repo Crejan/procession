@@ -1,0 +1,26 @@
+[package]
+name = "p-ermit"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.91"
+description = "Checks a settings file (regular, owned by root or the running user, not writable by group or others, size-limited) and reads who is on the other end of a Unix socket"
+license = "MIT OR Apache-2.0"
+readme = "README.md"
+keywords = ["settings", "permissions", "unix", "peercred", "toml"]
+categories = ["os::unix-apis", "config"]
+include = ["src/**", "README.md"]
+# Publishing on crates.io is not decided; the crate is written so that it could be (its own licence fields, a README, no
+# path-only dependency, libc only by default).
+publish = false
+
+[features]
+# A reader for TOML settings files (`read_toml`, `read_toml_optional`, `parse_toml`): `toml` 0.9 and `serde`.
+toml = ["dep:toml", "dep:serde"]
+
+[dependencies]
+libc = "0.2"
+serde = { version = "1", features = ["derive"], optional = true }
+toml = { version = "0.9", default-features = false, features = ["std", "parse", "serde"], optional = true }
+
+[dev-dependencies]
+tempfile = "3"

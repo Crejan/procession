@@ -52,7 +52,9 @@ Two types besides `error`:
   `already-exists`, `refused` (a rule says no: the program is blocked, the
   ceiling set above what a person may set), `presence-denied` (the presence
   check failed or the person said no), `unavailable` (no terminal, no key
-  hardware, record not writable). Nothing else is put into a reply: no
+  hardware, record not writable), `broker-unavailable` (stage 2: no connection
+  to the broker, no answer in 10 s, or it said `unavailable`: nothing was issued, try
+  again), `broker-refused` (the broker refused the delegation). Nothing else is put into a reply: no
   paths, no text from outside.
 
 ## 4. Commands
@@ -126,3 +128,47 @@ Not specified now; nothing in sections 1 to 5 stands in its way.
 3. **`programs.admit` needs a terminal.** Typing the name stops a program
    that can only write to the socket. In the hardware form the code
    signature check covers it too. *Proposal:* as written.
+
+## 8. What a desktop front end needs: `stage2-mac.md` section 8.5, point by point
+
+A note for the designer. Nothing in the protocol is changed. "Today" is what is built.
+
+1. **Everything a front end shows comes over the socket.** *Not met.* The record is read as a file by
+   `pledge history`; there is no command for it. *Change:* a `history` command (a page of entries by
+   `seq`, the same JSON as the file) and the same for `agents.list`'s withdrawn state, which is already a command.
+2. **State, then events.** *Half met.* `status`, `keys.list`, `programs.list`, `agents.list` give state;
+   there are no events (section 6 is still "later"). *Change:* `subscribe`, and a rule that an event is
+   never the only carrier of a fact (the dialog that is open, the broker's state, a withdrawal not yet stored
+   at the broker would be in `status`).
+3. **Codes and values, not sentences.** *Met*, for replies and errors (closed codes). The record's `why` of a
+   refusal (`approvals.rs`) is a short English sentence of pledge's own, for the person on the command line;
+   a front end would want a code beside it. *Change:* add `why_code`; keep the sentence.
+4. **No nouns of one platform.** *Met today* (`form` is `files`; nothing names Touch ID). *Change:* `status`
+   says per key who does the presence check.
+5. **A dialog is a message, and the protocol says what an answer is worth.** *Not met.* Dialogs are
+   `dialog::Dialogs`, a trait with a terminal implementation; nothing crosses a socket. *Change:* the
+   events of 2, plus a command to answer; the decided dialog program (a small program of pledge's bundle,
+   started by `pledge serve`, holding no key and deciding nothing) is a second implementation of
+   `Dialogs` behind the seam that exists, so it needs no change to the socket.
+6. **Long work has an identifier, progress and a cancel; closing cancels only what was asked that way.**
+   *Partly.* `agents.start`, `keys.create`, `keys.retire` wait for the person and a closed connection cancels
+   them (section 3); that is the right rule for these. There is no other long work in pledge. *Change:*
+   an explicit `cancel` by `ref` for a command that waits.
+7. **Several front ends at once.** *Not met.* Each connection serves its own commands; there is no broadcast.
+   A question open in the terminal of `serve` is not shown elsewhere. *Change:* events to every subscriber,
+   a question answered once and the others told.
+8. **Nothing rests on the peer's code signature alone.** *Met in the form built.* The peer is the person's
+   user (`p_act::peer::Policy::OwnUser`) and says so; what widens something has its own check (section 4).
+9. **A front end older or newer than its daemon.** *Partly.* `schema_version` and unknown members refused are
+   there. *Change:* `status` lists the command names this daemon has.
+10. **Paths are the daemon's.** *Met.* No command takes a path from the front end; the bundle comes back as bytes
+    and only the command line writes it.
+
+**A rule per command and peer.** *Cannot be said today.* The one rule is the socket's: the peer is the
+person's own user, for every command (and for `agent.sock`; `service.sock` takes any readable user). With
+`p_act::peer` (`Peer` with uid, gid, pid, program) the information for a rule is there, but pledge has no
+table of "command, peer". If preserve's app is to get exactly `keys.create` for a bound key and `keys.list`,
+the change is small: a second socket (or a check after `accept`) with a list of allowed command names and, for
+`keys.create`, a required `purpose` of `bound`, per peer program or, on the Mac, per code signature. In the
+development form the program is a path and protects nothing; the rule means something only where the peer is
+identified by code signature (hardware form), as with the rest of that form.

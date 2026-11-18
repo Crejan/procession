@@ -1,0 +1,49 @@
+{
+  "schema_version": 1,
+  "subcommand": "hung",
+  "host": "testhost",
+  "started_at": "2026-11-06T21:20:00Z",
+  "mode": "observe",
+  "cost": "light",
+  "unreadable": [],
+  "records": [
+    {"type":"detector","hung_task_timeout_secs":"120","hung_task_warnings":"10"},
+    {"type":"task","pid":50,"tid":50,"comm":"rsync","state":"D","uid":1000,"ppid":1,"wait_class":"nfs_rpc","d_for_at_least_s":2,"exe":"/usr/bin/rsync","cwd":"/home/lab/proj","mount":"/home/lab","samples":[{"wchan":"rpc_wait_bit_killable","stack":["[<0>] rpc_wait_bit_killable+0x24/0x90 [sunrpc]","[<0>] __rpc_execute+0x1/0x2 [sunrpc]","[<0>] nfs4_proc_getattr+0x1/0x2 [nfsv4]","[<0>] do_syscall_64+0x5b/0x1d0"]},{"wchan":"rpc_wait_bit_killable","stack":["[<0>] rpc_wait_bit_killable+0x24/0x90 [sunrpc]","[<0>] __rpc_execute+0x1/0x2 [sunrpc]","[<0>] nfs4_proc_getattr+0x1/0x2 [nfsv4]","[<0>] do_syscall_64+0x5b/0x1d0"]}]},
+    {"type":"task","pid":51,"tid":51,"comm":"make","state":"D","uid":1000,"ppid":1,"wait_class":"lock","d_for_at_least_s":null,"exe":null,"cwd":"/tmp/build","mount":null,"samples":[{"wchan":"mutex_lock","stack":["[<0>] __mutex_lock+0x1/0x2","[<0>] do_syscall_64+0x5b/0x1d0"]},{"wchan":"mutex_lock","stack":["[<0>] __mutex_lock+0x1/0x2","[<0>] do_syscall_64+0x5b/0x1d0"]}]},
+    {"type":"summary","d_state_first":3,"hung":2,"nfs_waiters":1,"shown":2,"truncated":false,"by_class":{"nfs_rpc":1,"lock":1}}
+  ],
+  "restored": [],
+  "findings": [
+    {
+      "id": "hung-tasks",
+      "severity": "crit",
+      "subject": {
+        "kind": "host"
+      },
+      "evidence": [
+        {
+          "name": "tasks_in_d_both_samples",
+          "value": 2
+        },
+        {
+          "name": "window_s",
+          "value": 2
+        },
+        {
+          "name": "class_nfs_rpc",
+          "value": 1
+        },
+        {
+          "name": "class_lock",
+          "value": 1
+        },
+        {
+          "name": "nfs_mount",
+          "value": "/home/lab"
+        }
+      ],
+      "recommendation": "tasks stayed in uninterruptible sleep across both samples; NFS/RPC waits mean the server or mount is not answering, lock waits name a local holder in the stack",
+      "changes": []
+    }
+  ]
+}

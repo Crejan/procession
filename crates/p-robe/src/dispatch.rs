@@ -7,14 +7,16 @@
 //! (and, later, a program started from an argument vector).
 //!
 //! Exit codes: 0 ok, 3 unavailable (a verb that cannot run here, or no audit
-//! line could be written), 64 refused, 75 busy; a verb's own code otherwise.
+//! line could be written), 64 refused, 70 failed (the verb was started and gave no usable result;
+//! the `done` audit line says which case, in `cause`), 75 busy, 76 expired. A verb's own code never
+//! becomes the dispatcher's: a code other than 0 is a failure (70).
 
 use std::ffi::OsString;
 use std::io::Write;
 use std::path::PathBuf;
 use std::time::Instant;
 
-use crate::answer::{ANSWER_CAP, Answer};
+use crate::answer::{ANSWER_CAP, Answer, Full};
 use crate::audit::{self, Audit, CLIP};
 use crate::json::Record;
 use crate::lock::{self, Fault, Taken};
@@ -25,6 +27,9 @@ use p_act::rating::Rating;
 
 pub const RC_UNAVAILABLE: u8 = 3;
 pub const RC_REFUSED: u8 = 64;
+/// The verb was started and did not produce a usable result. Not a verb's own code; `cause` in the
+/// `done` audit line says which case it was.
+pub const RC_FAILED: u8 = 70;
 pub const RC_BUSY: u8 = 75;
 /// The call's deadline passed before its verb could start (`--until`).
 pub const RC_EXPIRED: u8 = 76;
@@ -394,11 +399,23 @@ impl<'a> Dispatcher<'a> {
             audit: self.audit.describe(),
         };
         let mut answer = Answer::new(out, self.cap);
-        let rc = run(&env, &call.args, &mut answer).unwrap_or(0);
+        // A verb that stops because the answer is full ends cleanly (the answer says `truncated`); one
+        // whose reader is gone, or whose code is not 0, did not give a usable result.
+        let result = run(&env, &call.args, &mut answer);
+        let cause = match result {
+            _ if answer.lost() => Some("answer-lost".to_string()),
+            Ok(0) => None,
+            Ok(code) => Some(format!("verb-code:{code}")),
+            Err(Full) => None,
+        };
+        let rc = if cause.is_some() { RC_FAILED } else { 0 };
         let (rc_text, took, bytes) =
             (rc.to_string(), format!("{:.2}s", started.elapsed().as_secs_f64()), answer.bytes().to_string());
         let mut done = fields.to_vec();
         done.extend([("rc", rc_text.as_str()), ("duration", took.as_str()), ("bytes", bytes.as_str())]);
+        if let Some(cause) = cause.as_deref() {
+            done.push(("cause", cause));
+        }
         if answer.truncated() {
             done.push(("truncated", "true"));
         }
@@ -723,6 +740,58 @@ mod tests {
         assert!(text.len() <= 600, "{}", text.len());
         assert!(text.lines().last().unwrap().starts_with("{\"type\":\"truncated\""), "{text}");
         assert!(sink.lines.borrow().last().unwrap().contains("truncated=true"));
+    }
+
+    // -- a verb that was started and gave no usable result: 70 ---------------------------------------
+
+    /// A reader that is gone.
+    #[cfg(feature = "test-verbs")]
+    struct Gone;
+    #[cfg(feature = "test-verbs")]
+    impl Write for Gone {
+        fn write(&mut self, _: &[u8]) -> std::io::Result<usize> {
+            Err(std::io::ErrorKind::BrokenPipe.into())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    #[cfg(feature = "test-verbs")]
+    fn done_line(outcome: &Outcome) -> &str {
+        outcome.lines.iter().find(|l| l.starts_with("event=done ")).expect("a done line")
+    }
+
+    #[cfg(feature = "test-verbs")]
+    #[test]
+    fn a_verb_code_other_than_0_is_70_and_the_done_line_says_the_code() {
+        let call_id = "3f2b6c1e-8a57-4d0e-9b1a-5c2e7d9f0a11";
+        for (args, cause) in [(vec![], "verb-code:2"), (vec!["1"], "verb-code:1"), (vec!["64"], "verb-code:64")] {
+            let mut argv = vec!["--call", call_id, "test", "fail"];
+            argv.extend(args.clone());
+            let outcome = call(&sudo("jan"), &argv);
+            assert_eq!(outcome.rc, RC_FAILED, "{args:?}: {}", outcome.err);
+            let line = done_line(&outcome);
+            assert!(
+                line.contains(" rc=70 ") && line.contains(&format!(" cause={cause}")) && line.contains(call_id),
+                "{line}"
+            );
+            assert!(outcome.lines.iter().any(|l| l.starts_with("event=start ")), "it was started: {:?}", outcome.lines);
+        }
+        let ok = call(&sudo("jan"), &["test", "fail", "0"]);
+        assert_eq!(ok.rc, 0);
+        assert!(!done_line(&ok).contains("cause="), "{}", done_line(&ok));
+    }
+
+    #[cfg(feature = "test-verbs")]
+    #[test]
+    fn a_reader_that_is_gone_is_70_and_a_clean_cut_at_the_cap_is_not() {
+        let (sink, dir) = (Memory::default(), crate::testdir::new("locks"));
+        let mut err = Vec::new();
+        let rc = Dispatcher::new(&sink, dir).run(&sudo("jan"), &words(&["test", "echo"]), &mut Gone, &mut err);
+        assert_eq!(rc, RC_FAILED);
+        assert!(sink.lines.borrow().last().unwrap().contains(" cause=answer-lost"), "{:?}", sink.lines);
+        // `every_answer_is_capped`: cut cleanly, with the note, it is a result.
     }
 
     // -- waiting for the lock, and the deadline -----------------------------------------------

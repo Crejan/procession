@@ -1,0 +1,8 @@
+           CPU0       CPU1       CPU2       CPU3
+  9:        100          0          0          0   IO-APIC    9-fasteoi   acpi
+125:          0          0        500          0  IR-PCI-MSIX-0000:04:00.0    0-edge      lan0-TxRx-0
+126:          0          0          0       1000  IR-PCI-MSIX-0000:04:00.0    1-edge      lan0-TxRx-1
+127:          0          0          0          0  IR-PCI-MSIX-0000:05:00.0    0-edge      nvme0q1
+LOC:       1000       1000       1000       1000   Local timer interrupts
+CAL:         10         10         10         10   Function call interrupts
+200:          0          0          0          0  IR-PCI-MSIX-0000:05:00.0    0-edge      vfio-msix[0](0000:05:00.0)

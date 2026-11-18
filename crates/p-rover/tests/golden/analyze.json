@@ -1,0 +1,227 @@
+{
+  "schema_version": 1,
+  "subcommand": "analyze",
+  "host": "testhost",
+  "started_at": "2026-11-06T21:20:00Z",
+  "mode": "observe",
+  "cost": "light",
+  "unreadable": [
+    {
+      "source": "ethtool lan0",
+      "reason": "no ethtool transport in this build: driver counters, rings, coalescing, channels, EEE and offloads are not reported"
+    }
+  ],
+  "records": [
+    {"type":"host","online":"0-3","isolated":"2-3","nohz_full":"2-3","rcu_nocbs":"2-3","housekeeping":"0-1","sched_rt_runtime_us":"-1","irqbalance":true,"governors":["performance","powersave"],"cstates":[{"name":"POLL","disabled":false},{"name":"C6","disabled":true}],"cmdline_rt":{"console":"ttyS0,115200","irqaffinity":"0-1","isolcpus":"managed_irq,domain,2-3","nohz_full":"2-3","rcu_nocbs":"2-3"}},
+    {"type":"process","pid":100,"comm":"master","exe":"/opt/master/bin/master","uid":1000,"vm_rss_kb":20480,"vm_lck_kb":4096,"threads":4},
+    {"type":"thread","tid":100,"comm":"master","policy":"fifo","rt_priority":80,"affinity":"2","last_cpu":2,"voluntary_switches":100,"involuntary_switches":5,"utime_ticks":0,"stime_ticks":0,"syscall":"clock_nanosleep(relative)","declared_critical":false,"class":null},
+    {"type":"thread","tid":101,"comm":"master-io","policy":"fifo","rt_priority":70,"affinity":"2-3","last_cpu":2,"voluntary_switches":50,"involuntary_switches":1,"utime_ticks":0,"stime_ticks":0,"syscall":"clock_nanosleep(absolute)","declared_critical":false,"class":null},
+    {"type":"thread","tid":102,"comm":"master-aux","policy":"rr","rt_priority":60,"affinity":"0-3","last_cpu":1,"voluntary_switches":10,"involuntary_switches":2,"utime_ticks":0,"stime_ticks":0,"syscall":null,"declared_critical":false,"class":null},
+    {"type":"thread","tid":103,"comm":"helper","policy":"other","rt_priority":null,"affinity":"0-3","last_cpu":2,"voluntary_switches":3,"involuntary_switches":0,"utime_ticks":0,"stime_ticks":0,"syscall":null,"declared_critical":false,"class":null},
+    {"type":"endpoint","fd":3,"endpoint":"packet","ifindex":3,"interface":"lan0","proto":"0x88a4","port":null,"path":null,"pci":null},
+    {"type":"endpoint","fd":4,"endpoint":"udp","ifindex":null,"interface":null,"proto":null,"port":8080,"path":null,"pci":null},
+    {"type":"endpoint","fd":5,"endpoint":"vfio","ifindex":null,"interface":null,"proto":null,"port":null,"path":"/dev/vfio/12","pci":"0000:05:00.0"},
+    {"type":"endpoint","fd":6,"endpoint":"device","ifindex":null,"interface":null,"proto":null,"port":null,"path":"/dev/EtherCAT0","pci":null},
+    {"type":"interface","name":"lan0","ifindex":3,"operstate":"up","carrier":true,"speed_mbps":1000,"duplex":"full","mtu":1500,"address":"aa:bb:cc:00:11:22","carrier_changes":2,"admin_up":true,"driver":"igb","pci":"0000:04:00.0","rx_queues":2,"tx_queues":2,"irqs":[125,126],"attached":"kernel","reason":"packet socket","queues":[{"index":0,"irq":125,"name":"lan0-TxRx-0","irq_affinity":"2-3","irq_effective_affinity":"2","irq_thread":null},{"index":1,"irq":126,"name":"lan0-TxRx-1","irq_affinity":"0-1","irq_effective_affinity":"1","irq_thread":{"tid":12,"policy":"fifo","prio":50}}],"coalesce_rx_usecs":null,"eee_enabled":null},
+    {"type":"kernel_bypass","pci":"0000:05:00.0","driver":"vfio-pci","attached":"vfio-pci","via":"vfio","tied_to_process":true,"irqs":[{"index":null,"irq":200,"name":"vfio-msix[0](0000:05:00.0)","irq_affinity":"0-3","irq_effective_affinity":"1","irq_thread":null}],"limits":"no netdev, no net tracepoints, no AF_PACKET: thread classes, memory, the device's IRQ placement and host settings are reported; per-interface flow analysis is not possible"},
+    {"type":"kernel_bypass","pci":null,"driver":null,"attached":"kernel","via":"igh_device","tied_to_process":true,"irqs":[],"limits":"the IgH master drives the NIC through its own kernel driver: no netdev, no net tracepoints, no AF_PACKET for that NIC"},
+    {"type":"summary","backend":"static","tracing":false,"threads_listed":4,"unresolved_packet_sockets":0,"not_available":"thread classes, sleep arguments over time, cycle chain, protocol decoding, faults per activation and deadline-miss need tracing (a later phase)"}
+  ],
+  "restored": [],
+  "findings": [
+    {
+      "id": "irqbalance",
+      "severity": "warn",
+      "subject": {
+        "kind": "host"
+      },
+      "evidence": [],
+      "recommendation": "irqbalance is running and moves IRQs at will; disable it on a realtime host and pin IRQs",
+      "changes": []
+    },
+    {
+      "id": "relative-sleep",
+      "severity": "warn",
+      "subject": {
+        "kind": "thread",
+        "tid": 100,
+        "comm": "master"
+      },
+      "evidence": [
+        {
+          "name": "syscall_nr",
+          "value": 230
+        },
+        {
+          "name": "seen",
+          "value": "once, in a snapshot"
+        }
+      ],
+      "recommendation": "the thread sleeps for a relative time, so every activation drifts by its own runtime; sleep until an absolute time (clock_nanosleep with TIMER_ABSTIME)",
+      "changes": []
+    },
+    {
+      "id": "rt-on-housekeeping",
+      "severity": "warn",
+      "subject": {
+        "kind": "thread",
+        "tid": 102,
+        "comm": "master-aux"
+      },
+      "evidence": [
+        {
+          "name": "cpus_allowed",
+          "value": "0-3"
+        },
+        {
+          "name": "housekeeping_allowed",
+          "value": "0-1"
+        }
+      ],
+      "recommendation": "an RT thread may run on a housekeeping CPU; restrict its affinity to the isolated set",
+      "changes": [
+        {
+          "kind": "set_affinity",
+          "tid": 102,
+          "from": "0-3",
+          "to": "2-3"
+        }
+      ]
+    },
+    {
+      "id": "shared-rt-core",
+      "severity": "warn",
+      "subject": {
+        "kind": "thread",
+        "tid": 101,
+        "comm": "master-io"
+      },
+      "evidence": [
+        {
+          "name": "cpu",
+          "value": 2
+        },
+        {
+          "name": "threads_on_cpu",
+          "value": [
+            100,
+            101
+          ]
+        }
+      ],
+      "recommendation": "two RT threads of the process run on one CPU, so one waits behind the other; give each its own isolated CPU",
+      "changes": [
+        {
+          "kind": "set_affinity",
+          "tid": 101,
+          "from": "2-3",
+          "to": "3"
+        }
+      ]
+    },
+    {
+      "id": "no-mlock",
+      "severity": "warn",
+      "subject": {
+        "kind": "host"
+      },
+      "evidence": [
+        {
+          "name": "vm_lck_kb",
+          "value": 4096
+        },
+        {
+          "name": "vm_rss_kb",
+          "value": 20480
+        }
+      ],
+      "recommendation": "part of the process's memory is not locked: a page fault in a cyclic activation costs far more than the period allows; call mlockall(MCL_CURRENT | MCL_FUTURE) at start",
+      "changes": []
+    },
+    {
+      "id": "irq-off-core",
+      "severity": "warn",
+      "subject": {
+        "kind": "irq",
+        "irq": 126,
+        "name": "lan0-TxRx-1"
+      },
+      "evidence": [
+        {
+          "name": "interface",
+          "value": "lan0"
+        },
+        {
+          "name": "irq_effective",
+          "value": "1"
+        },
+        {
+          "name": "thread_cpus",
+          "value": "2"
+        }
+      ],
+      "recommendation": "the receive IRQ of the process's interface is delivered to a CPU the application thread does not run on; pin it to the thread's CPU",
+      "changes": [
+        {
+          "kind": "set_irq_affinity",
+          "irq": 126,
+          "from": "0-1",
+          "to": "2"
+        }
+      ]
+    },
+    {
+      "id": "irq-below-app",
+      "severity": "warn",
+      "subject": {
+        "kind": "irq",
+        "irq": 126,
+        "name": "lan0-TxRx-1"
+      },
+      "evidence": [
+        {
+          "name": "interface",
+          "value": "lan0"
+        },
+        {
+          "name": "irq_thread_prio",
+          "value": 50
+        },
+        {
+          "name": "app_prio",
+          "value": 80
+        }
+      ],
+      "recommendation": "the IRQ thread runs at a lower priority than the application thread it feeds and is preempted by it; raise it above",
+      "changes": [
+        {
+          "kind": "set_irq_thread_priority",
+          "irq": 126,
+          "tid": 12,
+          "from": 50,
+          "to": 81
+        }
+      ]
+    },
+    {
+      "id": "multi-queue",
+      "severity": "warn",
+      "subject": {
+        "kind": "interface",
+        "name": "lan0"
+      },
+      "evidence": [
+        {
+          "name": "rx_queues",
+          "value": 2
+        },
+        {
+          "name": "tx_queues",
+          "value": 2
+        }
+      ],
+      "recommendation": "the interface has several queues, so a frame's IRQ may land on any CPU the hash picks; reduce channels to 1 for a cyclic flow",
+      "changes": []
+    }
+  ]
+}

@@ -38,8 +38,12 @@ pub enum Outcome {
     Declined,
     Expired,
     Refused(Why),
-    /// Nobody could be asked, or nothing was done for a reason on this side.
+    /// Nobody could be asked, or nothing was done for a reason on this side: **certainly nothing was
+    /// started**.
     Unavailable,
+    /// The call was carried out and did not complete: no result. The exact cause is in the service's log and
+    /// the host's audit lines under the call's identifier.
+    Failed,
 }
 
 impl Outcome {
@@ -51,6 +55,7 @@ impl Outcome {
             Outcome::Expired => "expired",
             Outcome::Refused(_) => "refused",
             Outcome::Unavailable => "unavailable",
+            Outcome::Failed => "failed",
         }
     }
 
@@ -61,6 +66,36 @@ impl Outcome {
             Outcome::Refused(why) => Some(why.word()),
             _ => None,
         }
+    }
+}
+
+/// What an agent is told of how the dispatcher ended, and the exact cause for the log.
+///
+/// `unavailable` only where the verb certainly did not start (sudo refused, the dispatcher refused, was
+/// busy or found the deadline past, or said it could not write its audit line); `failed` wherever it
+/// may have: the dispatcher's 70, a signal, the run limit, a code nobody defined.
+#[must_use]
+pub fn dispatcher(run: &crate::runner::RunOutput) -> (Outcome, String) {
+    use crate::dispatch::{RC_BUSY, RC_EXPIRED, RC_FAILED, RC_REFUSED, RC_UNAVAILABLE};
+    let said = |outcome: Outcome, exact: &str| (outcome, exact.to_string());
+    if run.timed_out {
+        return said(Outcome::Failed, "run-limit");
+    }
+    if let Some(signal) = run.signal {
+        return (Outcome::Failed, format!("dispatcher-signal:{signal}"));
+    }
+    match run.rc {
+        0 => said(Outcome::Done { rc: 0, answer: run.stdout.clone() }, "ran"),
+        RC_REFUSED => said(Outcome::Refused(Why::NotAllowed), "dispatcher-refused"),
+        RC_UNAVAILABLE => said(Outcome::Unavailable, "dispatcher-unavailable"),
+        RC_BUSY => said(Outcome::Refused(Why::TryLater), "dispatcher-busy"),
+        // Could not start before the deadline: nothing ran, and the call is over: expired, not try-later.
+        RC_EXPIRED => said(Outcome::Expired, "dispatcher-deadline"),
+        RC_FAILED => said(Outcome::Failed, "dispatcher-failed"),
+        // sudo's own exit code when it will not run the program (no rule, no password): the dispatcher
+        // never gives 1.
+        1 => said(Outcome::Unavailable, "sudo-refused"),
+        rc => (Outcome::Failed, format!("dispatcher-code:{rc}")),
     }
 }
 
@@ -155,6 +190,33 @@ mod tests {
         }
         assert_eq!(word(&broker(BrokerReason::Unknown)), "refused/not-allowed");
         assert_eq!(word(&refusal(Refused::Unknown).0), "refused/not-allowed");
+    }
+
+    fn ran(rc: u8) -> crate::runner::RunOutput {
+        crate::runner::RunOutput { rc, timed_out: false, signal: None, stdout: "{\"type\":\"header\"}\n".into() }
+    }
+
+    #[test]
+    fn what_the_dispatcher_did_is_unavailable_only_where_nothing_was_started() {
+        for (rc, agent, exact) in [
+            (0, "done", "ran"),
+            (3, "unavailable", "dispatcher-unavailable"),
+            (64, "refused/not-allowed", "dispatcher-refused"),
+            (70, "failed", "dispatcher-failed"),
+            (75, "refused/try-later", "dispatcher-busy"),
+            (76, "expired", "dispatcher-deadline"),
+            (1, "unavailable", "sudo-refused"),
+            (2, "failed", "dispatcher-code:2"),
+            (101, "failed", "dispatcher-code:101"),
+            (255, "failed", "dispatcher-code:255"),
+        ] {
+            let (outcome, said) = dispatcher(&ran(rc));
+            assert_eq!((word(&outcome).as_str(), said.as_str()), (agent, exact), "rc {rc}");
+        }
+        let killed = crate::runner::RunOutput { rc: 255, signal: Some(9), ..ran(255) };
+        assert_eq!(dispatcher(&killed), (Outcome::Failed, "dispatcher-signal:9".to_string()));
+        let slow = crate::runner::RunOutput { timed_out: true, signal: Some(9), ..ran(255) };
+        assert_eq!(dispatcher(&slow), (Outcome::Failed, "run-limit".to_string()));
     }
 
     #[test]

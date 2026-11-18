@@ -8,12 +8,14 @@
 //! its clients and never edit `register.json` themselves.
 
 use std::io::{BufRead, BufReader, Read, Write};
-use std::os::unix::fs::{MetadataExt, PermissionsExt};
+use std::os::fd::AsRawFd;
+use std::os::unix::fs::PermissionsExt;
 use std::os::unix::net::UnixStream as StdStream;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
+use p_act::peer::{self, Policy, Throttle};
 use p_act::sign::Fingerprint;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -330,9 +332,8 @@ pub enum BindError {
 }
 
 /// Make `admin.sock` in `state_dir`: 0600 set explicitly after `bind`, whatever the umask. A socket that is
-/// there is removed only if nothing answers on it. Returns the listener and the user id the broker runs as (the
-/// owner of the socket it has just made), the one user besides root a peer may be.
-pub fn bind(state_dir: &Path) -> Result<(UnixListener, u32), BindError> {
+/// there is removed only if nothing answers on it.
+pub fn bind(state_dir: &Path) -> Result<UnixListener, BindError> {
     let path = state_dir.join(SOCKET_NAME);
     let shown = path.display().to_string();
     let io = |source| BindError::Io { path: shown.clone(), source };
@@ -344,32 +345,33 @@ pub fn bind(state_dir: &Path) -> Result<(UnixListener, u32), BindError> {
     }
     let listener = UnixListener::bind(&path).map_err(io)?;
     std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).map_err(io)?;
-    let uid = std::fs::metadata(&path).map_err(io)?.uid();
-    Ok((listener, uid))
+    Ok(listener)
 }
 
-/// Whether a peer may speak to the broker: its user is root or the broker's own. A peer whose credentials could not
-/// be read (`Err`) is not allowed, and nothing is said to it.
-#[must_use]
-pub fn peer_allowed(uid: std::io::Result<u32>, broker_uid: u32) -> bool {
-    uid.is_ok_and(|uid| uid == 0 || uid == broker_uid)
+/// The policy for the socket: the user the broker runs as, or root. The broker runs as the owner of its state
+/// directory, so this is "root or the owner of the state directory"; no `Uids` list is needed.
+pub const POLICY: Policy<'static> = Policy::OwnUserOrRoot;
+
+/// Whether to serve this peer: `p_act::peer` reads its credentials and checks them against [`POLICY`]. A peer
+/// whose credentials cannot be read, or who is not admitted, is dropped and told nothing; the refusal is one
+/// throttled line on `sink`.
+pub fn admit_peer<S: AsRawFd>(socket: &S, throttle: &mut Throttle, sink: &mut dyn FnMut(&str)) -> bool {
+    peer::accept(socket, &POLICY, "admin socket", throttle, sink).is_some()
 }
 
-/// Serve commands for ever. A peer that is neither root nor `broker_uid` is closed without a word.
-pub async fn serve(listener: UnixListener, broker: Arc<Broker>, broker_uid: u32) {
+/// Serve commands for ever.
+pub async fn serve(listener: UnixListener, broker: Arc<Broker>) {
+    let mut throttle = Throttle::new("page", peer::LOG_INTERVAL);
     loop {
         let Ok((stream, _)) = listener.accept().await else {
             tokio::time::sleep(Duration::from_millis(100)).await;
             continue;
         };
+        if !admit_peer(&stream, &mut throttle, &mut |line| eprintln!("{line}")) {
+            continue;
+        }
         let broker = Arc::clone(&broker);
-        tokio::spawn(async move {
-            // A peer whose credentials cannot be read is dropped, told nothing (the rule for every socket).
-            if !peer_allowed(stream.peer_cred().map(|cred| cred.uid()), broker_uid) {
-                return;
-            }
-            serve_one(stream, broker).await;
-        });
+        tokio::spawn(serve_one(stream, broker));
     }
 }
 
@@ -421,8 +423,23 @@ pub fn socket_path(state_dir: &Path) -> PathBuf {
     state_dir.join(SOCKET_NAME)
 }
 
-/// What a verb prints and exits with for an answer (`proposals/admin-socket.md`, section 3). A restricting verb
-/// whose change is not stored, and any refusal, exit 1.
+/// The exit codes of the verbs, one meaning each (`SPEC.md`).
+pub const EXIT_TABLE: &str = "exit codes:\n  0  done (and stored, where something is stored)\n  1  refused\n  2  usage\n  3  no broker answers\n  4  in force but NOT stored (block, withdraw)\n  5  the broker is degraded (`status` only)";
+
+/// Done.
+pub const EXIT_DONE: u8 = 0;
+/// Refused.
+pub const EXIT_REFUSED: u8 = 1;
+/// Usage.
+pub const EXIT_USAGE: u8 = 2;
+/// No broker answers.
+pub const EXIT_NO_BROKER: u8 = 3;
+/// In force, but not stored.
+pub const EXIT_NOT_STORED: u8 = 4;
+/// The broker is degraded; only `status` returns it.
+pub const EXIT_DEGRADED: u8 = 5;
+
+/// What a verb prints and exits with for an answer (`proposals/admin-socket.md`, section 3; [`EXIT_TABLE`]).
 #[must_use]
 pub fn render(command: &Command, reply: &Reply) -> (String, u8) {
     let (verb, past) = match command {
@@ -437,12 +454,14 @@ pub fn render(command: &Command, reply: &Reply) -> (String, u8) {
         Command::Status => String::new(),
     };
     match reply {
-        Reply::Done(Ok(())) => (format!("{past} and stored: {what}"), 0),
-        Reply::Done(Err(why)) => (format!("{past}, NOT stored: {why} ({what} is in force in the broker's memory)"), 1),
-        Reply::Refused(Refusal::Unavailable, why) => {
-            (format!("{verb} refused: the register cannot be written ({})", why.unwrap_or("io")), 1)
+        Reply::Done(Ok(())) => (format!("{past} and stored: {what}"), EXIT_DONE),
+        Reply::Done(Err(why)) => {
+            (format!("{past}, NOT stored: {why} ({what} is in force in the broker's memory)"), EXIT_NOT_STORED)
         }
-        Reply::Refused(reason, _) => (format!("{verb} refused: {}", reason.wire()), 1),
+        Reply::Refused(Refusal::Unavailable, why) => {
+            (format!("{verb} refused: the register cannot be written ({})", why.unwrap_or("io")), EXIT_REFUSED)
+        }
+        Reply::Refused(reason, _) => (format!("{verb} refused: {}", reason.wire()), EXIT_REFUSED),
         Reply::Status(s) => {
             let mut out = match s.degraded {
                 Some(why) => format!("degraded: yes ({why}): the register cannot be stored; going on from memory\n"),
@@ -454,7 +473,7 @@ pub fn render(command: &Command, reply: &Reply) -> (String, u8) {
             ));
             out.push_str(&format!("blocked persons: {}\n", list(&s.blocked_persons)));
             out.push_str(&format!("blocked keys: {}", list(&s.blocked_keys)));
-            (out, u8::from(s.degraded.is_some()))
+            (out, if s.degraded.is_some() { EXIT_DEGRADED } else { EXIT_DONE })
         }
     }
 }

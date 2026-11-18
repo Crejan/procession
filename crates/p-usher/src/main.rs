@@ -54,10 +54,10 @@ fn parse_args() -> Result<Option<Args>> {
 }
 
 fn protect_self(cfg: &SelfProtection, pin: Option<u32>) {
-    if cfg.mlockall {
-        if let Err(e) = sys::mlockall() {
-            log_warn!("mlockall: {e}");
-        }
+    if cfg.mlockall
+        && let Err(e) = sys::mlockall()
+    {
+        log_warn!("mlockall: {e}");
     }
     if cfg.pin {
         match pin {
@@ -69,10 +69,10 @@ fn protect_self(cfg: &SelfProtection, pin: Option<u32>) {
             None => log_warn!("no housekeeping CPU to pin to"),
         }
     }
-    if cfg.priority > 0 {
-        if let Err(e) = sys::set_fifo(0, cfg.priority) {
-            log_warn!("SCHED_FIFO {}: {e}", cfg.priority);
-        }
+    if cfg.priority > 0
+        && let Err(e) = sys::set_fifo(0, cfg.priority)
+    {
+        log_warn!("SCHED_FIFO {}: {e}", cfg.priority);
     }
 }
 
