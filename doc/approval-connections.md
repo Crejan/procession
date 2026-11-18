@@ -277,7 +277,9 @@ it verifies.
 listens for services and for pledges on the same address. A connection whose
 first message is `submit` is a service's; one whose first message is `hello`
 (section 5) is a pledge's; any other first message is an `error`
-`malformed-line` and the connection is closed. Where a connection arrived
+`malformed-line`, which says nothing more than that, and the connection is
+closed. The broker never speaks first: a connection that sends nothing
+within 10 s is closed without a word. Where a connection arrived
 means nothing: what authenticates it is the signature inside, the signed
 request here and the sign-in there. A site may let the broker listen on
 several addresses; all behave the same. Limits per address are per peer
