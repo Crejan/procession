@@ -84,3 +84,34 @@ fn the_harness_starts_pledge_under_a_umask_of_0002() {
     );
     assert!(String::from_utf8_lossy(&out.stdout).contains("1 passed"), "{}", String::from_utf8_lossy(&out.stdout));
 }
+
+#[test]
+fn a_binary_built_from_another_commit_than_the_one_expected_is_refused() {
+    assert_eq!(build_matches(Some("abc123"), Some("abc123")), Ok(()));
+    assert_eq!(build_matches(Some("abc123"), None), Ok(()), "no expectation: nothing to compare");
+    assert_eq!(build_matches(None, None), Ok(()));
+    let stale = build_matches(Some("967b64c"), Some("2a38839")).unwrap_err();
+    assert!(stale.contains("stale") && stale.contains("967b64c") && stale.contains("2a38839"), "{stale}");
+    // A binary that was built without saying what from cannot be shown to be the right one.
+    assert!(build_matches(None, Some("2a38839")).unwrap_err().contains("unknown commit"));
+    assert!(build_matches(Some("2a38839-dirty"), Some("2a38839")).is_err(), "a dirty tree is not the commit");
+}
+
+#[test]
+fn a_program_named_by_the_run_is_taken_as_given_and_only_if_it_is_there() {
+    let dir = dir_for("named");
+    let (named, classic) = (dir.join("named"), dir.join("classic"));
+    fs::write(&named, "").unwrap();
+    let said = |given: Option<&std::path::Path>, classic: &std::path::Path| {
+        resolve_binary(given.map(|p| p.as_os_str().to_owned()), classic.to_path_buf(), "PROBE_X_BIN")
+    };
+    // What the run named wins, even where the classic place has another file.
+    fs::write(&classic, "").unwrap();
+    assert_eq!(said(Some(&named), &classic), Ok(named.clone()));
+    // Without a name: the classic place, if it is there; if not, words that say what to do.
+    assert_eq!(said(None, &classic), Ok(classic.clone()));
+    let why = said(None, &dir.join("absent")).unwrap_err();
+    assert!(why.contains("PROBE_X_BIN") && why.contains("cargo build"), "{why}");
+    // A name that is not a file is not quietly replaced by the classic place.
+    assert!(said(Some(&dir.join("nothing")), &classic).unwrap_err().contains("not a file"));
+}

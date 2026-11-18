@@ -32,7 +32,7 @@ use std::time::{Duration, SystemTime};
 
 use thiserror::Error;
 
-use crate::ledger::{Entry, Ledger, Pair};
+use crate::ledger::{Cause, Entry, Ledger, Pair};
 use crate::outcome::Outcome;
 
 /// The prefix of the metric names unless the caller chooses another.
@@ -49,13 +49,18 @@ const ADDED_BYTES: &str = "backup_last_added_bytes";
 const FIRST_ATTEMPT: &str = "backup_first_attempt_timestamp_seconds";
 const UNREADABLE: &str = "backup_last_unreadable_files";
 const LAST_OUTCOME: &str = "backup_last_outcome";
+const LAST_ATTEMPT: &str = "backup_last_attempt_timestamp_seconds";
 
-const FAMILIES: [(&str, &str); 5] = [
+const FAMILIES: [(&str, &str); 6] = [
     (LAST_SUCCESS, "When the last backup of source to target succeeded"),
     (ADDED_BYTES, "Bytes the last successful backup of source to target added"),
     (FIRST_ATTEMPT, "When a source that never succeeded to target was first attempted"),
     (UNREADABLE, "Files the last successful backup of source to target could not read"),
-    (LAST_OUTCOME, "How the last run of source to target ended (value 1, the outcome is the label)"),
+    (
+        LAST_OUTCOME,
+        "How the last run of source to target ended (value 1, the outcome and an optional cause are labels)",
+    ),
+    (LAST_ATTEMPT, "When the last run of source to target of any outcome was recorded"),
 ];
 
 /// Why a ledger file was refused or could not be written.
@@ -160,7 +165,11 @@ pub fn render(ledger: &Ledger, prefix: &str) -> String {
                 ADDED_BYTES => entry.last_success.map(|_| (labels, entry.last_added_bytes.to_string())),
                 UNREADABLE => entry.last_success.map(|_| (labels, entry.last_unreadable.to_string())),
                 FIRST_ATTEMPT => entry.first_attempt.map(|at| (labels, seconds(at))),
-                _ => entry.last_outcome.map(|o| (format!("{labels},outcome=\"{}\"", o.name()), "1".to_owned())),
+                LAST_ATTEMPT => entry.last_attempt.map(|at| (labels, seconds(at))),
+                _ => entry.last_outcome.map(|o| {
+                    let cause = entry.last_cause.map_or(String::new(), |c| format!(",cause=\"{}\"", c.name()));
+                    (format!("{labels},outcome=\"{}\"{cause}", o.name()), "1".to_owned())
+                }),
             };
             if let Some((labels, value)) = sample {
                 let _ = writeln!(out, "{prefix}{name}{{{labels}}} {value}");
@@ -190,11 +199,13 @@ pub fn parse(text: &str, prefix: &str) -> Result<Ledger, (usize, String)> {
         let mut source = None;
         let mut target = None;
         let mut outcome = None;
+        let mut cause = None;
         for (key, value) in labels {
             let slot = match key.as_str() {
                 "source" => &mut source,
                 "target" => &mut target,
                 "outcome" => &mut outcome,
+                "cause" => &mut cause,
                 other => return Err(fail(&format!("unknown label {other:?}"))),
             };
             if slot.replace(value).is_some() {
@@ -204,8 +215,8 @@ pub fn parse(text: &str, prefix: &str) -> Result<Ledger, (usize, String)> {
         let (Some(source), Some(target)) = (source, target) else {
             return Err(fail("a sample needs both a source and a target label"));
         };
-        if outcome.is_some() != (family == LAST_OUTCOME) {
-            return Err(fail("the outcome label belongs to the last-outcome family, and only to it"));
+        if outcome.is_some() != (family == LAST_OUTCOME) || (cause.is_some() && outcome.is_none()) {
+            return Err(fail("the outcome and cause labels belong to the last-outcome family, and only to it"));
         }
         let pair = Pair::new(source, target);
         if !seen.insert((family.to_owned(), pair.clone())) {
@@ -214,6 +225,7 @@ pub fn parse(text: &str, prefix: &str) -> Result<Ledger, (usize, String)> {
         let value = rest.split_whitespace().next().ok_or_else(|| fail("no value"))?;
         let entry = entries.entry(pair).or_default();
         match family {
+            LAST_ATTEMPT => entry.last_attempt = Some(time(value).map_err(|p| fail(&p))?),
             LAST_SUCCESS => entry.last_success = Some(time(value).map_err(|p| fail(&p))?),
             FIRST_ATTEMPT => entry.first_attempt = Some(time(value).map_err(|p| fail(&p))?),
             ADDED_BYTES => entry.last_added_bytes = count(value).map_err(|p| fail(&p))?,
@@ -225,6 +237,12 @@ pub fn parse(text: &str, prefix: &str) -> Result<Ledger, (usize, String)> {
                 let name = outcome.unwrap_or_default();
                 entry.last_outcome =
                     Some(Outcome::from_name(&name).ok_or_else(|| fail(&format!("unknown outcome {name:?}")))?);
+                entry.last_cause = match cause {
+                    None => None,
+                    Some(name) => {
+                        Some(Cause::from_name(&name).ok_or_else(|| fail(&format!("unknown cause {name:?}")))?)
+                    }
+                };
             }
         }
     }
@@ -342,7 +360,6 @@ pub fn write_atomic(path: &Path, bytes: &[u8], mode: u32) -> io::Result<()> {
 #[cfg(test)]
 mod tests {
     use std::os::unix::fs::MetadataExt;
-    use std::sync::Mutex;
 
     use super::*;
     use crate::ledger::Run;
@@ -356,6 +373,7 @@ mod tests {
         ledger.record(Pair::new("home", "offsite"), Run::stored(10, 0), t(1_700_000_000));
         ledger.record(Pair::new("docs \"x\"\\\nnew", "off,site"), Run::stored(7, 3), t(1_700_000_500));
         ledger.record(Pair::new("never", "offsite"), Run::ended(Outcome::Locked), t(1_700_000_900));
+        ledger.record(Pair::new("cut", "offsite"), Run::interrupted(), t(1_700_001_000));
         ledger
     }
 
@@ -421,6 +439,8 @@ mod tests {
             ("p_backup_last_outcome{source=\"a\",target=\"b\"} 1\n", 1),
             ("p_backup_last_added_bytes{source=\"a\",target=\"b\",outcome=\"ok\"} 1\n", 1),
             ("p_backup_last_added_bytes\n", 1),
+            ("p_backup_last_outcome{source=\"a\",target=\"b\",outcome=\"failed\",cause=\"cosmic-rays\"} 1\n", 1),
+            ("p_backup_last_added_bytes{source=\"a\",target=\"b\",cause=\"interrupted\"} 1\n", 1),
         ];
         for (text, line) in cases {
             assert_eq!(parse(text, p).map_err(|e| e.0), Err(line), "{text:?}");
@@ -473,19 +493,10 @@ mod tests {
         assert!(matches!(missing.save(&sample()), Err(TextfileError::Write { .. })));
     }
 
-    /// The umask is process-wide: tests that set it take this lock.
-    static UMASK: Mutex<()> = Mutex::new(());
-
     fn mode_under_umask(mask: libc::mode_t) -> u32 {
-        let _guard = UMASK.lock().unwrap_or_else(|e| e.into_inner());
         let dir = tempfile::tempdir().unwrap(); // made before the mask: 0277 would leave it unwritable
-        // SAFETY: umask has no failure mode; it is restored below, under the lock.
-        let old = unsafe { libc::umask(mask) };
         let file = Textfile::new(dir.path().join("ledger.prom"), DEFAULT_PREFIX).unwrap();
-        let saved = file.save(&sample());
-        // SAFETY: as above.
-        unsafe { libc::umask(old) };
-        saved.unwrap();
+        crate::umask::with(mask, || file.save(&sample())).unwrap();
         fs::metadata(file.path()).unwrap().mode() & 0o7777
     }
 

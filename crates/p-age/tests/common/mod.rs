@@ -425,7 +425,7 @@ pub fn agent_fingerprint(w: &World) -> String {
 pub fn config_file(w: &World) -> PathBuf {
     let dir = w.keys.dir.path().display();
     let text = format!(
-        r#"{{"site":"{dir}/site.json","listen":["127.0.0.1:0"],"tls_cert":"{dir}/c.pem","tls_key":"{dir}/k.pem","broker_key":"{dir}/broker","state_dir":"{dir}","log":"{dir}/log.jsonl"}}"#
+        r#"{{"site":"{dir}/site.json","listen":["127.0.0.1:0"],"tls_cert":"{dir}/c.pem","tls_key":"{dir}/k.pem","broker_key":"{dir}/broker","state_dir":"{dir}","site_ca":"{dir}/site-ca.pub","log":"{dir}/log.jsonl"}}"#
     );
     let path =
         std::env::temp_dir().join(format!("page-config-{}.json", std::process::id() as u64 * 1000 + rand_suffix()));
@@ -503,6 +503,13 @@ impl p_age::crypto::Crypto for SlowCrypto {
         ca: &PublicKey,
     ) -> Result<p_act::sign::ApprovalCertificate, p_age::crypto::CryptoError> {
         self.inner.check_approval_certificate(l, ca)
+    }
+    fn check_broker_certificate(
+        &self,
+        ca: &PublicKey,
+        now: SystemTime,
+    ) -> Result<p_age::certs::BrokerCertificate, p_age::certs::BrokerCertificateFailure> {
+        self.inner.check_broker_certificate(ca, now)
     }
     fn sign_clearance(&self, c: &p_act::Clearance) -> Result<String, p_age::crypto::CryptoError> {
         self.inner.sign_clearance(c)

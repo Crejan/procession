@@ -231,7 +231,8 @@ exchange has no notice that a request was shown to the person.
 | `person` | the person is not enabled in the site project, or is blocked (check 3). One code |
 | `not-entitled` | R10 (check 4): none of the delegation's groups (the extension of its certificate and nowhere else) is a group the person is in and that the service's binding names for this host |
 | `too-many-waiting` | the agent already has as many requests waiting as the site allows |
-| `busy` | the broker's own limits (section 4) |
+| `busy` | the broker's own limits (section 4): too many open, try again soon. It has this one meaning |
+| `not-ready` | the broker is up and cannot vouch for anything: it has no valid certificate of its own (`crates/p-age/SPEC.md`). A service that hears it does not send the same request again in a loop; it tells the agent `unavailable` and logs the exact code. If a person's approval came back while the broker was in this state, the service is answered `refused` `not-ready`, there is no clearance, and the broker logs that an approval was lost to its own state |
 
 **pledge's answer is final until the call's deadline.** pledge keeps its answers
 on disk, and the same bytes submitted again get **the same answer again** from
@@ -405,6 +406,24 @@ then, in this order: the **standing** (below), a carried document if it holds
 one, then every request that waited (below). On failure: `error` with `signin`
 (or `blocked` for a person or a key that is blocked, after the signature
 verified), and close.
+
+**A broker that cannot vouch still lets a pledge in.** While the broker has no
+valid certificate of its own it sends, in place of the standing,
+
+```json
+{"schema_version":1,"type":"not-ready"}
+```
+
+and the connection stays open. On it only what restricts is served: `withdraw`
+is taken and answered as always, and nothing that permits (a registration is
+answered `not-registered` with `unavailable`). When the certificate becomes
+valid the broker sends the standing without a new sign-in. A pledge that is
+connected when the certificate ends is told `not-ready` once on its connection,
+and the same holds from then. pledge treats `not-ready` as connected without a
+verified standing: it issues nothing, keeps the restrictions it has on disk,
+tells the person once that the broker cannot currently vouch, and does not
+connect again in a loop. It cannot verify what such a broker says beyond TLS,
+and need not: everything it accepts in this state is a restriction or nothing.
 
 **Between `hello` and a completed sign-in a peer hears one answer whatever it
 sends**: `error` with `signin`, and the close. That holds for a message of a
@@ -653,7 +672,7 @@ In the manner of `approval-formats.md` section 7. `<person>`, `<service>`,
 | `notice` (`doc`, `doc_sig`: the standing) | the broker's key, certified by the site CA | `broker-v1@procession` | pledge | `broker` | the site CA's key |
 | a certificate in the standing | the site CA | (a certificate) | pledge | its own key and `<person>:confirmed` / `:automatic` | the site CA's key |
 | `delegation`'s `cert` (a certificate, not a signature) | the person's delegation key | (a certificate) | the broker, with `p-act` | the person, as its only principal | the person's delegation key, site project |
-| the messages themselves, and `answer` without approval (`declined`, `refused`, `expired`), `cancel`, `withdraw`, `ping`, `ack`, `registered`, `not-registered`, `withdrawn`, `hello`, `challenge`, `ready`, `error` | nobody | none | nobody | none | TLS and, on pledge's connection, the sign-in |
+| the messages themselves, and `answer` without approval (`declined`, `refused`, `expired`), `cancel`, `withdraw`, `ping`, `ack`, `registered`, `not-registered`, `withdrawn`, `not-ready`, `hello`, `challenge`, `ready`, `error` | nobody | none | nobody | none | TLS and, on pledge's connection, the sign-in |
 
 Allowed-signers lines (`namespaces` are what keeps one document from
 verifying as another):

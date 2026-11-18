@@ -6,9 +6,11 @@
 //! question. That is the point of holding it behind a trait object in a
 //! long-running process rather than spawning a tool per call.
 //!
-//! No engine is implemented yet. The first is planned on `rustic_core`; see
+//! The engine on `rustic_core` is [`crate::rustic::RusticEngine`]; see
 //! `crates/p-reserve/SPEC.md`.
 
+use std::io::Write;
+use std::path::Path;
 use std::time::SystemTime;
 
 use serde::{Deserialize, Serialize};
@@ -60,10 +62,20 @@ impl std::fmt::Display for EngineError {
 
 impl std::error::Error for EngineError {}
 
+/// What a restore wrote.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct RestoreSummary {
+    /// Files restored (written or already identical).
+    pub files: u64,
+    /// Bytes of those files.
+    pub bytes: u64,
+}
+
 /// An opened repository.
 ///
-/// Reading is all there is so far; backup, forget, prune, check and restore
-/// join it as the engine behind them is built.
+/// Reading and restoring is all there is so far; backup, forget, prune and
+/// check join it as the engine behind them is built. A snapshot is named by
+/// its id, an unambiguous prefix of it, or `latest`.
 pub trait Engine {
     /// The snapshots, oldest first.
     fn snapshots(&self) -> Result<Vec<Snapshot>, EngineError>;
@@ -71,4 +83,16 @@ pub trait Engine {
     /// The direct children of `dir` in `snapshot`. `dir` is absolute within
     /// the snapshot; "/" is its root.
     fn list(&self, snapshot: &str, dir: &str) -> Result<Vec<Node>, EngineError>;
+
+    /// The content of the file `path` of `snapshot`, written to `out`.
+    /// Returns the number of bytes written. `path` must be a regular file.
+    fn dump(&self, snapshot: &str, path: &str, out: &mut dyn Write) -> Result<u64, EngineError>;
+
+    /// Restore `path` of `snapshot` to `destination` on this machine.
+    ///
+    /// A directory is restored as the contents of `destination` (which must
+    /// not exist or be an empty directory); a file is restored as the file
+    /// `destination` (which must not exist). `destination` must be absolute.
+    /// Nothing existing is overwritten or deleted.
+    fn restore(&self, snapshot: &str, path: &str, destination: &Path) -> Result<RestoreSummary, EngineError>;
 }

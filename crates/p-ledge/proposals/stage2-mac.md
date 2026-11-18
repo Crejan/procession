@@ -59,8 +59,9 @@ A claim about p-ledge's own code has no mark and names the file.
 - An `LAContext` that passed once can be used again for further signatures
   within its reuse time (`touchIDAuthenticationAllowableReuseDuration`,
   zero by default). **[D]** "One presence check per signature" therefore
-  needs a fresh context per signature, never kept. Whether one fresh
-  context still lets two signatures through is **[U]** (check 5).
+  needs a fresh context per signature, never kept. Check 4 showed it
+  (section 1.6): a context that is kept signs a second time with no touch,
+  although its reuse time is zero. The rule is in section 2.2.
 
 So the Secure Enclave can enforce *that the person was there for this
 signature*. It shows nothing itself. *What* the person saw is said by the
@@ -190,13 +191,25 @@ The first five decide the design; do them before anything is built.
 Run by the owner on his Mac on 2026-11-18 with
 `stage2-mac-checks/sechecks.swift`; relayed by the designer. These are his
 observations. The table in `stage2-mac-checks/README.md` has them row by
-row. Not yet run: checks 1, 2, 4, 5 and the rest.
+row. Not yet run: 2b, 2d, 3c, and checks 6 to 16.
 
 | Check | Observed | What it settles |
 |---|---|---|
 | 0 (making the keys) | Five keys made (no presence, "after first unlock" and "when unlocked"; `.biometryAny`; `.userPresence`; `.biometryCurrentSet`), each with a public key line and a blob file. No prompt while making. No entitlement error | A program that is ad-hoc signed, with no bundle and no entitlement, can make and use Secure Enclave keys through CryptoKit. The **[U]** of section 4.2 about a program without an app bundle is answered for making keys and for raising the prompt (3b) |
 | 3a (a copied blob, another program, no presence) | `sechecks-other: SIGNED plain after 0.0 s`, no prompt | The **[U]** of section 1.1 is answered as expected: another program of the same user loads a copied blob and signs. A key without a presence check is exactly as protected as its blob file |
 | 3b (a copied blob, another program, Touch ID) | A Touch ID prompt that named the other program and carried its words; after the touch, `SIGNED touch after 2.6 s` | The presence check holds for a copied blob: no signature without the touch. But any program of the person can raise that prompt, under its own name and with its own text |
+
+| 1a, 1b (keys side by side) | `sign plain`: signed, no prompt. `sign touch`: a prompt that began "sechecks trying to sign ..."; its text was as expected, he reported later (not pasted); signed after the touch | `SPEC.md` section 11's assumption holds: keys with and without a presence check exist side by side in one program, and each behaves as made |
+| 1c (`.userPresence`) | `sign touchpw`: signed, and the prompt offered "Use Password" | A key made with user presence falls back to the password. The **[D]** on `.userPresence` in section 1.1 is observed. This is why the confirmed approval key and the delegation key use biometry only and only the shared key keeps the fallback (question 1) |
+| 2a (cancel) | `NOT SIGNED touch after 12.0 s: error domain=com.apple.LocalAuthentication code=-2 ... Canceled by user.` | The person's cancel has a code of its own |
+| 2c (the program ends the prompt; run with `--invalidate-after 2`) | `invalidating the context now`, then `NOT SIGNED touch after 2.1 s: error domain=com.apple.LocalAuthentication code=-9 ... Invalidated by client.` | A prompt can be closed by the program at a deadline, and that ending is told apart from the person's cancel. The **[D]** on `LAContext.invalidate()` in section 2.2 is now observed |
+| 4a (two signatures, a fresh context each) | Two prompts: `SIGNED first after 3.0 s`, `second after 1.4 s` | One touch, one signature, with fresh contexts |
+| 4b (two signatures, one context) | **One** prompt: `SIGNED first, shared context after 1.4 s`, `SIGNED second, shared context after 0.0 s` | **A kept context signs again with no touch.** The most important of these results: section 2.2, the rule |
+| 5 (how much text the prompt shows) | 60 characters: shown whole. 200: shown through `END`. 600: cut inside `word67` | The prompt showed between 510 and 515 characters of the program's text. Section 2.2, the budget |
+
+Checks 2b (left alone until the prompt ends by itself) and 2d (wrong
+finger) were not run: the system's own timeout and the lockout have no
+observed code yet.
 
 **Decided on this (question 2):** blobs in files for stage 2, said plainly;
 the keychain with an access group is a step of its own before a site.
@@ -273,6 +286,89 @@ keys with a presence check can carry it in the hardware.
   passed is `expired`. Anything else (no sensor, locked, no session) is
   `refused`, reason `unavailable`. Check 2 gives the error codes.
 
+**The rule from check 4b: the key holder never keeps and never reuses a
+context.** One fresh context per signature, invalidated after it. Check 4b
+showed why this is a rule and not a habit: with one context, the second
+signature came after 0.0 s with no prompt. A holder that kept a context
+"for the session" would turn a presence check per signature into one per
+start, silently, and nothing on the screen or in the record would show it.
+So:
+
+- the holder's `sign` for a key with a presence check makes its context
+  inside the call, uses it for that one signature, and invalidates it
+  before it returns, on every path: signed, declined, closed, failed;
+- nothing holds a context between calls: no field, no global, no cache,
+  and no loaded key object either, because the key is loaded *with* the
+  context and carries it;
+- this has tests (section 6.5), and the hand check 4a through the real
+  holder (two signatures, two prompts) is part of the manual checklist.
+
+**The four endings of `sign`, from check 2.** For a key with a presence
+check:
+
+| Ending | When | Observed as | Becomes |
+|---|---|---|---|
+| signed | the touch | a signature | `approved` |
+| declined by the person | Cancel at the prompt | `com.apple.LocalAuthentication`, code -2 (2a) | `declined`; counts toward muting and uses the call's identifier |
+| closed by the holder | the holder invalidated the context: because the deadline passed, or because the one who asked went away | code -9 (2c) | `expired` or `cancelled`: the reader knows which, since it asked for the closing. A -9 that the holder did not cause itself is a failure |
+| failed | everything else | any other code, or none | `refused`, reason `unavailable`; the record keeps domain and code |
+
+So `expired` at the deadline is implemented by invalidating the context.
+The rule for codes not in this table: **an unknown code is a failure,
+never a decline.** A decline mutes an agent after three; a sensor fault
+must not.
+
+Still unknown, because not run: the code when the system ends the prompt
+by itself (2b), and after wrong fingers and the lockout (2d). From memory,
+**[D]**, not observed: -4 (the system cancelled), -8 (biometry locked
+out), -6 and -7 (no biometry available, none enrolled), -1004 (no
+interaction possible, which a locked screen or a session without a window
+server may give; checks 10 and 11). The record's "why it could not be
+asked" (question 9) needs 2b, 2d, 10 and 11 run before its values can be
+named.
+
+**The budget for the prompt's words, from check 5.** The 600-character
+text was cut inside `word67`, which stands at characters 511 to 516 of it:
+the prompt showed between 510 and 515 characters of the program's text,
+after the system's own "<program> is trying to". One text, one Mac, one
+system language; the cut may follow the width of the letters and not
+their number. So the budget is set well below it:
+
+- **300 characters for everything the holder puts into the prompt.**
+- **First the holder's fixed words** (section 1.6, consequence 2), at most
+  40 characters, the same for every prompt of one purpose, for example
+  "pledge: approve a request." Nothing stands before them.
+- **Then the names**: for a request the service, its host and the action.
+
+**What does not fit is refused, never cut** (decided by the designer on
+2026-11-18; I had proposed a marked cut). The prompt's words are the
+person's check against a dialog that lies (section 4.4). A prompt that
+ends in "… and more" checks nothing: what was left out is exactly where a
+lie would be. So the rule for the dialog, a field whole and longer is
+refused, holds for the prompt for the same reason.
+
+How that is made true:
+
+- **It is a property of the call, not a behaviour of the holder.** The
+  three names the prompt carries (service, host, action) have a combined
+  bound of 240 characters. With the fixed words (at most 40) and the
+  separators that stays inside 300. The bound goes into `Call::showable`
+  in p-act, which p-act builds, with the reason `not-showable`. A service
+  refuses such a call before anybody is asked; pledge refuses it too, and
+  pledge's refusal is the one that counts; the key holder never meets a
+  request whose words do not fit.
+- **The holder still checks the length of what it is handed**, and fails
+  if the reader ever gives it more: the fourth ending of `sign`, never a
+  shortened prompt. That is a guard, not the rule.
+- **The same for the other two prompts.** A login: the user and the host
+  (a name from `known_hosts`, or the fingerprint); a signing request whose
+  words do not fit is refused as not showable. A delegation: the person,
+  the **number** of groups and the validity. The prompt names the count
+  and the dialog shows the list whole; a prompt that lists groups until it
+  runs out of room is the same cut in another place.
+- **The budget holds with keys in files too**, where there is no prompt,
+  so that a call that is showable on Linux is showable on a Mac.
+
 What this does **not** give: the Secure Enclave does not know what was on
 the screen. A reader that is taken over can hand the key holder the bytes
 of request Y and the words of request X. `SPEC.md` section 7 already says
@@ -307,7 +403,9 @@ What follows for pledge, whatever question 1 decides:
 **Password in place of Touch ID, per key** (question 1, decided by the
 owner on 2026-11-18: Touch ID only for confirmed approvals and delegations,
 so a Mac that cannot offer Touch ID makes no confirmed approval and starts
-no agent; Touch ID or password for the shared key). The reasons were:
+no agent; Touch ID or password for the shared key). Check 1c has since
+shown that a `.userPresence` key does offer "Use Password" (section 1.6),
+so the fallback is real and not only documented. The reasons were:
 
 - *confirmed approval, delegation:* a password is weaker in exactly the two
   threats the presence check is there for. A stolen machine: the thief may
@@ -710,6 +808,17 @@ separation was kept in the development form.
    (section 4.3), if question 7 is answered that way. In the development
    form it is `Dialogs::confirm`.
 
+7. **No context outlives a call** (check 4b; section 2.2). The Secure
+   Enclave holder's `sign` for a key with a presence check creates its
+   `LAContext` inside the call, loads the key with it, signs once, and
+   invalidates the context before returning. No field of the holder holds
+   a context or a loaded key with a presence check; the holder keeps blobs
+   and public keys, nothing else. Closing at the deadline is the same
+   context invalidated from the thread that watches the wait
+   (check 2c). Contexts come from a factory the tests can replace, as
+   Atticus does (`AgentPolicy.lacontextFactory`,
+   `Sources/Engine/LAContextProtocol.swift`).
+
 Two orderings to keep, both already in `src/approvals.rs`: the entry
 `received` is written before any dialog; the identifier is marked used
 (`reserve()`) before the key signs. With the touch inside `sign`,
@@ -784,6 +893,47 @@ Each step leaves `cargo test` green on Linux and keys in files working.
    of this except the connection key, which is a key without presence from
    step 3.
 
+### 6.5 What a later implementation must test
+
+From the hand checks so far. "Test" is an automated test with the
+framework replaced by a double, unless it says "by hand".
+
+1. **One context per signature.** For a key with a presence check, each
+   `sign` takes exactly one context from the factory and invalidates
+   exactly that one before it returns: after a signature, after a
+   decline, after a closing, after a failure. Two `sign` calls take two
+   different contexts. (Atticus has the same shape of test for its
+   prompt: "exactly one `evaluatePolicy` per `authorize`".)
+2. **Nothing holds a context.** A test over the holder's source that
+   fails if a stored property, a global or a static has the type of a
+   context or of a Secure Enclave private key. (Atticus pins a property
+   of `SEPKey.swift` by such a test.)
+3. **By hand, through the real holder:** two signatures with a presence
+   key give two prompts (check 4a's observation).
+4. **The four endings.** Code -2 from the double gives "declined"; the
+   holder's own invalidation gives "closed", and the reader makes
+   `expired` or `cancelled` of it; a -9 the holder did not cause gives
+   "failed"; any other code gives "failed" with domain and code kept; no
+   code other than -2 ever gives "declined".
+5. **The deadline closes the prompt.** With a double that never answers,
+   `sign` returns "closed" at the deadline and the context was
+   invalidated. By hand: an open prompt disappears at the deadline.
+6. **The prompt's words.** The fixed words are first and whole for every
+   input; the whole text is at most 300 characters; no parameter and no
+   claim ever appears; a delegation's prompt carries the number of groups
+   and no group's name. **Nothing is ever cut:** handed words that do not
+   fit, the holder returns "failed" and shows no prompt. In p-act:
+   `Call::showable` refuses a call whose service, host and action together
+   exceed 240 characters, with `not-showable`, and accepts one at exactly
+   240; the same on Linux with keys in files.
+7. **Each purpose has its flags.** A key made for confirmed approval or
+   delegation asks for `.biometryAny`; for shared, `.userPresence`; for
+   automatic, connection and bound, no presence flag and "after first
+   unlock" (questions 1 and 4).
+8. **The blob files.** The holder refuses a blob that is a symlink, not
+   the user's, or open to anyone else, before every use (section 1.6,
+   consequence 1).
+
 ## 7. Open questions for the designer
 
 **Where each stands, 2026-11-18.** The designer read this proposal and
@@ -794,7 +944,7 @@ them.
 
 | # | Question | Stands | What was said |
 |---|---|---|---|
-| 1 | Password in place of Touch ID | decided, by the owner | Touch ID only (`.biometryAny`) for confirmed approvals and delegations. A Mac that cannot offer Touch ID makes no confirmed approval. The shared key keeps Touch ID or password |
+| 1 | Password in place of Touch ID | decided, by the owner | Touch ID only (`.biometryAny`) for confirmed approvals and delegations. A Mac that cannot offer Touch ID makes no confirmed approval. The shared key keeps Touch ID or password. Check 1c (section 1.6) showed what is at stake: a key made with `.userPresence` does offer "Use Password", so with that flag a confirmed approval could be had by whoever knows the password; hence biometry only for those two keys, and the fallback for the shared key alone |
 | 2 | Blob in a file, or keychain with an access group | decided, after check 3 | Check 3 came out as expected (section 1.6). Blobs in files for stage 2, said plainly; the keychain with an access group is a step of its own before a site. `SPEC.md` section 11 and the threat table carry the designer's record of it |
 | 3 | One key holder or two | decided | Two: one for keys with a presence check, one for keys without |
 | 4 | Does a locked screen stop automatic approvals | decided, by the owner | It does not. The automatic key is "after first unlock". The threat table of `doc/approvals.md` (the row on a stolen machine) says so, bounded by the delegation's end and the administrator's block |
@@ -803,7 +953,7 @@ them.
 | 7 | Presence for what ends in no signature | decided | `LAContext.evaluatePolicy` in the key holder, said plainly to be software. Retiring a key with a presence check requires that key's signature first. No fifth key |
 | 8 | Who signs pledge's Mac programs, and as what | decided, by the owner | His Developer ID team (the one Atticus is signed with), with identifiers of pledge's own for the reader, the key holder and the dialog process |
 | 9 | A request while no presence check is possible | decided | It waits until its deadline and ends `expired`; the record says why it could not be asked (locked, sensor locked out) |
-| 10 | What the Touch ID prompt says | decided, subject to check 5 | As recommended: service, host and action; user and host for a login; person, groups and validity for a delegation; never a parameter or the agent's claim |
+| 10 | What the Touch ID prompt says | decided; check 5 has run | As recommended: service, host and action; user and host for a login; person, groups and validity for a delegation; never a parameter or the agent's claim. Check 5 gives the room (section 2.2, the budget: 300 characters, the holder's fixed words first). Decided by the designer on 2026-11-18: what does not fit is refused, never cut; service, host and action together are at most 240 characters, a bound in `Call::showable`; a delegation's prompt names the number of groups |
 | 11 | A first Mac stage with `Terminal` and real keys | decided | Accepted, for the owner only |
 | 12 | One Mac app or two | decided, by the owner | Two Mac apps, from one Swift code base. preserve's app is admitted on pledge's `control.sock` for exactly `keys.create` of a bound key and `keys.list`, by a rule per command and peer |
 | 13 | Take Atticus's SwiftUI front end at all | decided | Yes, with the condition as written: it becomes preserve's Mac front end only after the logic still in its views and view models has moved into the daemon and the socket protocol offers what section 8.5 lists. The three bypasses and the prune marker (section 8.2) are the list of what goes behind the protocol first. Nothing is copied yet |

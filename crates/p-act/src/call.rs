@@ -20,12 +20,21 @@ pub const MAX_CLAIM_CHARS: usize = 200;
 /// All parameters of a call together are shown up to this many characters (not bytes).
 pub const MAX_PARAMS_SHOWN_CHARS: usize = 2000;
 
+/// The three names a prompt for the call carries (the service's name, its host and the action) are together at most
+/// this many characters, counted as shown (not bytes): the budget of what a presence prompt can hold is 300 characters,
+/// of which the key holder's fixed words take at most 40 and these three the rest, with room to spare.
+pub const MAX_PROMPT_NAMES_CHARS: usize = 240;
+
 /// Why a call cannot be shown to a person as it is. The reason is for the caller's log.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum NotShowable {
     /// The parameters together are longer than [`MAX_PARAMS_SHOWN_CHARS`] characters.
     #[error("the parameters are {chars} characters together, at most {limit} can be shown")]
     ParamsTooLong { chars: usize, limit: usize },
+    /// The service's name, its host and the action are together longer than [`MAX_PROMPT_NAMES_CHARS`] characters:
+    /// a prompt for them would not fit, and what does not fit is refused, never cut.
+    #[error("the service, host and action names are {chars} characters together, at most {limit} can be shown")]
+    NamesTooLong { chars: usize, limit: usize },
     /// A field holds a control character or a bidirectional mark. A parsed [`Call`] cannot, so this is
     /// only a guard against a call that did not come from the parser.
     #[error("the field `{0}` has a control or bidirectional character")]
@@ -157,6 +166,8 @@ impl Call {
     ///
     /// A field is shown whole up to the formats' limit for it, which parsing has enforced: `action` as
     /// parsed, each parameter up to 512 bytes, `claim` up to 200 characters. What this adds is that all
+    /// service's name, host and action together are at most [`MAX_PROMPT_NAMES_CHARS`] (240) characters (the formats
+    /// limit the host to 64 and leave the name and the action without a limit of their own, so this one can bite), and the
     /// parameters together are at most [`MAX_PARAMS_SHOWN_CHARS`] (2000) characters, counted as
     /// characters and not bytes. A control character or a bidirectional mark is refused at parsing, so
     /// this function cannot meet one in a parsed `Call`; it checks again all the same.
@@ -175,6 +186,10 @@ impl Call {
         }
         if c.params.iter().any(|p| text::check("params", p).is_err()) {
             return Err(NotShowable::Unclean("params"));
+        }
+        let names: usize = [&c.service.host, &c.service.name, &c.action].iter().map(|n| n.chars().count()).sum();
+        if names > MAX_PROMPT_NAMES_CHARS {
+            return Err(NotShowable::NamesTooLong { chars: names, limit: MAX_PROMPT_NAMES_CHARS });
         }
         let chars: usize = c.params.iter().map(|p| p.chars().count()).sum();
         if chars > MAX_PARAMS_SHOWN_CHARS {
@@ -531,5 +546,35 @@ pub(crate) mod tests {
         assert_eq!(long_claim.showable(), Ok(()));
         let message = with(spread(2001)).showable().unwrap_err().to_string();
         assert!(message.contains("2001") && message.contains("2000"), "{message}");
+    }
+
+    #[test]
+    fn the_three_names_together_are_bounded_where_the_formats_do_not_bound_them() {
+        let with = |host: &str, name: &str, action: &str| {
+            let base = parse(EXAMPLE).unwrap().content().clone();
+            Call::compose(&CallContent {
+                service: ServiceId { host: host.into(), name: name.into() },
+                action: action.into(),
+                ..base
+            })
+            .unwrap()
+        };
+        let host = "h".repeat(64);
+        // 64 + 100 + 76 = 240 fits however it is spread; one more does not.
+        assert_eq!(with(&host, &"n".repeat(100), &"a".repeat(76)).showable(), Ok(()));
+        assert_eq!(with(&host, &"n".repeat(175), "a").showable(), Ok(()));
+        assert_eq!(
+            with(&host, &"n".repeat(100), &"a".repeat(77)).showable(),
+            Err(NotShowable::NamesTooLong { chars: 241, limit: 240 })
+        );
+        assert_eq!(with("a.b", "probe", "word ".repeat(46).trim_end()).showable(), Ok(()), "3+5+229");
+        assert_eq!(
+            with("a.b", &"s".repeat(240), "a").showable(),
+            Err(NotShowable::NamesTooLong { chars: 244, limit: 240 })
+        );
+        let text = with(&host, &"n".repeat(100), &"a".repeat(77)).showable().unwrap_err().to_string();
+        assert!(text.contains("241") && text.contains("240"), "{text}");
+        // The example, and a call whose parameters are what is too long, are told apart.
+        assert_eq!(parse(EXAMPLE).unwrap().showable(), Ok(()));
     }
 }

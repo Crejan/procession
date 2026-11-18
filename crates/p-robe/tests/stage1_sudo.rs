@@ -40,6 +40,8 @@ fn env_or(name: &str, default: &str) -> String {
 #[test]
 #[ignore = "needs the host of RUNBOOK-stage1-linux.md, run as probe-svc, with PROBE_STAGE1_SUDO=1"]
 fn the_cases_through_a_real_sudo_rule() {
+    // First, so that the output says what ran, and an old binary is not mistaken for the checkout's.
+    check_build();
     if std::env::var("PROBE_STAGE1_SUDO").as_deref() != Ok("1") {
         eprintln!("PROBE_STAGE1_SUDO is not 1: nothing run");
         return;

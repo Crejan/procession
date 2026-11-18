@@ -144,21 +144,21 @@ them.
 | # | Check of section 1.5 | Do | Observe | Result |
 |---|---|---|---|---|
 | 0 | | The five `make` lines above | Whether any `make` shows a prompt (expected: none), and whether all five print `MADE` | **Owner, 2026-11-18:** all five printed `MADE`, each with an `ecdsa-sha2-nistp256` public key line and a blob under `sechecks-keys/`. No prompt during `make`. No entitlement error |
-| 1a | 1 | `./sechecks sign plain` | `SIGNED`, no prompt | |
-| 1b | 1 | `./sechecks sign touch` and touch | A Touch ID prompt; `SIGNED` only after the touch. Copy the prompt's whole text, with the program name it shows | |
-| 1c | 1 | `./sechecks sign touchpw` and touch | The same. Whether the prompt offers "Use Password" | |
-| 2a | 2 | `./sechecks sign touch`, press Cancel | `NOT SIGNED`; the `domain` and `code` | |
-| 2b | 2 | `./sechecks sign touch`, do nothing | How many seconds until it ends by itself, if it does (wait 5 minutes at most); `domain` and `code` | |
-| 2c | 2 | `./sechecks sign touch --invalidate-after 10`, do nothing | The prompt closes after 10 s; `NOT SIGNED`; `domain` and `code`. If the prompt stays: a dialog cannot be closed at a deadline this way | |
-| 2d | 2 | `./sechecks sign touch`, use a wrong finger three times | What the prompt does; `domain` and `code` | |
+| 1a | 1 | `./sechecks sign plain` | `SIGNED`, no prompt | **Owner, 2026-11-18:** signed, no prompt |
+| 1b | 1 | `./sechecks sign touch` and touch | A Touch ID prompt; `SIGNED` only after the touch. Copy the prompt's whole text, with the program name it shows | **Owner, 2026-11-18:** a prompt "sechecks trying to sign ..."; signed after the touch. Later the same day: the prompt's text was as expected (not pasted) |
+| 1c | 1 | `./sechecks sign touchpw` and touch | The same. Whether the prompt offers "Use Password" | **Owner, 2026-11-18:** signed; and, reported later the same day, the prompt did offer "Use Password" |
+| 2a | 2 | `./sechecks sign touch`, press Cancel | `NOT SIGNED`; the `domain` and `code` | **Owner, 2026-11-18:** `NOT SIGNED touch after 12.0 s: error domain=com.apple.LocalAuthentication code=-2 ... Canceled by user.` |
+| 2b | 2 | `./sechecks sign touch`, do nothing | How many seconds until it ends by itself, if it does (wait 5 minutes at most); `domain` and `code` | not run |
+| 2c | 2 | `./sechecks sign touch --invalidate-after 10`, do nothing | The prompt closes after 10 s; `NOT SIGNED`; `domain` and `code`. If the prompt stays: a dialog cannot be closed at a deadline this way | **Owner, 2026-11-18,** run with `--invalidate-after 2`: `invalidating the context now`, then `NOT SIGNED touch after 2.1 s: error domain=com.apple.LocalAuthentication code=-9 ... Invalidated by client.` |
+| 2d | 2 | `./sechecks sign touch`, use a wrong finger three times | What the prompt does; `domain` and `code` | not run |
 | 3a | 3 | `cp -R sechecks-keys copy-keys` then `./sechecks-other --dir copy-keys sign plain` | `SIGNED` means: any program of yours can use a copied key that has no presence check. `LOAD FAILED` or `NOT SIGNED` means it cannot: copy the error | **Owner, 2026-11-18:** `sechecks-other: SIGNED plain after 0.0 s`. No prompt |
 | 3b | 3 | `./sechecks-other --dir copy-keys sign touch` and touch | Whether a prompt appears, **which program name it shows**, and whether it signs | **Owner, 2026-11-18:** a Touch ID prompt appeared and named the other program (his words: "eine touch id anfrage von sechecks other (trying to sign 32 bytes)"); after the touch, `sechecks-other: SIGNED touch after 2.6 s` |
 | 3c | 3 | `./sechecks-other --dir sechecks-keys sign plain` (the original files, the other program) | The same as 3a; tells a copied file from another program | |
-| 4a | 4 | `./sechecks twice touch fresh`, touch each time asked | Two prompts, two `SIGNED` | |
-| 4b | 4 | `./sechecks twice touch shared`, touch each time asked | One prompt or two. One means: a context that is kept signs again without the person | |
-| 5a | 5 | `./sechecks reason touch 60`, look, then touch or cancel | Whether the prompt shows the text up to `END` | |
-| 5b | 5 | `./sechecks reason touch 200` | The same; if cut, the last word shown | |
-| 5c | 5 | `./sechecks reason touch 600` | The same; whether the prompt grows, scrolls or cuts | |
+| 4a | 4 | `./sechecks twice touch fresh`, touch each time asked | Two prompts, two `SIGNED` | **Owner, 2026-11-18:** two prompts; `SIGNED first after 3.0 s`, `second after 1.4 s` |
+| 4b | 4 | `./sechecks twice touch shared`, touch each time asked | One prompt or two. One means: a context that is kept signs again without the person | **Owner, 2026-11-18:** **one** prompt; `SIGNED first, shared context after 1.4 s`, `SIGNED second, shared context after 0.0 s` |
+| 5a | 5 | `./sechecks reason touch 60`, look, then touch or cancel | Whether the prompt shows the text up to `END` | **Owner, 2026-11-18:** shown whole |
+| 5b | 5 | `./sechecks reason touch 200` | The same; if cut, the last word shown | **Owner, 2026-11-18:** shown through `END` |
+| 5c | 5 | `./sechecks reason touch 600` | The same; whether the prompt grows, scrolls or cuts | **Owner, 2026-11-18:** cut inside `word67` (characters 511 to 516 of the text) |
 | 6 | 6 | `./sechecks pub touch > touch.pub; ssh-keygen -l -f touch.pub` | No prompt for `pub`; a fingerprint, `(ECDSA)`, 256 | |
 | 7a | 7 | `echo hello > msg; ./sechecks sshsig touch approval-v1@procession msg`, touch; then `echo "jan:confirmed namespaces=\"approval-v1@procession\" $(cat touch.pub)" > allowed; ssh-keygen -Y verify -f allowed -I jan:confirmed -n approval-v1@procession -s msg.sig < msg` | `Good "approval-v1@procession" signature for jan:confirmed` | |
 | 7b | 7 | `echo hellp > msg2; ssh-keygen -Y verify -f allowed -I jan:confirmed -n approval-v1@procession -s msg.sig < msg2` | Refused | |
@@ -179,7 +179,7 @@ Check 15 changes your enrolled fingers; do it last or leave it out. Check
 
 Run by the owner on his Mac on 2026-11-18, from this source as it is on
 `integration`; relayed by the designer. They are his observations, not the
-author's. Not yet run: 1, 2, 3c, 4, 5 and the rest.
+author's. Not yet run: 2b, 2d, 3c, and 6 to 16.
 
 - **Check 0.** An ad-hoc signed command line program without a bundle and
   without entitlements can make and use Secure Enclave keys through
@@ -193,7 +193,21 @@ author's. Not yet run: 1, 2, 3c, 4, 5 and the rest.
   holds (no signature without the touch); who is asking is told only by
   the prompt.
 
-What follows from them is in `../stage2-mac.md`, section 1.6.
+- **Checks 1a, 1b.** Keys with and without a presence check exist side by
+  side and each behaves as made.
+- **Check 1c.** A key made with `.userPresence` offers "Use Password": it
+  falls back to the account password.
+- **Check 2.** The person's cancel is code -2, the program's own closing
+  of the prompt is code -9 (`com.apple.LocalAuthentication`). A prompt
+  can be closed at a deadline.
+- **Check 4.** With a fresh context each, two signatures need two touches.
+  **With one kept context, the second signature needs none.**
+- **Check 5.** The prompt showed between 510 and 515 characters of the
+  program's text.
+
+What follows from them is in `../stage2-mac.md`: section 1.6 (the results),
+section 2.2 (the rule that no context is kept, the four endings, the
+budget for the prompt's words) and section 6.5 (what must be tested).
 
 ## 5. What it leaves on the machine, and how to remove it
 

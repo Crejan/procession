@@ -253,7 +253,7 @@ async fn page_status_exits_6_when_an_enabled_person_has_no_valid_certificate_and
 }
 
 #[test]
-fn the_configuration_names_the_site_ca_and_the_directory_together_or_not_at_all() {
+fn the_configuration_names_the_site_ca_and_may_name_the_directory() {
     use p_age::config::{Config, ConfigError};
     let w = World::new();
     let dir = w.keys.dir.path().display();
@@ -267,13 +267,17 @@ fn the_configuration_names_the_site_ca_and_the_directory_together_or_not_at_all(
         std::fs::write(&path, t).unwrap();
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
     };
+    // the site CA key is required (the broker's own certificate is checked against it)
     write(text(""));
-    assert!(Config::read(&path).unwrap().certificates.is_none());
+    assert!(matches!(Config::read(&path), Err(ConfigError::Settings(_))));
     write(text(&format!(r#","site_ca":"{dir}/site-ca.pub""#)));
-    assert!(matches!(Config::read(&path), Err(ConfigError::CertificatesPair)));
-    write(text(&format!(r#","certificates":"{}""#, w.certs_dir.display())));
-    assert!(matches!(Config::read(&path), Err(ConfigError::CertificatesPair)));
-    // both: the broker built from it carries the certificates
+    assert!(Config::read(&path).unwrap().certificates.is_none());
+    // the broker's certificate: `ssh-keygen` finds the key by its name, so it is `<broker_key>-cert.pub` or not given
+    write(text(&format!(r#","site_ca":"{dir}/site-ca.pub","broker_certificate":"{dir}/broker-cert.pub""#)));
+    assert!(Config::read(&path).is_ok());
+    write(text(&format!(r#","site_ca":"{dir}/site-ca.pub","broker_certificate":"{dir}/elsewhere.pub""#)));
+    assert!(matches!(Config::read(&path), Err(ConfigError::BrokerCertificatePath { .. })));
+    // with the directory: the broker built from it carries the certificates
     SiteBuilder_write(&w);
     write(text(&format!(r#","site_ca":"{dir}/site-ca.pub","certificates":"{}""#, w.certs_dir.display())));
     let config = Config::read(&path).unwrap();
@@ -283,6 +287,7 @@ fn the_configuration_names_the_site_ca_and_the_directory_together_or_not_at_all(
     let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
     let Reply::Status(s) = rt.block_on(execute(&broker, Command::Status)) else { panic!("status") };
     assert_eq!(s.certificates.unwrap().carried, 4);
+    assert!(s.broker_certificate.unwrap().valid);
     // a site CA key that others can write is refused, like a settings file
     std::fs::set_permissions(w.keys.path("site-ca.pub"), std::fs::Permissions::from_mode(0o666)).unwrap();
     assert!(matches!(config.build(), Err(ConfigError::SiteCa { .. })));
