@@ -507,6 +507,9 @@ impl p_age::crypto::Crypto for SlowCrypto {
     fn broker_certificate_file(&self) -> PathBuf {
         self.inner.broker_certificate_file()
     }
+    fn keygen_usable(&self) -> Result<(), String> {
+        self.inner.keygen_usable()
+    }
     fn check_broker_certificate(
         &self,
         ca: &PublicKey,

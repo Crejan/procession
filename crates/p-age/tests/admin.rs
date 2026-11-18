@@ -383,6 +383,7 @@ fn commands_and_answers_are_read_as_strictly_as_everything_else() {
         assert_eq!(Command::parse(&line[..line.len() - 1]), Some(c));
     }
     let status = p_age::core::Status {
+        keygen_unusable: Some("/usr/bin/ssh-keygen is not trusted: it is owned by user 501".into()),
         degraded: Some("read-only"),
         pledges: 1,
         held: 2,
@@ -408,7 +409,7 @@ fn commands_and_answers_are_read_as_strictly_as_everything_else() {
         Reply::Done(Err("no-space")),
         Reply::Refused(p_age::admin::Refusal::Unavailable, Some("io")),
         Reply::Refused(p_age::admin::Refusal::UnknownKey, None),
-        Reply::Status(status),
+        Reply::Status(Box::new(status)),
     ] {
         let line = r.encode();
         assert_eq!(Reply::parse(&line[..line.len() - 1]), Some(r));

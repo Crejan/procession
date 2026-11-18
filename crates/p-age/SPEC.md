@@ -134,9 +134,10 @@ it. `site_ca` (the path to the site CA's public key) is required: there is no
 mode, test support included, in which the broker does not check its own
 certificate. It is checked at start and once a minute: its one principal is
 `broker`, issued by the site CA, valid now, no critical option, no extension, and
-it certifies the key the broker holds (until p-act's `verify_broker_certificate`
-is used, the check signs a probe with the key and reads the certificate out of
-that signature, which is what a service or a pledge verifies). A broker without a
+it certifies the key the broker holds (the broker reads `<broker_key>-cert.pub`,
+checks it with `p_act::sign::check_broker_certificate` and compares its key with
+`<broker_key>.pub`; the time it judges itself, so that "not yet valid" and
+"ended" are told apart). A broker without a
 valid one is **not ready** and vouches for nothing:
 - an approval that comes back is answered to the service `refused` with the
   reason `not-ready`, with no clearance; the broker logs `approval-lost:not-ready`
@@ -150,6 +151,15 @@ valid one is **not ready** and vouches for nothing:
 - a pledge already connected when the certificate ends is told `not-ready` once,
   at the end (the sweep sees it, every second), and the same holds from then.
 `not-ready` is a code of its own; `busy` keeps its one meaning (too many open).
+
+**`ssh-keygen`.** Every signature is made and verified by the system's
+`ssh-keygen`, started only through `p_act::keygen::Keygen::system` (the broker
+starts it nowhere else): `/usr/bin/ssh-keygen`, owned by root with the
+directories above it, a cleared environment, version 8.9 or later. When it
+cannot be used the broker can verify and sign nothing; `page status` then has
+a line of its own, `ssh-keygen-unusable`, with the reason. It has the same
+meaning as code 7 (the broker vouches for nothing), so it has the same exit
+code and no code of its own.
 
 **`page status`** prints every condition that holds, one line each, and exits with
 the gravest, in the order 7, 5, 6; the exit code is the gravest condition and the
