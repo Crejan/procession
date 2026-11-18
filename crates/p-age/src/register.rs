@@ -44,6 +44,8 @@ pub struct SnapshotEntry {
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Snapshot {
+    /// The version of the file's format: 1.
+    pub v: u32,
     pub delegations: Vec<SnapshotEntry>,
     pub blocked: Vec<String>,
 }
@@ -126,6 +128,7 @@ impl Register {
     #[must_use]
     pub fn snapshot(&self) -> Snapshot {
         Snapshot {
+            v: 1,
             delegations: self
                 .delegations
                 .iter()

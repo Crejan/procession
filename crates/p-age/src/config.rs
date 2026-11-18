@@ -25,6 +25,12 @@ pub enum ConfigError {
     Parse { path: String, source: serde_json::Error },
     #[error(transparent)]
     Site(#[from] SiteError),
+    #[error(transparent)]
+    Perm(#[from] crate::perm::PermError),
+    #[error(transparent)]
+    State(#[from] crate::core::StateError),
+    #[error("`listen` names no address")]
+    NoAddress,
     #[error("cannot open the log {path}: {source}")]
     Log { path: String, source: std::io::Error },
 }
@@ -41,16 +47,16 @@ fn max_connections() -> usize {
     512
 }
 
-/// The configuration file.
+/// The configuration file: one JSON object, an unknown member refused, the file refused if anyone but its owner
+/// or root can write it.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Config {
     /// The site file: persons, hosts, keys.
     pub site: PathBuf,
-    /// Where services connect, `host:port`.
-    pub listen_services: String,
-    /// Where pledges connect, `host:port`.
-    pub listen_pledges: String,
+    /// Where to listen, `host:port`, one or several. A service and a pledge may use the same address; all
+    /// addresses behave the same.
+    pub listen: Vec<String>,
     /// The TLS certificate chain and key (PEM), from the site's TLS root.
     pub tls_cert: PathBuf,
     pub tls_key: PathBuf,
@@ -73,14 +79,21 @@ pub struct Config {
 impl Config {
     pub fn read(path: &Path) -> Result<Config, ConfigError> {
         let shown = path.display().to_string();
+        // A configuration that someone else can change is refused.
+        crate::perm::check_config_file(path)?;
         let bytes = std::fs::read(path).map_err(|source| ConfigError::Read { path: shown.clone(), source })?;
-        serde_json::from_slice(&bytes).map_err(|source| ConfigError::Parse { path: shown, source })
+        let config: Config =
+            serde_json::from_slice(&bytes).map_err(|source| ConfigError::Parse { path: shown, source })?;
+        if config.listen.is_empty() {
+            return Err(ConfigError::NoAddress);
+        }
+        Ok(config)
     }
 
     /// The broker this configuration describes, not yet listening.
     pub fn build(&self) -> Result<Arc<Broker>, ConfigError> {
         let site = Arc::new(Site::read(&self.site)?);
-        let register = Core::read_state(&self.state_dir.join("register.json"));
+        let register = Core::read_state(&self.state_dir.join("register.json"))?;
         let log = FileLog::open(&self.log)
             .map_err(|source| ConfigError::Log { path: self.log.display().to_string(), source })?;
         let crypto = Arc::new(SshCrypto::new(&self.broker_key));

@@ -19,7 +19,7 @@ use p_act::{Call, CallContent, CallId, Document, DocumentHash, Request, ServiceI
 use p_age::core::{Core, Settings};
 use p_age::crypto::SshCrypto;
 use p_age::log::MemoryLog;
-use p_age::net::{Broker, Clock, Lines, Timeouts, serve_pledge, serve_service};
+use p_age::net::{Broker, Clock, Lines, Timeouts, serve_connection};
 use p_age::site::Site;
 use p_age::wire::ConnectionDoc;
 use tempfile::TempDir;
@@ -33,7 +33,9 @@ pub struct Keys {
 
 impl Keys {
     pub fn new() -> Keys {
-        Keys { dir: tempfile::tempdir().unwrap() }
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::set_permissions(dir.path(), std::os::unix::fs::PermissionsExt::from_mode(0o700)).unwrap();
+        Keys { dir }
     }
 
     pub fn path(&self, name: &str) -> PathBuf {
@@ -153,7 +155,7 @@ impl World {
         let core = Core::new(
             Arc::clone(&site),
             settings,
-            Core::read_state(&state),
+            Core::read_state(&state).unwrap(),
             Some(state.clone()),
             crypto.clone(),
             Box::new(log.clone()),
@@ -276,21 +278,27 @@ pub fn open_service(w: &World) -> Client {
 }
 
 pub fn open_service_on(broker: &Arc<Broker>, timeouts: Timeouts) -> Client {
-    let (a, b) = duplex(1 << 20);
-    tokio::spawn(serve_service(b, Arc::clone(broker)));
-    Client::new(a, timeouts)
+    open_raw_on(broker, BINDING, timeouts)
 }
 
 pub const BINDING: [u8; 32] = [7; 32];
 
-pub fn open_pledge_on(broker: &Arc<Broker>, binding: [u8; 32], timeouts: Timeouts) -> Client {
+/// A connection to the broker that has not said what it is.
+pub fn open_raw_on(broker: &Arc<Broker>, binding: [u8; 32], timeouts: Timeouts) -> Client {
     let (a, b) = duplex(1 << 20);
-    tokio::spawn(serve_pledge(b, binding, Arc::clone(broker)));
+    tokio::spawn(serve_connection(b, binding, Arc::clone(broker)));
     Client::new(a, timeouts)
 }
 
-pub fn open_pledge(w: &World) -> Client {
-    open_pledge_on(&w.broker, BINDING, Timeouts::default())
+/// A pledge's connection: it has said `hello`; the challenge is next.
+pub async fn open_pledge_on(broker: &Arc<Broker>, binding: [u8; 32], timeouts: Timeouts) -> Client {
+    let mut c = open_raw_on(broker, binding, timeouts);
+    c.send_json(serde_json::json!({"schema_version":1,"type":"hello"})).await;
+    c
+}
+
+pub async fn open_pledge(w: &World) -> Client {
+    open_pledge_on(&w.broker, BINDING, Timeouts::default()).await
 }
 
 /// The sign-in message for `person`, signed with `key`, for the nonce and binding given.

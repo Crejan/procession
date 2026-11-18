@@ -23,6 +23,8 @@ pub enum SiteError {
     BadKey { what: &'static str, name: String, source: SignError },
     #[error("`{0}` appears twice")]
     Duplicate(String),
+    #[error(transparent)]
+    Perm(#[from] crate::perm::PermError),
 }
 
 /// A person's name or a host's name: `[A-Za-z0-9._-]+`, at most 64 characters.
@@ -90,6 +92,7 @@ impl Site {
     /// Read the site file (JSON): `{"persons":[{"name","enabled","connection_key","delegation_key"}],"hosts":[{"name","key"}]}`.
     pub fn read(path: &Path) -> Result<Site, SiteError> {
         let shown = path.display().to_string();
+        crate::perm::check_config_file(path)?;
         let text = std::fs::read(path).map_err(|source| SiteError::Read { path: shown.clone(), source })?;
         let file: SiteFile =
             serde_json::from_slice(&text).map_err(|source| SiteError::Parse { path: shown, source })?;

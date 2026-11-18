@@ -26,8 +26,8 @@ use crate::crypto::Crypto;
 use crate::site::Site;
 use crate::tls;
 use crate::wire::{
-    ConnectionDoc, ParseFailure, PledgeIn, PledgeOut, ServiceIn, ServiceOut, challenge_line, parse_pledge_line,
-    parse_service_line, pledge_line, service_line,
+    ConnectionDoc, First, ParseFailure, PledgeIn, PledgeOut, ServiceIn, ServiceOut, challenge_line, first_kind,
+    parse_pledge_line, parse_service_line, pledge_line, service_line,
 };
 
 /// The waits of the connections. The defaults are the document's; tests shorten them.
@@ -270,19 +270,24 @@ async fn send_pledge_error<W: AsyncWrite + Unpin>(w: &mut W, code: ErrorCode) {
     }
 }
 
-/// One service connection (section 4): one request, and its answer.
-pub async fn serve_service<S>(stream: S, broker: Arc<Broker>)
+/// One service connection (section 4): one request, and its answer. `first` is the `submit` that began it.
+async fn service_loop<R, W>(mut lines: Lines<R>, mut wr: W, first: Vec<u8>, broker: Arc<Broker>)
 where
-    S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
+    R: AsyncRead + Unpin,
+    W: AsyncWrite + Unpin,
 {
     let conn = broker.new_conn();
     let mut rx = broker.attach(conn);
-    let (rd, mut wr) = tokio::io::split(stream);
-    let mut lines = Lines::new(rd, broker.timeouts.line);
+    let mut pending = Some(first);
     let mut submitted = false;
     loop {
         tokio::select! {
-            read = lines.read(if submitted { None } else { Some(broker.timeouts.first_line) }) => {
+            read = async {
+                match pending.take() {
+                    Some(line) => Ok(Some(line)),
+                    None => lines.read(None).await,
+                }
+            } => {
                 let line = match read {
                     Ok(Some(line)) => line,
                     Ok(None) => break,
@@ -359,20 +364,48 @@ async fn submit_from_service(broker: &Arc<Broker>, conn: ConnId, submit: p_act::
     }
 }
 
+/// One connection, of either kind. Its first message says which exchange it carries (section 4): `submit` is a
+/// service's, `hello` a pledge's; anything else is `error` `malformed-line`. Where it arrived means nothing.
+/// `binding` is what both ends exported from the TLS connection, for a pledge's sign-in.
+pub async fn serve_connection<S>(stream: S, binding: [u8; 32], broker: Arc<Broker>)
+where
+    S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
+{
+    let (rd, mut wr) = tokio::io::split(stream);
+    let mut lines = Lines::new(rd, broker.timeouts.line);
+    let first = match lines.read(Some(broker.timeouts.first_line)).await {
+        Ok(Some(line)) => line,
+        Ok(None) => return,
+        Err(e) => {
+            if let Some(code) = read_error_code(&e) {
+                send_pledge_error(&mut wr, code).await;
+            }
+            return;
+        }
+    };
+    match first_kind(&first) {
+        First::Service => service_loop(lines, wr, first, broker).await,
+        First::Pledge => pledge_loop(lines, wr, binding, broker).await,
+        First::Refuse(code) => {
+            send_pledge_error(&mut wr, code).await;
+            let _ = wr.shutdown().await;
+        }
+    }
+}
+
 fn random_b64() -> Option<String> {
     let mut bytes = [0u8; 32];
     SystemRandom::new().fill(&mut bytes).ok()?;
     Some(STANDARD.encode(bytes))
 }
 
-/// One pledge connection (section 5). `binding` is what both ends exported from the TLS connection;
-/// it ties the sign-in to this connection.
-pub async fn serve_pledge<S>(stream: S, binding: [u8; 32], broker: Arc<Broker>)
+/// One pledge connection (section 5), after its `hello`. `binding` is what both ends exported from the TLS
+/// connection; it ties the sign-in to this connection.
+async fn pledge_loop<R, W>(mut lines: Lines<R>, mut wr: W, binding: [u8; 32], broker: Arc<Broker>)
 where
-    S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
+    R: AsyncRead + Unpin,
+    W: AsyncWrite + Unpin,
 {
-    let (rd, mut wr) = tokio::io::split(stream);
-    let mut lines = Lines::new(rd, broker.timeouts.line);
     let Some(nonce) = random_b64() else { return };
     if !write_line(&mut wr, &challenge_line(&nonce)).await {
         return;
@@ -475,7 +508,9 @@ where
     };
     let (doc, sig) = match parse_pledge_line(&line) {
         Ok(PledgeIn::Signin { doc, doc_sig }) => (doc, doc_sig),
-        Err(ParseFailure::Close(Some(code))) => {
+        // A line that is not JSON at all is told so; what is JSON but is not a sign-in is `signin`, whether or not
+        // it is a message the broker knows, so that the vocabulary of the protocol is not probed before sign-in.
+        Err(ParseFailure::Close(Some(code))) if code != ErrorCode::UnknownType => {
             send_pledge_error(wr, code).await;
             return None;
         }
@@ -556,15 +591,9 @@ impl Drop for Slot {
     }
 }
 
-/// Which of the two connections a listener serves.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Kind {
-    Service,
-    Pledge,
-}
-
-/// Accept connections for ever: TLS first (the handshake within 10 s), then the connection of `kind`.
-pub async fn listen(listener: TcpListener, acceptor: TlsAcceptor, broker: Arc<Broker>, limits: ConnLimits, kind: Kind) {
+/// Accept connections for ever: TLS first (the handshake within 10 s), then the connection itself. An address
+/// means nothing: a service and a pledge may use the same one, and a site may listen on several.
+pub async fn listen(listener: TcpListener, acceptor: TlsAcceptor, broker: Arc<Broker>, limits: ConnLimits) {
     loop {
         let Ok((tcp, peer)) = listener.accept().await else {
             tokio::time::sleep(Duration::from_millis(100)).await;
@@ -574,27 +603,22 @@ pub async fn listen(listener: TcpListener, acceptor: TlsAcceptor, broker: Arc<Br
         let (acceptor, broker) = (acceptor.clone(), Arc::clone(&broker));
         tokio::spawn(async move {
             let _slot = slot;
-            serve_tls(tcp, acceptor, broker, kind).await;
+            serve_tls(tcp, acceptor, broker).await;
         });
     }
 }
 
-/// One accepted connection of `kind`: the TLS handshake within 10 s, then the connection itself. A pledge's
-/// sign-in is tied to the TLS connection by what both ends export from it.
-pub async fn serve_tls<S>(stream: S, acceptor: TlsAcceptor, broker: Arc<Broker>, kind: Kind)
+/// One accepted connection: the TLS handshake within 10 s, then [`serve_connection`] with what both ends
+/// export from the TLS connection.
+pub async fn serve_tls<S>(stream: S, acceptor: TlsAcceptor, broker: Arc<Broker>)
 where
     S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
 {
     let Ok(Ok(stream)) = tokio::time::timeout(Duration::from_secs(10), acceptor.accept(stream)).await else {
         return;
     };
-    match kind {
-        Kind::Service => serve_service(stream, broker).await,
-        Kind::Pledge => {
-            let Some(binding) = tls::exporter(stream.get_ref().1) else { return };
-            serve_pledge(stream, binding, broker).await;
-        }
-    }
+    let Some(binding) = tls::exporter(stream.get_ref().1) else { return };
+    serve_connection(stream, binding, broker).await;
 }
 
 /// Run the deadline sweep once a second for ever.

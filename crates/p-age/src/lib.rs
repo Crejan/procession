@@ -17,6 +17,7 @@ pub mod crypto;
 pub mod keygen;
 pub mod log;
 pub mod net;
+pub mod perm;
 pub mod register;
 pub mod site;
 pub mod tls;

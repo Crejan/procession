@@ -9,7 +9,7 @@ use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD;
 use common::*;
 use p_act::exchange::{ClearancePolicy, Message};
-use p_age::net::{Kind, Lines, serve_tls};
+use p_age::net::{Lines, serve_tls};
 use p_age::tls::{EXPORTER_LABEL, client_config, server_config};
 use p_age::wire::ConnectionDoc;
 use rcgen::{BasicConstraints, CertificateParams, IsCa, Issuer, KeyPair};
@@ -43,7 +43,7 @@ async fn a_pledge_signs_in_over_tls_with_the_binding_both_ends_export() {
     let w = World::new();
     let p = pki();
     let (client_end, server_end) = duplex(1 << 20);
-    tokio::spawn(serve_tls(server_end, acceptor(&p), Arc::clone(&w.broker), Kind::Pledge));
+    tokio::spawn(serve_tls(server_end, acceptor(&p), Arc::clone(&w.broker)));
     let connector = TlsConnector::from(client_config(p.root_pem.as_bytes()).unwrap());
     let tls = connector.connect(ServerName::try_from("broker.test").unwrap(), client_end).await.unwrap();
     assert_eq!(tls.get_ref().1.protocol_version(), Some(rustls::ProtocolVersion::TLSv1_3));
@@ -53,6 +53,7 @@ async fn a_pledge_signs_in_over_tls_with_the_binding_both_ends_export() {
     let mut lines = Lines::new(rd, std::time::Duration::from_secs(5));
     let mut wr = wr;
 
+    wr.write_all(b"{\"schema_version\":1,\"type\":\"hello\"}\n").await.unwrap();
     let challenge: serde_json::Value = serde_json::from_slice(&lines.read(None).await.unwrap().unwrap()).unwrap();
     let nonce = challenge["nonce"].as_str().unwrap();
     // the signature is over the binding of this connection: it is accepted here
@@ -67,11 +68,12 @@ async fn a_sign_in_made_for_another_tls_connection_is_refused() {
     let w = World::new();
     let p = pki();
     let (client_end, server_end) = duplex(1 << 20);
-    tokio::spawn(serve_tls(server_end, acceptor(&p), Arc::clone(&w.broker), Kind::Pledge));
+    tokio::spawn(serve_tls(server_end, acceptor(&p), Arc::clone(&w.broker)));
     let connector = TlsConnector::from(client_config(p.root_pem.as_bytes()).unwrap());
     let tls = connector.connect(ServerName::try_from("broker.test").unwrap(), client_end).await.unwrap();
     let (rd, mut wr) = tokio::io::split(tls);
     let mut lines = Lines::new(rd, std::time::Duration::from_secs(5));
+    wr.write_all(b"{\"schema_version\":1,\"type\":\"hello\"}\n").await.unwrap();
     let challenge: serde_json::Value = serde_json::from_slice(&lines.read(None).await.unwrap().unwrap()).unwrap();
     // a binding exported from some other connection (here: made up), correctly signed
     let doc = ConnectionDoc::compose("jan", challenge["nonce"].as_str().unwrap(), &STANDARD.encode([9u8; 32]));
@@ -87,7 +89,7 @@ async fn a_service_talks_to_the_broker_over_tls_and_a_wrong_root_is_not_trusted(
     let w = World::new();
     let p = pki();
     let (client_end, server_end) = duplex(1 << 20);
-    tokio::spawn(serve_tls(server_end, acceptor(&p), Arc::clone(&w.broker), Kind::Service));
+    tokio::spawn(serve_tls(server_end, acceptor(&p), Arc::clone(&w.broker)));
     let connector = TlsConnector::from(client_config(p.root_pem.as_bytes()).unwrap());
     let tls = connector.connect(ServerName::try_from("broker.test").unwrap(), client_end).await.unwrap();
     let (rd, mut wr) = tokio::io::split(tls);
@@ -104,11 +106,11 @@ async fn a_service_talks_to_the_broker_over_tls_and_a_wrong_root_is_not_trusted(
     // a client that trusts another root refuses the broker
     let other = pki();
     let (client_end, server_end) = duplex(1 << 20);
-    tokio::spawn(serve_tls(server_end, acceptor(&p), Arc::clone(&w.broker), Kind::Service));
+    tokio::spawn(serve_tls(server_end, acceptor(&p), Arc::clone(&w.broker)));
     let wrong = TlsConnector::from(client_config(other.root_pem.as_bytes()).unwrap());
     assert!(wrong.connect(ServerName::try_from("broker.test").unwrap(), client_end).await.is_err());
     // and a client that asks for another name
     let (client_end, server_end) = duplex(1 << 20);
-    tokio::spawn(serve_tls(server_end, acceptor(&p), Arc::clone(&w.broker), Kind::Service));
+    tokio::spawn(serve_tls(server_end, acceptor(&p), Arc::clone(&w.broker)));
     assert!(connector.connect(ServerName::try_from("elsewhere.test").unwrap(), client_end).await.is_err());
 }

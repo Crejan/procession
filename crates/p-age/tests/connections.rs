@@ -49,7 +49,7 @@ fn refusal(a: &p_act::exchange::Answer) -> BrokerReason {
 #[tokio::test]
 async fn a_request_goes_through_and_the_service_can_verify_approval_and_clearance_itself() {
     let w = World::new();
-    let mut pledge = open_pledge(&w);
+    let mut pledge = open_pledge(&w).await;
     let standing = pledge.connect_as("jan", &w.jan_connection).await;
     assert_eq!(standing["n"], 0);
     register(&w, &mut pledge).await;
@@ -92,7 +92,7 @@ async fn a_request_goes_through_and_the_service_can_verify_approval_and_clearanc
 #[tokio::test]
 async fn the_standing_is_signed_by_the_broker_in_its_own_namespace_and_only_there() {
     let w = World::new();
-    let mut pledge = open_pledge(&w);
+    let mut pledge = open_pledge(&w).await;
     let nonce = pledge.sign_in("jan", &w.jan_connection).await;
     assert_eq!(pledge.recv_type().await, "ready");
     let notice = pledge.recv().await;
@@ -115,41 +115,94 @@ async fn the_standing_is_signed_by_the_broker_in_its_own_namespace_and_only_ther
     assert!(!verify_as_broker(&w, Namespace::Broker, clearance.as_bytes(), &p_act::sign::signature_to_base64(&csig)));
 }
 
+// --- the first message --------------------------------------------------------
+
+#[tokio::test]
+async fn the_first_message_says_which_exchange_this_is() {
+    let w = World::new();
+    // anything but `submit` and `hello` is a malformed line, and the connection is closed
+    for first in [
+        serde_json::json!({"schema_version":1,"type":"ping"}),
+        serde_json::json!({"schema_version":1,"type":"ack","request":hash_of(&w.submit(1, 120)).to_string()}),
+        serde_json::json!({"schema_version":1,"type":"cancel","request":hash_of(&w.submit(1, 120)).to_string()}),
+        serde_json::json!({"schema_version":1,"type":"signin","doc":"","doc_sig":""}),
+        serde_json::json!({"schema_version":1,"type":"nonsense"}),
+        serde_json::json!({"type":"hello"}),
+        serde_json::json!([1, 2]),
+    ] {
+        let mut c = open_service(&w);
+        c.send_json(first.clone()).await;
+        assert_eq!(c.recv().await["error"], "malformed-line", "{first}");
+        c.expect_closed().await;
+    }
+    // a hello that carries anything, or another version
+    let mut c = open_service(&w);
+    c.send_json(serde_json::json!({"schema_version":1,"type":"hello","person":"jan"})).await;
+    assert_eq!(c.recv().await["error"], "malformed-line");
+    let mut c = open_service(&w);
+    c.send_json(serde_json::json!({"schema_version":2,"type":"hello"})).await;
+    assert_eq!(c.recv().await["error"], "unsupported-version");
+    // a line that is not JSON
+    let mut c = open_service(&w);
+    c.send(b"hello\n").await;
+    assert_eq!(c.recv().await["error"], "malformed-line");
+    // a hello is answered with a challenge, and only then; a submit is a service's, on the same address
+    let mut c = open_pledge(&w).await;
+    assert_eq!(c.recv_type().await, "challenge");
+    let mut s = open_service(&w);
+    s.send(&submit_line(&w.submit(1, 120))).await;
+    assert_eq!(service_answer(&mut s).await.request, hash_of(&w.submit(1, 120)));
+}
+
+#[tokio::test]
+async fn a_connection_that_says_nothing_is_closed() {
+    let quick = Timeouts {
+        line: Duration::from_millis(300),
+        first_line: Duration::from_millis(300),
+        signin: Duration::from_millis(300),
+        pledge_silence: Duration::from_millis(500),
+    };
+    let w = World::with(Settings::default(), quick);
+    let mut c = open_raw_on(&w.broker, BINDING, quick);
+    assert_eq!(c.recv().await["error"], "timeout");
+    c.expect_closed().await;
+}
+
 // --- sign-in ----------------------------------------------------------------
 
 #[tokio::test]
 async fn a_sign_in_that_does_not_verify_is_one_error_whatever_is_wrong() {
     let w = World::new();
     // the wrong key
-    let mut c = open_pledge(&w);
+    let mut c = open_pledge(&w).await;
     let nonce = c.recv().await["nonce"].as_str().unwrap().to_owned();
     c.send_json(signin_message("jan", &w.eva_connection, &nonce, BINDING)).await;
     assert_eq!(c.recv().await["error"], "signin");
     c.expect_closed().await;
     // another connection's nonce
-    let mut c = open_pledge(&w);
+    let mut c = open_pledge(&w).await;
     c.recv().await;
     c.send_json(signin_message("jan", &w.jan_connection, "bm90LXRoZS1ub25jZQ==", BINDING)).await;
     assert_eq!(c.recv().await["error"], "signin");
     // another connection's TLS binding
-    let mut c = open_pledge(&w);
+    let mut c = open_pledge(&w).await;
     let nonce = c.recv().await["nonce"].as_str().unwrap().to_owned();
     c.send_json(signin_message("jan", &w.jan_connection, &nonce, [8; 32])).await;
     assert_eq!(c.recv().await["error"], "signin");
     // a person the site does not have
-    let mut c = open_pledge(&w);
+    let mut c = open_pledge(&w).await;
     let nonce = c.recv().await["nonce"].as_str().unwrap().to_owned();
     c.send_json(signin_message("mallory", &w.jan_connection, &nonce, BINDING)).await;
     assert_eq!(c.recv().await["error"], "signin");
     // a sign-in signed in another namespace
-    let mut c = open_pledge(&w);
+    let mut c = open_pledge(&w).await;
     let nonce = c.recv().await["nonce"].as_str().unwrap().to_owned();
     let doc = p_age::wire::ConnectionDoc::compose("jan", &nonce, &STANDARD.encode(BINDING));
     let sig = p_age::keygen::sign(&w.jan_connection, Namespace::Request, &doc).unwrap();
     c.send_json(serde_json::json!({"schema_version":1,"type":"signin","doc":STANDARD.encode(&doc),"doc_sig":p_act::sign::signature_to_base64(&sig)})).await;
     assert_eq!(c.recv().await["error"], "signin");
     // something that is not a sign-in at all
-    let mut c = open_pledge(&w);
+    let mut c = open_pledge(&w).await;
     c.recv().await;
     c.send_json(serde_json::json!({"schema_version":1,"type":"ping"})).await;
     assert_eq!(c.recv().await["error"], "signin");
@@ -159,11 +212,11 @@ async fn a_sign_in_that_does_not_verify_is_one_error_whatever_is_wrong() {
 async fn a_blocked_person_is_told_so_only_after_the_signature_verified() {
     let w = World::new();
     w.broker.block_person("jan".into()).await;
-    let mut c = open_pledge(&w);
+    let mut c = open_pledge(&w).await;
     let nonce = c.recv().await["nonce"].as_str().unwrap().to_owned();
     c.send_json(signin_message("jan", &w.eva_connection, &nonce, BINDING)).await;
     assert_eq!(c.recv().await["error"], "signin", "a wrong key learns nothing about blocks");
-    let mut c = open_pledge(&w);
+    let mut c = open_pledge(&w).await;
     c.sign_in("jan", &w.jan_connection).await;
     assert_eq!(c.recv().await["error"], "blocked");
     c.expect_closed().await;
@@ -172,9 +225,9 @@ async fn a_blocked_person_is_told_so_only_after_the_signature_verified() {
 #[tokio::test]
 async fn a_second_connection_of_the_same_person_supersedes_the_first() {
     let w = World::new();
-    let mut first = open_pledge(&w);
+    let mut first = open_pledge(&w).await;
     first.connect_as("jan", &w.jan_connection).await;
-    let mut second = open_pledge(&w);
+    let mut second = open_pledge(&w).await;
     second.connect_as("jan", &w.jan_connection).await;
     assert_eq!(first.recv().await["error"], "superseded");
     first.expect_closed().await;
@@ -191,7 +244,7 @@ async fn a_second_connection_of_the_same_person_supersedes_the_first() {
 #[tokio::test]
 async fn a_request_waits_for_a_pledge_that_is_away_and_comes_after_the_standing_when_it_returns() {
     let w = World::new();
-    let mut pledge = open_pledge(&w);
+    let mut pledge = open_pledge(&w).await;
     pledge.connect_as("jan", &w.jan_connection).await;
     register(&w, &mut pledge).await;
     drop(pledge); // the machine goes to sleep
@@ -203,7 +256,7 @@ async fn a_request_waits_for_a_pledge_that_is_away_and_comes_after_the_standing_
     tokio::time::sleep(Duration::from_millis(300)).await;
     assert_eq!(w.broker.held_count(), 1);
 
-    let mut pledge = open_pledge(&w);
+    let mut pledge = open_pledge(&w).await;
     pledge.sign_in("jan", &w.jan_connection).await;
     let order = [pledge.recv_type().await, pledge.recv_type().await, pledge.recv_type().await];
     assert_eq!(order, ["ready", "notice", "submit"]);
@@ -216,7 +269,7 @@ async fn a_request_waits_for_a_pledge_that_is_away_and_comes_after_the_standing_
 #[tokio::test]
 async fn a_service_that_lost_its_connection_submits_the_same_bytes_and_gets_the_answer_it_missed() {
     let w = World::new();
-    let mut pledge = open_pledge(&w);
+    let mut pledge = open_pledge(&w).await;
     pledge.connect_as("jan", &w.jan_connection).await;
     register(&w, &mut pledge).await;
     let submit = w.submit(1, 120);
@@ -240,7 +293,7 @@ async fn a_service_that_lost_its_connection_submits_the_same_bytes_and_gets_the_
 #[tokio::test]
 async fn a_second_connection_for_the_same_request_takes_the_place_of_the_first() {
     let w = World::new();
-    let mut pledge = open_pledge(&w);
+    let mut pledge = open_pledge(&w).await;
     pledge.connect_as("jan", &w.jan_connection).await;
     register(&w, &mut pledge).await;
     let submit = w.submit(1, 120);
@@ -256,7 +309,7 @@ async fn a_second_connection_for_the_same_request_takes_the_place_of_the_first()
 #[tokio::test]
 async fn at_the_deadline_the_service_is_told_expired() {
     let w = World::new();
-    let mut pledge = open_pledge(&w);
+    let mut pledge = open_pledge(&w).await;
     pledge.connect_as("jan", &w.jan_connection).await;
     register(&w, &mut pledge).await;
     let submit = w.submit(1, 60);
@@ -274,7 +327,7 @@ async fn at_the_deadline_the_service_is_told_expired() {
 #[tokio::test]
 async fn a_cancel_from_the_service_reaches_the_pledge() {
     let w = World::new();
-    let mut pledge = open_pledge(&w);
+    let mut pledge = open_pledge(&w).await;
     pledge.connect_as("jan", &w.jan_connection).await;
     register(&w, &mut pledge).await;
     let submit = w.submit(1, 120);
@@ -298,7 +351,7 @@ async fn a_cancel_from_the_service_reaches_the_pledge() {
 #[tokio::test]
 async fn each_check_has_its_reason_and_the_first_failure_is_the_answer() {
     let w = World::new();
-    let mut pledge = open_pledge(&w);
+    let mut pledge = open_pledge(&w).await;
     pledge.connect_as("jan", &w.jan_connection).await;
     register(&w, &mut pledge).await;
 
@@ -382,22 +435,27 @@ async fn a_request_that_does_not_parse_is_refused_for_the_hash_of_what_was_sent(
 #[tokio::test]
 async fn a_service_gets_one_request_per_connection_and_no_answer_type_from_it() {
     let w = World::new();
-    let mut pledge = open_pledge(&w);
+    let mut pledge = open_pledge(&w).await;
     pledge.connect_as("jan", &w.jan_connection).await;
     register(&w, &mut pledge).await;
     let mut s = open_service(&w);
     s.send(&submit_line(&w.submit(1, 120))).await;
     s.send(&submit_line(&w.submit(2, 120))).await;
     assert_eq!(s.recv().await["error"], "too-many-open");
+    // a service sends no answer: as the first message it is no beginning, after a submit it is an error
     let mut s = open_service(&w);
-    s.send(&answer_line(hash_of(&w.submit(1, 120)), Outcome::Declined)).await;
+    s.send(&answer_line(hash_of(&w.submit(3, 120)), Outcome::Declined)).await;
+    assert_eq!(s.recv().await["error"], "malformed-line");
+    let mut s = open_service(&w);
+    s.send(&submit_line(&w.submit(4, 120))).await;
+    s.send(&answer_line(hash_of(&w.submit(4, 120)), Outcome::Declined)).await;
     assert_eq!(s.recv().await["error"], "unknown-type");
 }
 
 #[tokio::test]
 async fn the_limit_per_agent_is_the_setting() {
     let w = World::with(Settings { max_waiting_per_agent: 2 }, Timeouts::default());
-    let mut pledge = open_pledge(&w);
+    let mut pledge = open_pledge(&w).await;
     pledge.connect_as("jan", &w.jan_connection).await;
     register(&w, &mut pledge).await;
     let mut held = Vec::new();
@@ -415,10 +473,10 @@ async fn the_limit_per_agent_is_the_setting() {
 #[tokio::test]
 async fn an_answer_that_is_not_for_this_person_or_not_held_changes_nothing() {
     let w = World::new();
-    let mut jan = open_pledge(&w);
+    let mut jan = open_pledge(&w).await;
     jan.connect_as("jan", &w.jan_connection).await;
     register(&w, &mut jan).await;
-    let mut eva = open_pledge(&w);
+    let mut eva = open_pledge(&w).await;
     eva.connect_as("eva", &w.eva_connection).await;
     let submit = w.submit(1, 120);
     let mut service = open_service(&w);
@@ -438,12 +496,12 @@ async fn an_answer_that_is_not_for_this_person_or_not_held_changes_nothing() {
 #[tokio::test]
 async fn a_delegation_is_registered_from_its_certificate_alone_and_survives_a_restart() {
     let w = World::new();
-    let mut pledge = open_pledge(&w);
+    let mut pledge = open_pledge(&w).await;
     pledge.connect_as("jan", &w.jan_connection).await;
     register(&w, &mut pledge).await;
     register(&w, &mut pledge).await; // again: nothing changes
     let fp = p_act::sign::agent_certificate(&w.keys.cert_line(&w.agent)).unwrap().delegation;
-    let register = p_age::core::Core::read_state(&w.state);
+    let register = p_age::core::Core::read_state(&w.state).unwrap();
     let now = std::time::SystemTime::UNIX_EPOCH + Duration::from_secs(u64::try_from(w.clock.unix()).unwrap());
     assert_eq!(register.person_for(fp.as_str(), now), Ok("jan"));
 }
@@ -451,9 +509,9 @@ async fn a_delegation_is_registered_from_its_certificate_alone_and_survives_a_re
 #[tokio::test]
 async fn a_certificate_that_does_not_qualify_is_not_registered() {
     let w = World::new();
-    let mut jan = open_pledge(&w);
+    let mut jan = open_pledge(&w).await;
     jan.connect_as("jan", &w.jan_connection).await;
-    let mut eva = open_pledge(&w);
+    let mut eva = open_pledge(&w).await;
     eva.connect_as("eva", &w.eva_connection).await;
     let reason =
         |v: serde_json::Value| (v["type"].as_str().unwrap().to_owned(), v["reason"].as_str().map(str::to_owned));
@@ -493,7 +551,7 @@ async fn a_certificate_that_does_not_qualify_is_not_registered() {
 #[tokio::test]
 async fn a_withdrawal_stops_the_delegation_and_refuses_what_waits_under_it() {
     let w = World::new();
-    let mut pledge = open_pledge(&w);
+    let mut pledge = open_pledge(&w).await;
     pledge.connect_as("jan", &w.jan_connection).await;
     register(&w, &mut pledge).await;
     let submit = w.submit(1, 120);
@@ -509,7 +567,7 @@ async fn a_withdrawal_stops_the_delegation_and_refuses_what_waits_under_it() {
     s.send(&submit_line(&w.submit(2, 120))).await;
     assert_eq!(refusal(&service_answer(&mut s).await), BrokerReason::Delegation);
     // and a sign-in afterwards is told of the withdrawal in the standing
-    let mut again = open_pledge(&w);
+    let mut again = open_pledge(&w).await;
     let standing = again.connect_as("jan", &w.jan_connection).await;
     assert_eq!(standing["withdrawn"], serde_json::json!([fp.to_string()]));
 }
@@ -544,17 +602,17 @@ async fn a_line_that_is_not_finished_in_time_and_a_silent_pledge_are_told_so() {
     s.send(b"{\"schema_version\":1,").await;
     assert_eq!(s.recv().await["error"], "timeout");
     // a pledge that does not answer the challenge
-    let mut p = open_pledge_on(&w.broker, BINDING, quick);
+    let mut p = open_pledge_on(&w.broker, BINDING, quick).await;
     assert_eq!(p.recv_type().await, "challenge");
     assert_eq!(p.recv().await["error"], "timeout");
     // a pledge that signs in and then says nothing: closed; with pings it stays
-    let mut p = open_pledge_on(&w.broker, BINDING, quick);
+    let mut p = open_pledge_on(&w.broker, BINDING, quick).await;
     p.connect_as("jan", &w.jan_connection).await;
     for _ in 0..4 {
         tokio::time::sleep(Duration::from_millis(200)).await;
         p.send_json(serde_json::json!({"schema_version":1,"type":"ping"})).await;
     }
-    let mut quiet = open_pledge_on(&w.broker, BINDING, quick);
+    let mut quiet = open_pledge_on(&w.broker, BINDING, quick).await;
     quiet.connect_as("eva", &w.eva_connection).await;
     assert_eq!(quiet.recv().await["error"], "timeout");
     quiet.expect_closed().await;
@@ -563,9 +621,74 @@ async fn a_line_that_is_not_finished_in_time_and_a_silent_pledge_are_told_so() {
 #[tokio::test]
 async fn a_pledge_may_not_send_what_only_the_broker_sends() {
     let w = World::new();
-    let mut p = open_pledge(&w);
+    let mut p = open_pledge(&w).await;
     p.connect_as("jan", &w.jan_connection).await;
     p.send(&submit_line(&w.submit(1, 120))).await;
     assert_eq!(p.recv().await["error"], "unknown-type");
     p.expect_closed().await;
+}
+
+// --- what an unauthenticated peer can learn ---------------------------------------
+
+#[tokio::test]
+async fn an_unauthenticated_peer_learns_nothing_about_the_site_beyond_a_coarse_class() {
+    let w = World::new();
+    let mut pledge = open_pledge(&w).await;
+    pledge.connect_as("jan", &w.jan_connection).await;
+    register(&w, &mut pledge).await; // jan's delegation is registered: a stranger must not be able to tell
+
+    // A service is authenticated by the signature on its request. A stranger's request, whatever it names, is
+    // `bad-request`: an unknown host, a known host with a key the host never certified, a registered person
+    // and delegation, an unregistered one, a person the site does not have.
+    let stranger = w.keys.key("stranger-service");
+    let other_host = w.keys.key("elsewhere");
+    let certified_elsewhere = w.keys.certified("elsewhere-service", &other_host, "probe@a.example", VALID, &[]);
+    let nobody = w.keys.key("nobody-delegation");
+    let nobody_agent = w.keys.certified("nobody-agent", &nobody, "mallory", "-5m:+8h", &[]);
+    let unregistered = w.keys.certified("unregistered-agent", &w.jan_delegation, "jan", "-5m:+8h", &[]);
+    let mut seen = Vec::new();
+    for (n, agent, service) in [
+        (1, &w.agent, &certified_elsewhere),
+        (2, &unregistered, &certified_elsewhere),
+        (3, &nobody_agent, &certified_elsewhere),
+        (4, &w.agent, &w.keys.path("stranger-service")),
+    ] {
+        let _ = &stranger;
+        let mut s = open_service(&w);
+        let submit = if service == &w.keys.path("stranger-service") {
+            // not even certified: signed with a plain key (the signature carries no certificate)
+            let (call, call_sig) = w.call(n, 120, agent);
+            let rating = p_act::rating::Rating::new(
+                p_act::rating::Exposure::Open,
+                p_act::rating::Damage::None,
+                p_act::rating::Disruption::None,
+            );
+            let request = p_act::Request::compose(&call, &call_sig, rating).unwrap();
+            let sig = p_age::keygen::sign(service, Namespace::Request, request.as_bytes()).unwrap();
+            p_act::exchange::Submit::new(request, &sig).unwrap()
+        } else {
+            w.submit_with(n, 120, agent, service)
+        };
+        s.send(&submit_line(&submit)).await;
+        seen.push(refusal(&service_answer(&mut s).await));
+    }
+    assert_eq!(seen, [BrokerReason::BadRequest; 4]);
+    // the check on the deadline comes before any signature and says only that: a past deadline is `deadline`
+    // for a stranger as for anyone
+    let mut s = open_service(&w);
+    s.send(&submit_line(&w.submit_with(5, -5, &nobody_agent, &certified_elsewhere))).await;
+    assert_eq!(refusal(&service_answer(&mut s).await), BrokerReason::Deadline);
+
+    // A pledge is authenticated by the sign-in. Before it, every message but the sign-in is the same `signin`
+    // error, whether or not it is one the broker knows.
+    for message in [
+        serde_json::json!({"schema_version":1,"type":"delegation","cert":w.keys.cert_line(&w.agent)}),
+        serde_json::json!({"schema_version":1,"type":"withdraw","delegation":"SHA256:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"}),
+        serde_json::json!({"schema_version":1,"type":"nonsense"}),
+    ] {
+        let mut c = open_pledge(&w).await;
+        c.recv().await;
+        c.send_json(message).await;
+        assert_eq!(c.recv().await["error"], "signin");
+    }
 }

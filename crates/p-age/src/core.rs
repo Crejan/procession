@@ -21,9 +21,23 @@ use p_act::{Clearance, DocumentHash, Timestamp};
 
 use crate::crypto::Crypto;
 use crate::log::{LogEntry, LogSink};
+use crate::perm::{self, PermError};
 use crate::register::{Register, Snapshot, Stopped};
 use crate::site::Site;
 use crate::wire::{NotRegistered, PledgeOut, ServiceOut, Standing};
+
+/// Why the register on disk was not used.
+#[derive(Debug, thiserror::Error)]
+pub enum StateError {
+    #[error(transparent)]
+    Perm(#[from] PermError),
+    #[error("cannot read {path}: {source}")]
+    Read { path: String, source: std::io::Error },
+    #[error("{path} is not a register: {source}")]
+    Parse { path: String, source: serde_json::Error },
+    #[error("{path} is version {v} of the register, which this broker does not know")]
+    Version { path: String, v: u32 },
+}
 
 /// The broker's settings.
 #[derive(Debug, Clone)]
@@ -163,27 +177,34 @@ impl Core {
         Core { site, settings, register, state_path, held: HashMap::new(), links: HashMap::new(), crypto, log, seq: 0 }
     }
 
-    /// The register as kept on disk, if there is such a file.
-    pub fn read_state(path: &std::path::Path) -> Register {
-        match std::fs::read(path) {
-            Ok(bytes) => match serde_json::from_slice::<Snapshot>(&bytes) {
-                Ok(snapshot) => Register::restore(snapshot),
-                Err(e) => {
-                    eprintln!("page: {} is not a register: {e}; starting empty", path.display());
-                    Register::default()
-                }
-            },
-            Err(_) => Register::default(),
+    /// The register as kept on disk. No file is a first start: an empty register. A file that cannot be read
+    /// whole (not JSON, a version this broker does not know, readable by others, in a directory open to
+    /// others) is an error: the broker does not start in its place with an empty register, which would drop
+    /// the blocks without a word.
+    pub fn read_state(path: &std::path::Path) -> Result<Register, StateError> {
+        if let Some(dir) = path.parent().filter(|d| !d.as_os_str().is_empty()) {
+            perm::ensure_private_dir(dir)?;
         }
+        if !path.exists() {
+            return Ok(Register::default());
+        }
+        perm::check_private_file(path)?;
+        let shown = path.display().to_string();
+        let bytes = std::fs::read(path).map_err(|source| StateError::Read { path: shown.clone(), source })?;
+        let snapshot: Snapshot =
+            serde_json::from_slice(&bytes).map_err(|source| StateError::Parse { path: shown.clone(), source })?;
+        if snapshot.v != 1 {
+            return Err(StateError::Version { path: shown, v: snapshot.v });
+        }
+        Ok(Register::restore(snapshot))
     }
 
     fn persist(&self) {
         let Some(path) = &self.state_path else { return };
-        let tmp = path.with_extension("tmp");
         let result = serde_json::to_vec(&self.register.snapshot())
             .map_err(std::io::Error::other)
-            .and_then(|bytes| std::fs::write(&tmp, bytes))
-            .and_then(|()| std::fs::rename(&tmp, path));
+            .and_then(|bytes| perm::replace_private_file(path, &bytes));
+        // The broker goes on in memory, and says so: a refused request is worse than a register not yet on disk.
         if let Err(e) = result {
             eprintln!("page: cannot keep the register in {}: {e}", path.display());
         }
@@ -1083,16 +1104,17 @@ mod tests {
     #[test]
     fn the_register_survives_a_restart() {
         let dir = tempfile::tempdir().unwrap();
+        std::fs::set_permissions(dir.path(), std::os::unix::fs::PermissionsExt::from_mode(0o700)).unwrap();
         let path = dir.path().join("register.json");
         let mut f = fixture(5);
         f.core.state_path = Some(path.clone());
         f.core.block_person("eva", now(0));
         f.core.withdraw("jan", &AGENT_A.parse().unwrap(), now(0));
-        let register = Core::read_state(&path);
+        let register = Core::read_state(&path).unwrap();
         assert!(register.is_blocked("eva"));
         assert_eq!(register.person_for(AGENT_A, now(1)), Err(Stopped::Withdrawn));
         assert_eq!(register.person_for(AGENT_B, now(1)), Ok("jan"));
-        // no file, or one that is not a register: empty, not a failure
-        assert!(!Core::read_state(&dir.path().join("none")).is_blocked("eva"));
+        // no file: a first start, an empty register
+        assert!(!Core::read_state(&dir.path().join("none")).unwrap().is_blocked("eva"));
     }
 }

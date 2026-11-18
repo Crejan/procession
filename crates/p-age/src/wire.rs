@@ -131,6 +131,31 @@ fn kind(line: &[u8]) -> Result<String, ParseFailure> {
     Ok(parse::<Peek>(line)?.kind)
 }
 
+/// What a connection's first message says it is.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum First {
+    /// `submit`: a service's exchange.
+    Service,
+    /// `hello`: a pledge's.
+    Pledge,
+    /// Anything else, or a `hello` that is not exactly one: an `error` and the end.
+    Refuse(ErrorCode),
+}
+
+/// Tell from the first line which exchange this connection carries. Nothing else is read from it here.
+#[must_use]
+pub fn first_kind(line: &[u8]) -> First {
+    match kind(line).as_deref() {
+        Ok("submit") => First::Service,
+        Ok("hello") => match parse::<BareWire>(line).and_then(|w| version(w.schema_version)) {
+            Ok(()) => First::Pledge,
+            Err(ParseFailure::Close(Some(code))) => First::Refuse(code),
+            Err(_) => First::Refuse(ErrorCode::MalformedLine),
+        },
+        _ => First::Refuse(ErrorCode::MalformedLine),
+    }
+}
+
 /// Parse a line from pledge.
 pub fn parse_pledge_line(line: &[u8]) -> Result<PledgeIn, ParseFailure> {
     match kind(line)?.as_str() {

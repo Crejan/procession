@@ -51,7 +51,7 @@ fn serve(args: &[&str]) -> ExitCode {
 
 fn run(path: &std::path::Path) -> Result<(), String> {
     use p_age::config::Config;
-    use p_age::net::{ConnLimits, Kind, listen, sweep_forever};
+    use p_age::net::{ConnLimits, listen, sweep_forever};
     use p_age::tls::server_config;
 
     let config = Config::read(path).map_err(|e| e.to_string())?;
@@ -61,16 +61,17 @@ fn run(path: &std::path::Path) -> Result<(), String> {
     let broker = config.build().map_err(|e| e.to_string())?;
     let runtime = tokio::runtime::Runtime::new().map_err(|e| e.to_string())?;
     runtime.block_on(async {
-        let services = tokio::net::TcpListener::bind(&config.listen_services)
-            .await
-            .map_err(|e| format!("cannot listen on {}: {e}", config.listen_services))?;
-        let pledges = tokio::net::TcpListener::bind(&config.listen_pledges)
-            .await
-            .map_err(|e| format!("cannot listen on {}: {e}", config.listen_pledges))?;
         let limits = ConnLimits::new(config.max_connections, config.max_connections_per_address);
+        let mut listeners = Vec::new();
+        for address in &config.listen {
+            let listener =
+                tokio::net::TcpListener::bind(address).await.map_err(|e| format!("cannot listen on {address}: {e}"))?;
+            listeners.push(listener);
+        }
         tokio::spawn(sweep_forever(broker.clone()));
-        tokio::spawn(listen(services, acceptor.clone(), broker.clone(), limits.clone(), Kind::Service));
-        tokio::spawn(listen(pledges, acceptor, broker, limits, Kind::Pledge));
+        for listener in listeners {
+            tokio::spawn(listen(listener, acceptor.clone(), broker.clone(), limits.clone()));
+        }
         tokio::signal::ctrl_c().await.map_err(|e| e.to_string())
     })
 }
