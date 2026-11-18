@@ -1,10 +1,11 @@
 [Unit]
-Description=probe: renew the service's certificate once 20 of its 30 days have passed
+Description=probe: look daily whether the service's certificate is due for renewal
 
 [Timer]
-# Ten minutes after boot (a host that was off past its time catches up), then 20 days after each run.
-OnBootSec=10min
-OnUnitActiveSec=20d
+# Once a day, at a random moment within an hour of midnight; Persistent: a run missed while the host was
+# off happens at the next boot.
+OnCalendar=daily
+Persistent=true
 RandomizedDelaySec=1h
 
 [Install]

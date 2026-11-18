@@ -1,12 +1,14 @@
 [Unit]
-Description=probe: renew the certificate of the service's key (the host key certifies it)
+Description=probe: renew the certificate of the service's key when it is due (the host key certifies it)
 Documentation=file:///usr/local/share/doc/probe/RUNBOOK-stage1-linux.md
 
 [Service]
 Type=oneshot
 User=root
-# No arguments: it reads /etc/probe.toml (or takes the defaults), keeps the service's key and replaces its certificate.
-ExecStart=/usr/local/bin/probe setup
+# Does nothing while more than 10 of the 30 days remain; renews otherwise, or at once when there is no
+# certificate or the key changed. It reads /etc/probe.toml (or takes the defaults). A failed renewal ends
+# non-zero: this unit shows as failed, and the timer tries again the next day.
+ExecStart=/usr/local/bin/probe setup --if-due
 ProtectSystem=strict
 ReadWritePaths=/etc/probe
 PrivateTmp=true

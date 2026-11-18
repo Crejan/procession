@@ -115,11 +115,14 @@ pub fn setup_defaults(config_text: Option<&str>, hostname: &str) -> Result<(Path
 /// `probe setup [--host-key <file>] [--host <name>] [--out <dir>]`. With no arguments it renews, from
 /// `/etc/probe.toml` or the defaults (the root timer's form).
 pub fn setup(args: &[&str]) -> u8 {
-    const USAGE: &str =
-        "usage: probe setup [--host-key <file>] [--host <name>] [--out <dir>]   (no arguments: from /etc/probe.toml)";
-    let (mut host_key, mut host, mut out) = (None, None, None);
+    const USAGE: &str = "usage: probe setup [--if-due] [--host-key <file>] [--host <name>] [--out <dir>]   (no arguments: renew now, from /etc/probe.toml)";
+    let (mut host_key, mut host, mut out, mut if_due) = (None, None, None, false);
     let mut rest = args.iter();
     while let Some(flag) = rest.next() {
+        if *flag == "--if-due" {
+            if_due = true;
+            continue;
+        }
         match (*flag, rest.next()) {
             ("--host-key", Some(value)) => host_key = Some(PathBuf::from(value)),
             ("--host", Some(value)) => host = Some((*value).to_string()),
@@ -141,6 +144,26 @@ pub fn setup(args: &[&str]) -> u8 {
     };
     let (host_key, host, out) =
         (host_key.unwrap_or(default_key), host.unwrap_or(default_host), out.unwrap_or(default_out));
+    if if_due {
+        let now = p_act::Timestamp::now().map_or(0, p_act::Timestamp::unix);
+        return match crate::setup::run_if_due(&host_key, &host, &out, now) {
+            Ok(crate::setup::IfDue::NotDue(days)) => {
+                println!(
+                    "Not due: {days} days left of the service's certificate (renewed when {} or fewer remain).",
+                    crate::setup::RENEW_WHEN_DAYS_LEFT
+                );
+                0
+            }
+            Ok(crate::setup::IfDue::Did(done, reason)) => {
+                println!("Due ({reason:?}). {}", crate::setup::note(done));
+                0
+            }
+            Err(why) => {
+                eprintln!("probe setup --if-due: {why}");
+                1
+            }
+        };
+    }
     match crate::setup::run(&host_key, &host, &out) {
         Ok(done) => {
             println!("{}", crate::setup::note(done));

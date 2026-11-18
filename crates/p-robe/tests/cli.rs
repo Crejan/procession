@@ -58,6 +58,55 @@ fn serve_says_what_is_wrong_with_its_settings_and_that_its_transport_is_not_buil
 }
 
 #[test]
+fn setup_if_due_is_a_no_op_while_the_certificate_is_fresh_and_by_hand_it_renews_always() {
+    let dir = std::env::temp_dir().join(format!("probe-cli-setup-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let host = dir.join("host");
+    let made =
+        Command::new("ssh-keygen").args(["-q", "-t", "ed25519", "-N", "", "-C", "", "-f"]).arg(&host).output().unwrap();
+    assert!(made.status.success());
+    let out = dir.join("out");
+    let setup = |extra: &[&str]| {
+        let mut args = vec!["setup"];
+        args.extend_from_slice(extra);
+        args.extend(["--host-key", host.to_str().unwrap(), "--host", "a.example", "--out", out.to_str().unwrap()]);
+        probe(&args, None)
+    };
+    let first = setup(&["--if-due"]);
+    assert_eq!(first.status.code(), Some(0), "{}", text(&first.stderr));
+    assert!(text(&first.stdout).starts_with("Due ("), "{}", text(&first.stdout));
+    let cert = std::fs::read(out.join("service-key-cert.pub")).unwrap();
+    let second = setup(&["--if-due"]);
+    assert_eq!(second.status.code(), Some(0));
+    assert!(text(&second.stdout).starts_with("Not due: "), "{}", text(&second.stdout));
+    assert_eq!(std::fs::read(out.join("service-key-cert.pub")).unwrap(), cert, "nothing was touched");
+    // By hand, without the flag: renews always.
+    let renewed = setup(&[]);
+    assert_eq!(renewed.status.code(), Some(0));
+    assert!(text(&renewed.stdout).starts_with("Kept the service's key"), "{}", text(&renewed.stdout));
+    assert_ne!(std::fs::read(out.join("service-key-cert.pub")).unwrap(), cert);
+    // A failed renewal is a non-zero exit.
+    std::fs::remove_file(out.join("service-key-cert.pub")).unwrap();
+    let failed = probe(
+        &[
+            "setup",
+            "--if-due",
+            "--host-key",
+            "/nonexistent/host",
+            "--host",
+            "a.example",
+            "--out",
+            out.to_str().unwrap(),
+        ],
+        None,
+    );
+    assert_eq!(failed.status.code(), Some(1), "{}", text(&failed.stderr));
+    assert_eq!(probe(&["setup", "--if-due", "--bogus"], None).status.code(), Some(64));
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
 fn a_production_build_does_not_know_the_test_hook() {
     if cfg!(feature = "test-verbs") {
         return;
