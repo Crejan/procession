@@ -17,6 +17,8 @@ use crate::report::{Cost, Finding, Metric, Report, Severity, Subject, round1};
 pub const DEFAULT_DURATION: Duration = Duration::from_secs(5);
 /// Shortest and longest window accepted.
 pub const DURATION_RANGE: (Duration, Duration) = (Duration::from_secs(1), Duration::from_secs(60));
+/// Flagged IRQ records, and IRQ findings, kept at most; the summary says when more were found.
+pub const FLAGGED_CAP: usize = 100;
 /// Unflagged IRQs shown, busiest first.
 pub const DEFAULT_TOP: usize = 20;
 /// A tick rate above this many times `CONFIG_HZ` is a thread, not the tick.
@@ -69,6 +71,7 @@ enum Record {
         irqs: usize,
         flagged: usize,
         window_s: u64,
+        truncated: bool,
     },
 }
 
@@ -258,13 +261,20 @@ pub fn run(env: &Env, args: &Args) -> Result<Report, Error> {
     };
     rest.sort_by_key(key);
     let flagged_n = flagged.len();
-    for r in &flagged {
+    for r in flagged.iter().take(FLAGGED_CAP) {
         report.push(r);
     }
+    let mut kept = 0;
+    report.findings.retain(|f| {
+        !matches!(f.subject, Subject::Irq { .. }) || {
+            kept += 1;
+            kept <= FLAGGED_CAP
+        }
+    });
     for r in rest.iter().filter(|r| matches!(r, Record::Irq { delta, .. } if *delta > 0)).take(args.top) {
         report.push(r);
     }
-    report.push(&Record::Summary { irqs: total, flagged: flagged_n, window_s: secs });
+    report.push(&Record::Summary { irqs: total, flagged: flagged_n, window_s: secs, truncated: flagged_n > FLAGGED_CAP });
     finish(env, &mut report);
     Ok(report)
 }

@@ -12,7 +12,7 @@
     {"type":"irq","irq":125,"name":"lan0-TxRx-0","desc":"lan0-TxRx-0","affinity":"2-3","effective":"2","touches_isolated":true,"expected":"2-3","delta":10000,"delta_on_isolated":10000,"flag":true},
     {"type":"irq","irq":126,"name":"lan0-TxRx-1","desc":"lan0-TxRx-1","affinity":"0-1","effective":"1","touches_isolated":false,"expected":"2-3","delta":5,"delta_on_isolated":5,"flag":true},
     {"type":"irq","irq":9,"name":"acpi","desc":"acpi","affinity":"0-3","effective":"0","touches_isolated":false,"expected":null,"delta":50,"delta_on_isolated":0,"flag":false},
-    {"type":"summary","irqs":4,"flagged":2,"window_s":5}
+    {"type":"summary","irqs":4,"flagged":2,"window_s":5,"truncated":false}
   ],
   "restored": [],
   "findings": [

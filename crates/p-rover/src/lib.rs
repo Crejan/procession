@@ -7,6 +7,7 @@ pub mod config;
 pub mod env;
 pub mod error;
 pub mod ethtool;
+pub mod ethtool_cli;
 pub mod observe;
 pub mod render;
 pub mod report;

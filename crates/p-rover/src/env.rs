@@ -8,7 +8,8 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use p_roc::Root;
 
 use crate::config::Config;
-use crate::ethtool::{Ethtool, Unavailable};
+use crate::ethtool::Ethtool;
+use crate::ethtool_cli::EthtoolCli;
 use crate::runner::{Runner, SystemRunner};
 
 /// Time, and waiting for it to pass. A fake lets a test change the fixture
@@ -94,7 +95,7 @@ impl Env {
             config,
             host: hostname(),
             clock: Box::new(SystemClock),
-            ethtool: Box::new(Unavailable),
+            ethtool: Box::new(EthtoolCli::new(Box::new(SystemRunner))),
             runner: Box::new(SystemRunner),
             arch: std::env::consts::ARCH,
         }

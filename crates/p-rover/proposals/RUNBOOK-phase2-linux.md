@@ -60,7 +60,7 @@ Replace `eth0` with the container's interface (`ls /sys/class/net`).
 | `sched` | A `thread` line per RT thread and per thread allowed on the isolated CPUs (with an empty isolated set: only RT threads, so possibly none), `cpu` lines, `summary` with `sched_debug=true` when `/proc/<pid>/task/<tid>/sched` exists. `unreadable` may list `schedstat` if the kernel has it off. |
 | `irq` | `policy`, `timer`, `irq` lines (busiest IRQs that moved in the window), `summary`. `/proc/interrupts` is the host's; the affinity files may be unreadable or absent in the container: then `irq` lines are missing and `unreadable` says why. `kernel_hz` is `null` unless `/boot/config-<release>` is visible. Findings only if the host has isolated CPUs. |
 | `cmdline` | `live` is the **host's** command line. `declared` has `source: none` (no `/etc/default/grub` in the container), so no drift finding. `kernel` shows the host's release and whether it is PREEMPT_RT. `sysctl`: the readable ones, `null` for the rest. |
-| `nic eth0` | `link` from sysfs (veth: no `driver`/`pci`, queues 1), `driver` with only `kernel_driver`, `stats` from the kernel's generic counters. `unreadable` lists `ethtool eth0`: **there is no ethtool transport yet** (open decision in REPORT.md), so rings, coalescing, EEE, offloads and driver counters are absent. |
+| `nic eth0` | `link` from sysfs (veth: no `driver`/`pci`, queues 1), `driver`, `stats`. Rings, coalescing, channels, EEE and offloads come from the `ethtool` binary when it is installed; a veth supports few of them, so `unreadable` lists each refused one (`ethtool -c eth0: Operation not supported`) and `ethtool: not installed` if the binary is missing. The ethtool parsers are **not yet checked against a capture**. |
 | `nic eth0 --delta 5s` | `counter` lines for what moved (traffic only, on a quiet container maybe none), `summary` with `clean: true`. |
 | `serial` | `cmdline` with `console=` of the host, `active_console`, probably no `port` lines; `unreadable` names `proc/tty/driver/serial` if absent. |
 | `clock` | `unreadable` entry `chronyc` if not installed; `service` lines only for time daemons inside the container; `summary` with `conflict: false`. |
@@ -95,3 +95,32 @@ on an RT host and compare: the same RT threads, the same `cpus_allowed`,
 against `rt cmdline`. Differences I expect and chose: `procs` lists RT
 threads first and has no `pcpu`; `cmdline` compares `GRUB_CMDLINE_LINUX`
 before `_DEFAULT` as grub does.
+
+## Captures I need from a real host (ethtool)
+
+The ethtool parsers were written from ethtool's documented layout, not from
+real output. On a host with a real NIC (an Intel igb/ixgbe/i40e one if
+possible, plus a second driver if one is around), run these and keep the
+output as files (the container's veth is no use). `eth0` is the NIC; these
+only read:
+
+    ethtool --version
+    ethtool -i eth0
+    ethtool -S eth0
+    ethtool --json -S eth0
+    ethtool -g eth0
+    ethtool --json -g eth0
+    ethtool -c eth0
+    ethtool --json -c eth0
+    ethtool -l eth0
+    ethtool --json -l eth0
+    ethtool --show-eee eth0
+    ethtool --json --show-eee eth0
+    ethtool -k eth0
+    ethtool --json -k eth0
+
+Each with its exit code (`echo $?` after it) and stderr, since a refused
+option is part of what the code handles. Put them in
+`crates/p-rover/tests/captures/<ethtool version>/` (one file per command);
+I turn them into parser tests. Until then every ethtool parser is marked
+"not yet checked against a capture".

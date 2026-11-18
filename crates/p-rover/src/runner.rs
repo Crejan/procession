@@ -33,7 +33,8 @@ pub enum RunError {
 
 /// Runs external programs.
 pub trait Runner: Send + Sync {
-    /// Runs `program` with `args`: no shell, no input, `LC_ALL=C`, killed after `timeout`.
+    /// Runs `program` with `args`: by absolute path, no shell, no input, a cleared environment
+    /// except `LC_ALL=C`, output capped, killed after `timeout`.
     ///
     /// # Errors
     /// When the program is missing, cannot start, or times out.
@@ -56,10 +57,23 @@ fn drain(mut r: impl Read + Send + 'static) -> std::thread::JoinHandle<String> {
     })
 }
 
+/// Where a bare program name is looked up: fixed, never `$PATH`.
+const TRUSTED_DIRS: [&str; 4] = ["/usr/sbin", "/usr/bin", "/sbin", "/bin"];
+
+/// A program by absolute path: as given, or found in [`TRUSTED_DIRS`].
+fn resolve(program: &str) -> Option<std::path::PathBuf> {
+    if program.starts_with('/') {
+        return Some(program.into());
+    }
+    TRUSTED_DIRS.iter().map(|d| std::path::Path::new(d).join(program)).find(|p| p.is_file())
+}
+
 impl Runner for SystemRunner {
     fn run(&self, program: &str, args: &[&str], timeout: Duration) -> Result<Output, RunError> {
-        let mut child = Command::new(program)
+        let path = resolve(program).ok_or_else(|| RunError::NotFound(program.into()))?;
+        let mut child = Command::new(path)
             .args(args)
+            .env_clear()
             .env("LC_ALL", "C")
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
@@ -123,9 +137,9 @@ mod tests {
     #[test]
     fn real_runner_captures_reports_and_kills() {
         let r = SystemRunner;
-        let o = r.run("sh", &["-c", "echo out; echo err >&2; exit 3"], Duration::from_secs(5)).unwrap();
+        let o = r.run("/bin/sh", &["-c", "echo out; echo err >&2; exit 3"], Duration::from_secs(5)).unwrap();
         assert_eq!((o.code, o.stdout.as_str(), o.stderr.as_str()), (Some(3), "out\n", "err\n"));
         assert!(matches!(r.run("/nonexistent/prog", &[], Duration::from_secs(1)), Err(RunError::NotFound(_))));
-        assert!(matches!(r.run("sleep", &["5"], Duration::from_millis(100)), Err(RunError::Timeout(..))));
+        assert!(matches!(r.run("/bin/sleep", &["5"], Duration::from_millis(100)), Err(RunError::Timeout(..))));
     }
 }
