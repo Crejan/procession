@@ -50,3 +50,19 @@ p-roc gained `cmdline`, `irq`, `net` (interfaces, statistics, packet/udp/tcp/xdp
 **Sizes** (estimates, not measured on a big host): `procs` at most about 80 thread records x 0.3 KB + 100 findings x 0.9 KB = 115 KB; `irq` at most about 120 flagged/shown records x 0.35 KB + 100 findings x 1 KB + one timer record (one entry per isolated CPU) = 150 KB; 1 MiB is not reachable.
 
 **Needs from you:** the ethtool captures (runbook), the owner's word on clap/globset/humantime, a decision when you want `apply`/`Ethtool` changes (phase 5).
+
+## Unit: strings read from the host (audit for `p_ermit::text`, no behaviour changed)
+
+What `prover` does today: **no string read from the host is checked against a character rule.**
+- JSON (`--format json`): serde escapes C0 controls (`\u001b`) and quotes, but passes bidirectional marks (U+202A-202E, U+2066-2069) and other format characters through as raw UTF-8.
+- Text (`render::scalar`, `render::text`): a record string containing a space is printed with Rust `{:?}` (escapes control characters; I did not verify it for bidi marks); **a string without a space is printed raw**, so an ESC or a bidi mark in a comm or interface name reaches the terminal. `unreadable` lines (`source`, `reason`) and the header host name are printed raw.
+- A string that is not UTF-8 makes the whole `/proc` file unreadable (`read_to_string`), so the thread is listed in `unreadable` and skipped; command lines (`task::cmdline`) and tool output are converted lossily.
+
+Places where host-controlled text enters the output (all in `crates/p-rover/src`):
+- thread `comm` (any user can set it with prctl): `observe/procs.rs`, `sched.rs`, `hung.rs`, `analyze.rs` (thread records, findings subjects), IRQ thread comm in `nic.rs`/`analyze.rs`.
+- process command lines and `exe`/`cwd` links (set by whoever runs the process): `observe/clock.rs` (`cmdlines`), `serial.rs` (getty `cmdline`), `hung.rs` (`exe`, `cwd`, `mount`), `analyze.rs` (`exe`).
+- kernel and driver names: IRQ action and `/proc/interrupts` names (`irq.rs`, `nic.rs`, `analyze.rs`), interface names and MAC address, driver names, PCI ids, `wchan` and kernel stack frames (`hung.rs`), module/tty names (`serial.rs`), sysctl values (`cmdline.rs`, `lastboot.rs`), workqueue cpumask (`irq.rs`).
+- the live and declared kernel command line, bootloader assignments (`observe/cmdline.rs`).
+- external tool output: `chronyc` fields and sources (`clock.rs`), journal lines and boot list (`lastboot.rs`: kernel and userspace messages, attacker-influenceable), the first line of an ethtool or chronyc error (`ethtool_cli.rs`, `lastboot.rs`, into `unreadable.reason`), ethtool driver strings and counter names (`ethtool_cli.rs`).
+- `report.host` (hostname) and every `unreadable.source`/`reason` built from OS error texts (all subcommands).
+Arguments given by the caller are validated before use (`nic` interface names to `[A-Za-z0-9._-]`, `lastboot --boot` to digits).

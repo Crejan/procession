@@ -23,7 +23,7 @@ engine-rustic = ["p-reserve-core/engine-rustic", "p-reserve-core/testing"]
 p-reserve-core = { path = "../p-reserve-core", version = "0.0.0" }
 humantime = "2"
 thiserror = "2"
-p-act = { path = "../p-act", version = "0.0.0" }
+p-ermit = { path = "../p-ermit", version = "0.1.0", features = ["toml"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 toml = "0.9"

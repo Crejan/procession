@@ -1,10 +1,8 @@
 //! A string that may be shown: no control characters, no bidirectional marks,
 //! a bounded length.
 //!
-//! The character rule is p-act's (`p_act::text::check`: U+0000 to U+001F and
-//! U+007F to U+009F, and U+061C, U+200E, U+200F, U+202A to U+202E, U+2066 to
-//! U+2069), which is not exported from p-act, so it is stated here a second
-//! time; replace this with p-act's once it is public.
+//! The character rule is the workspace's, `p_ermit::text` (a refused character here is replaced by a
+//! space instead of failing, since a `detail` is for a log and must still be written).
 
 /// The longest `detail` of an error, in bytes.
 pub const MAX_DETAIL: usize = 512;

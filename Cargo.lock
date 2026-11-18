@@ -2978,7 +2978,7 @@ name = "p-reserve"
 version = "0.0.0"
 dependencies = [
  "humantime",
- "p-act",
+ "p-ermit",
  "p-reserve-core",
  "serde",
  "serde_json",
@@ -2992,6 +2992,7 @@ name = "p-reserve-core"
 version = "0.0.0"
 dependencies = [
  "libc",
+ "p-ermit",
  "rustic_backend",
  "rustic_core",
  "serde",
