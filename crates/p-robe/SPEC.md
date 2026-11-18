@@ -52,7 +52,12 @@ call, and a call whose first line cannot be written does not run.
 states a request, obtains approval and clearance, checks them, and only then
 runs the dispatcher. It signs requests with a key of its own, for which the
 host's key issued a certificate when the service was installed; it never
-reads the host key. It runs under an account of its own, and the dispatcher
+reads the host key. That certificate is valid 30 days. `probe setup`, run
+as root, makes it, and is the same command for the first time and for
+every renewal: it keeps the service's key and replaces the certificate. A
+root timer on the host runs it, with no arguments from outside, once 20 of
+the 30 days have passed; no converge is needed. `sys kit` reports the days
+left, and fewer than 5 is a warning. The service runs under an account of its own, and the dispatcher
 gets the privilege each verb needs through the same sudo rule a person's
 call uses. It holds no rule about who may what. It does hold the ratings: they are facts about its own verbs, and
 rating them is its responsibility.

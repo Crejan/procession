@@ -329,7 +329,8 @@ key, so it does not have to run as root for that. Whoever verifies a request
 needs the host's public key, which the site already knows for every host and
 which pledge already uses to verify hosts for logins. The certificate is
 issued when the service is installed, by whoever may read the host key (the
-site's provisioning, as root), and is renewed with the roll-out. A host that
+site's provisioning, as root), and is renewed on the host by a root timer,
+without a converge (section 7). A host that
 is taken over has lost its services anyway, so this adds no new trust.
 
 **The broker has a certificate too.** The site CA certifies the broker's key
@@ -488,7 +489,7 @@ certificates for every enabled person's approval keys that have fewer than
 | a call's deadline | the agent's choice; 2 minutes ahead is a sensible default, more than 10 is refused | service, pledge |
 | a clearance | issued when the approval comes back; good for 60 seconds | service |
 | a person's certificate, and the broker's | valid 90 days; renewed at any converge once fewer than 60 remain; an alert when one nears its end | the issuer, with the site CA's key |
-| a service's certificate | valid 30 days, renewed after 20 | the host key, by the site's provisioning |
+| a service's certificate | valid 30 days, renewed once 20 have passed. Provisioning installs the service and runs `probe setup` once as root, which reads the host key and certifies the service's key; a root timer on the host runs the same command again, with no arguments from outside. Nothing off the host is needed and it does not wait for a converge (a converge may renew too; nothing relies on it). The service's account never reads the host key. `sys kit` reports the days left; fewer than 5 is a warning | the host key, on the host |
 | requests the broker keeps for a pledge that is not connected | until each one's deadline; per agent as many as the setting below, further ones are refused | broker |
 | how long used identifiers are remembered | until the call's deadline; kept on disk across restarts | service, pledge |
 | tolerated clock difference | 60 seconds, for "more than 10 minutes ahead" and for a certificate whose validity starts in the near future. It never extends a deadline: a party refuses to sign or to act as soon as its own clock says the deadline has passed | all |
