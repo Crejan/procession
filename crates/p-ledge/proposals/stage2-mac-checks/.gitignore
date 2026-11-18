@@ -1,0 +1,11 @@
+# Products of the hand checks. The two directories hold key blobs: never commit them.
+/sechecks
+/sechecks-other
+/sechecks-keys/
+/copy-keys/
+# Files the checks of README.md section 4 write beside them.
+/*.pub
+/msg
+/msg2
+/*.sig
+/allowed
