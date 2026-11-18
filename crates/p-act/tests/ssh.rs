@@ -9,6 +9,9 @@ use p_act::sign::{
     signature_certificate, signature_fingerprint, signature_from_base64, signature_person, signature_to_base64,
     verify_approval, verify_call, verify_call_agent, verify_clearance, verify_request,
 };
+use p_act::sign::{
+    certificate_issuer, sign_broker, sign_connection, verify_agent_certificate, verify_broker, verify_connection,
+};
 use p_act::{Call, CallContent, CallId, Clearance, Document, Request, ServiceId, Timestamp};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -1279,4 +1282,239 @@ fn the_shared_numbers_are_the_documents() {
         (DEFAULT_DELEGATION_SECONDS, MAX_DELEGATION_SECONDS, MAX_BUNDLE_BYTES),
         (8 * 3600, 24 * 3600, 64 * 1024)
     );
+}
+
+// ---------------------------------------------------------------------------
+// The sign-in, what the broker says in its own name, and who issued a certificate
+// ---------------------------------------------------------------------------
+
+#[test]
+fn a_sign_in_verifies_by_a_plain_key_in_the_connection_namespace_only() {
+    let keys = Keys::new();
+    let document = br#"{"v":1,"type":"connection","person":"jan","nonce":"AAAA","tls":"BBBB"}"#;
+    for (label, key) in [("ed25519", keys.key("conn-e")), ("p256", keys.ecdsa_key("conn-p"))] {
+        let public = keys.public(&key);
+        let sig = sign_connection(&Signer::plain(&key), document).unwrap();
+        verify_connection("jan", &public, &sig, document).unwrap_or_else(|e| panic!("{label}: {e}"));
+        // Refused: another key, changed bytes, another namespace, a plain-key signature that is garbage.
+        // A plain key's signature carries no name: the person is whoever the caller lists this key for, so a
+        // different `person` with the same key verifies. Binding person to key is the site project's, through
+        // the key the caller passes.
+        assert!(verify_connection("bob", &public, &sig, document).is_ok(), "{label}");
+        let other = keys.public(&keys.key(&format!("other-{label}")));
+        assert!(is_rejected(verify_connection("jan", &other, &sig, document)), "{label}");
+        assert!(is_rejected(verify_connection("jan", &public, &sig, b"changed")), "{label}");
+        for namespace in [
+            "approval-v1@procession",
+            "clearance-v1@procession",
+            "broker-v1@procession",
+            "call-v1@procession",
+            "request-v1@procession",
+        ] {
+            let wrong = raw_sign(&key, namespace, document);
+            assert!(is_rejected(verify_connection("jan", &public, &wrong, document)), "{label} {namespace}");
+        }
+        assert!(
+            matches!(
+                verify_connection("jan", &public, "not a signature", document),
+                Err(SignError::MalformedSignature)
+            ),
+            "{label}"
+        );
+        // A name that `ssh-keygen` would read as a pattern is not a person.
+        for bad in ["", "*", "jan,bob", "a b", "jan:confirmed", &"a".repeat(65)] {
+            assert!(
+                matches!(verify_connection(bad, &public, &sig, document), Err(SignError::BadPrincipal(_))),
+                "{label} {bad:?}"
+            );
+        }
+        // It is not a clearance, a standing, or an approval either.
+        let site = site();
+        assert!(is_rejected(verify_broker(&keys.public(&site.ca), &sig, document)));
+    }
+}
+
+#[test]
+fn a_sign_in_by_a_certified_key_is_refused_as_such() {
+    // The connection key is a plain key (approvals.md section 5): a signature that carries a certificate is not one,
+    // whether or not `ssh-keygen` would match the certified key against the plain line.
+    let keys = Keys::new();
+    let ca = keys.key("ca");
+    let key = keys.key("certified-conn");
+    keys.certify(&key, &ca, "c", "jan");
+    let signer = Signer::certified(&key).unwrap();
+    let document = b"doc";
+    let sig = sign_connection(&signer, document).unwrap();
+    assert!(matches!(
+        verify_connection("jan", &keys.public(&key), &sig, document),
+        Err(SignError::UnexpectedCertificate)
+    ));
+    // The CA's key does not stand in for it either.
+    assert!(
+        is_rejected(verify_connection("jan", &keys.public(&ca), &sig, document))
+            || matches!(
+                verify_connection("jan", &keys.public(&ca), &sig, document),
+                Err(SignError::UnexpectedCertificate)
+            )
+    );
+}
+
+#[test]
+fn what_the_broker_says_verifies_as_broker_in_the_broker_namespace_only() {
+    let keys = Keys::new();
+    let standing = br#"{"v":1,"type":"standing","n":4}"#;
+    for (label, ca) in [("ed25519 ca", keys.key("ca-e")), ("p256 ca", keys.ecdsa_key("ca-p"))] {
+        let ca_pub = keys.public(&ca);
+        let name = |n: &str, principals: &str| keys.certified(&format!("{label}-{n}"), &ca, principals, VALID);
+        let broker = name("broker", "broker");
+        let sig = sign_broker(&broker, standing).unwrap();
+        verify_broker(&ca_pub, &sig, standing).unwrap();
+        // Changed bytes, another CA, expired, not certified, the namespace of another document.
+        assert!(is_rejected(verify_broker(&ca_pub, &sig, b"changed")), "{label}");
+        assert!(
+            is_rejected(verify_broker(&keys.public(&keys.ecdsa_key(&format!("elsewhere-{label}"))), &sig, standing)),
+            "{label}"
+        );
+        let expired = keys.certified(&format!("{label}-old"), &ca, "broker", EXPIRED);
+        assert!(is_rejected(verify_broker(&ca_pub, &sign_broker(&expired, standing).unwrap(), standing)), "{label}");
+        let plain = Signer::plain(keys.key(&format!("{label}-plain")));
+        assert!(is_rejected(verify_broker(&ca_pub, &sign_broker(&plain, standing).unwrap(), standing)), "{label}");
+        for namespace in
+            ["clearance-v1@procession", "approval-v1@procession", "connection-v1@procession", "hosts-v1@procession"]
+        {
+            let wrong = raw_sign(&keys.path(&format!("{label}-broker-cert.pub")), namespace, standing);
+            assert!(is_rejected(verify_broker(&ca_pub, &wrong, standing)), "{label} {namespace}");
+        }
+        // Not under any other name: a person's, `brokers`, `broker:confirmed`.
+        for other in ["jan:confirmed", "jan:automatic", "jan", "brokers", "broker:confirmed", "hosts"] {
+            let signer = name(&other.replace(':', "_"), other);
+            assert!(
+                is_rejected(verify_broker(&ca_pub, &sign_broker(&signer, standing).unwrap(), standing)),
+                "{label} {other}"
+            );
+        }
+        // And the broker's standing is not a clearance, nor a clearance a standing.
+        let request = request(&delegation("alice"), INTERNAL);
+        let clearance = Clearance::compose(request.hash(), Timestamp::from_unix(1_794_409_481).unwrap()).unwrap();
+        assert!(is_rejected(verify_clearance(&clearance, &sig, &ca_pub)), "{label}");
+        let as_clearance = sign_clearance(&broker, &clearance).unwrap();
+        assert!(is_rejected(verify_broker(&ca_pub, &as_clearance, clearance.as_bytes())), "{label}");
+    }
+}
+
+/// The `-cert.pub` line of a key certified by `ca`, the key's public file, and the CA's.
+fn agent_line(keys: &Keys, ca: &Path, name: &str, principals: &str, validity: &str) -> String {
+    keys.certified_with(name, ca, principals, validity, &["extension:groups@procession=admins"]);
+    std::fs::read_to_string(keys.path(&format!("{name}-cert.pub"))).unwrap().trim_end().to_owned()
+}
+
+#[test]
+fn the_issuer_of_a_bare_certificate_is_found_and_matches_the_claim() {
+    let keys = Keys::new();
+    for (label, ca) in [("ed25519", keys.key("ca-e")), ("p256", keys.ecdsa_key("ca-p"))] {
+        let line = agent_line(&keys, &ca, &format!("agent-{label}"), "alice", VALID);
+        let ca_pub = keys.public(&ca);
+        let issuer = certificate_issuer(&line).unwrap();
+        assert_eq!(issuer, ca_pub.fingerprint(), "{label}");
+        assert_eq!(issuer.as_str(), keygen_fingerprint(&pub_file(&ca)), "{label}");
+        // The parsed claim is the same key, so it is available without a subprocess when nothing needs verifying.
+        let blob_issuer = p_act::sign::signature_certificate(
+            &sign_call(
+                &Signer::certified(keys.path(&format!("agent-{label}"))).unwrap(),
+                &Call::compose(&call_content("probe", "a.example")).unwrap(),
+            )
+            .unwrap(),
+        )
+        .unwrap()
+        .issuer;
+        assert_eq!(blob_issuer, issuer, "{label}");
+        // Checked in full: the rules of section 3.1 and the issuer.
+        let agent = verify_agent_certificate(&line, &ca_pub).unwrap();
+        assert_eq!(
+            (agent.person.as_str(), agent.groups.as_slice()),
+            ("alice", ["admins".to_owned()].as_slice()),
+            "{label}"
+        );
+        let other = keys.public(&keys.key(&format!("other-{label}")));
+        assert!(matches!(verify_agent_certificate(&line, &other), Err(SignError::WrongIssuer)), "{label}");
+        assert!(
+            matches!(
+                verify_agent_certificate(&line, &keys.public(&keys.ecdsa_key(&format!("other-p-{label}")))),
+                Err(SignError::WrongIssuer)
+            ),
+            "{label}"
+        );
+        // A comment after the base64 is not signed and changes nothing.
+        assert_eq!(certificate_issuer(&format!("{line} any comment")).unwrap(), issuer);
+        // Validity is not judged: an expired certificate has its issuer too, and says when it ended.
+        let old = agent_line(&keys, &ca, &format!("old-{label}"), "alice", EXPIRED);
+        assert_eq!(certificate_issuer(&old).unwrap(), issuer);
+        assert_eq!(verify_agent_certificate(&old, &ca_pub).unwrap().valid_before, 1_577_923_200);
+        // The section 3.1 rules come first, with their own errors.
+        let two = agent_line(&keys, &ca, &format!("two-{label}"), "alice,bob", VALID);
+        assert!(
+            matches!(verify_agent_certificate(&two, &ca_pub), Err(SignError::PrincipalCount { found: 2 })),
+            "{label}"
+        );
+    }
+    // Not a line, not a certificate, an RSA issuer.
+    for bad in ["", "garbage", "ssh-ed25519-cert-v01@openssh.com AAAA"] {
+        assert!(certificate_issuer(bad).is_err(), "{bad:?}");
+    }
+}
+
+/// Flip one bit of byte `i` of the certificate's wire form and write the line again.
+fn flipped(line: &str, i: usize) -> String {
+    use base64::Engine as _;
+    let mut parts = line.splitn(3, ' ');
+    let (kind, b64) = (parts.next().unwrap(), parts.next().unwrap());
+    let mut blob = base64::engine::general_purpose::STANDARD.decode(b64).unwrap();
+    blob[i] ^= 0x01;
+    format!("{kind} {}", base64::engine::general_purpose::STANDARD.encode(blob))
+}
+
+#[test]
+fn a_tampered_certificate_is_never_given_an_issuer() {
+    // `ssh-keygen -L` is trusted to verify the certificate's signature. Checked here, for every byte of two
+    // certificates (one under each kind of CA): a flipped bit anywhere in the wire form gives no issuer.
+    use base64::Engine as _;
+    let keys = Keys::new();
+    for (label, ca) in [("ed25519", keys.key("ca-e")), ("p256", keys.ecdsa_key("ca-p"))] {
+        let line = agent_line(&keys, &ca, &format!("tamper-{label}"), "alice", VALID);
+        let blob = base64::engine::general_purpose::STANDARD.decode(line.split(' ').nth(1).unwrap()).unwrap();
+        assert!(certificate_issuer(&line).is_ok());
+        let mut accepted = vec![];
+        for i in 0..blob.len() {
+            if certificate_issuer(&flipped(&line, i)).is_ok() {
+                accepted.push(i);
+            }
+        }
+        assert!(
+            accepted.is_empty(),
+            "{label}: a flipped bit in byte(s) {accepted:?} of {} still gave an issuer",
+            blob.len()
+        );
+        // Also cut short, and with the signature of another certificate by the same CA put in place.
+        for cut in [1, 10, blob.len() / 2, blob.len() - 1] {
+            let short = format!(
+                "{} {}",
+                line.split(' ').next().unwrap(),
+                base64::engine::general_purpose::STANDARD.encode(&blob[..cut])
+            );
+            assert!(certificate_issuer(&short).is_err(), "{label} cut at {cut}");
+        }
+        let second = agent_line(&keys, &ca, &format!("second-{label}"), "mallory", VALID);
+        let second_blob = base64::engine::general_purpose::STANDARD.decode(second.split(' ').nth(1).unwrap()).unwrap();
+        // The first certificate's body (to the signature) with the second's signature: the signature is over the wrong bytes.
+        let tail = 4 + u32::from_be_bytes(second_blob[second_blob.len() - 4 - 4..][..4].try_into().unwrap()) as usize; // not exact: only a probe
+        let _ = tail;
+        let spliced: Vec<u8> =
+            blob[..blob.len() - 32].iter().chain(&second_blob[second_blob.len() - 32..]).copied().collect();
+        let spliced = format!(
+            "{} {}",
+            line.split(' ').next().unwrap(),
+            base64::engine::general_purpose::STANDARD.encode(spliced)
+        );
+        assert!(certificate_issuer(&spliced).is_err(), "{label} spliced signature");
+    }
 }

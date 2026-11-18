@@ -127,6 +127,14 @@ pub enum SignError {
     BadGroups(&'static str),
     #[error("`{0}` is not a fingerprint like SHA256:<43 base64 characters>")]
     MalformedFingerprint(String),
+    #[error("the signature carries a certificate, and a plain key was expected")]
+    UnexpectedCertificate,
+    #[error("ssh-keygen did not accept the certificate: {0}")]
+    CertificateNotVerified(String),
+    #[error("ssh-keygen printed no signing key for the certificate")]
+    NoIssuer,
+    #[error("the certificate was signed by another key than the one expected")]
+    WrongIssuer,
     #[error("the request's call is another person's than the one these approval keys belong to")]
     ApprovalForAnotherPerson,
     #[error("not a certificate line: `<type> <base64> [comment]`")]
@@ -405,6 +413,9 @@ pub struct Certificate {
     pub key_type: String,
     /// 1 for a user certificate, 2 for a host certificate.
     pub cert_type: u32,
+    /// The fingerprint of the key the certificate says signed it. **A claim**: nothing was verified.
+    /// [`certificate_issuer`] has `ssh-keygen` verify the certificate's signature.
+    pub issuer: Fingerprint,
 }
 
 pub(crate) fn put_string(out: &mut Vec<u8>, s: &[u8]) {
@@ -516,10 +527,12 @@ pub(crate) fn certificate_from_blob(blob: &[u8]) -> Result<Certificate, SignErro
     let critical_options = name_data_list(key.string().ok_or_else(bad)?, false).ok_or_else(bad)?;
     let extensions = name_data_list(key.string().ok_or_else(bad)?, true).ok_or_else(bad)?;
     let _reserved = key.string().ok_or_else(bad)?;
-    let issuer = key_type(key.string().ok_or_else(bad)?).ok_or_else(bad)?;
+    let issuer_blob = key.string().ok_or_else(bad)?;
+    let issuer = key_type(issuer_blob).ok_or_else(bad)?;
     if !SUPPORTED_KEYS.contains(&issuer.as_str()) {
         return Err(SignError::UnsupportedKeyType(issuer));
     }
+    let issuer = Fingerprint::of_blob(issuer_blob);
     let fingerprint = Fingerprint::of_blob(&plain);
     let key_type = kind.trim_end_matches("-cert-v01@openssh.com").to_owned();
     Ok(Certificate {
@@ -532,6 +545,7 @@ pub(crate) fn certificate_from_blob(blob: &[u8]) -> Result<Certificate, SignErro
         fingerprint,
         key_type,
         cert_type,
+        issuer,
     })
 }
 
@@ -792,4 +806,102 @@ pub fn sign_clearance(signer: &Signer, clearance: &Clearance) -> Result<String, 
 pub fn verify_clearance(clearance: &Clearance, sig: &str, site_ca: &PublicKey) -> Result<(), SignError> {
     let allowed = ca_line("broker", &[Namespace::Clearance], site_ca);
     verify(Namespace::Clearance, &allowed, "broker", sig, clearance.as_bytes())
+}
+
+// ---------------------------------------------------------------------------
+// The sign-in, and what the broker says in its own name
+// ---------------------------------------------------------------------------
+
+/// Sign a connection document (`approval-connections.md` section 5, sign-in) with the person's
+/// connection key, a plain key: `connection-v1@procession`.
+pub fn sign_connection(signer: &Signer, document: &[u8]) -> Result<String, SignError> {
+    signer.sign(Namespace::Connection, document)
+}
+
+/// Verify a sign-in's signature over the connection document's bytes: `connection-v1@procession`, by
+/// `connection_key` as listed directly for `person` (a plain line, not a certificate authority). The
+/// signature must not carry a certificate: the key is plain (`approvals.md` section 5). A plain key's
+/// signature carries no name, so `person` is only the label this key is listed under: the caller binds
+/// person to key by choosing which key to pass (the one the site project has for that person). What the
+/// document says (the person, the nonce, the TLS binding) is the caller's to check.
+pub fn verify_connection(
+    person: &str,
+    connection_key: &PublicKey,
+    sig: &str,
+    document: &[u8],
+) -> Result<(), SignError> {
+    if !text::is_name(person) {
+        return Err(SignError::BadPrincipal(person.to_owned()));
+    }
+    // `ssh-keygen` would match the certified key against a plain line; this key is not certified, so a certificate is refused.
+    if key_type(&signature_key_blob(sig)?).is_some_and(|t| t.contains("-cert-v01@")) {
+        return Err(SignError::UnexpectedCertificate);
+    }
+    let allowed = key_line(person, Namespace::Connection, connection_key);
+    verify(Namespace::Connection, &allowed, person, sig, document)
+}
+
+/// Sign what the broker says in its own name (the standing) with the broker's key, certified by the
+/// site CA as `broker`: `broker-v1@procession`.
+pub fn sign_broker(signer: &Signer, document: &[u8]) -> Result<String, SignError> {
+    signer.sign(Namespace::Broker, document)
+}
+
+/// Verify what the broker says in its own name, as pledge does: `broker-v1@procession`, under the name
+/// `broker`, against the site CA's key. A person's key, certified for a person, does not verify here.
+pub fn verify_broker(site_ca: &PublicKey, sig: &str, document: &[u8]) -> Result<(), SignError> {
+    let allowed = ca_line("broker", &[Namespace::Broker], site_ca);
+    verify(Namespace::Broker, &allowed, "broker", sig, document)
+}
+
+// ---------------------------------------------------------------------------
+// Which key issued a bare certificate
+// ---------------------------------------------------------------------------
+
+/// The fingerprint of the key that **signed** the certificate on `line`, found by `ssh-keygen -L`. That
+/// command reads the certificate through the code `sshd` uses, which verifies the certificate's
+/// signature against the signing key inside it and refuses the certificate if it does not match; so what
+/// comes back is the issuer of a certificate whose signature is good, and a certificate with a damaged
+/// byte anywhere is an error ([`SignError::CertificateNotVerified`]), as the tests here show for every
+/// byte of one. It does not look at validity. The caller compares the fingerprint with the issuer it
+/// expects, or uses [`verify_agent_certificate`].
+pub fn certificate_issuer(line: &str) -> Result<Fingerprint, SignError> {
+    // Judge the shape first: one line, no control character, the type inside the blob the one named.
+    let blob = certificate_line_blob(line)?;
+    let claimed = certificate_from_blob(&blob)?.issuer;
+    let dir = tempfile::tempdir()?;
+    let file = dir.path().join("cert.pub");
+    std::fs::write(&file, format!("{line}\n"))?;
+    let out = match run(&["-L".as_ref(), "-f".as_ref(), file.as_os_str()], b"") {
+        Ok(out) => out,
+        Err(SignError::Tool { stderr, status }) => {
+            return Err(SignError::CertificateNotVerified(if stderr.is_empty() { status } else { stderr }));
+        }
+        Err(other) => return Err(other),
+    };
+    let text = String::from_utf8_lossy(&out);
+    let printed: Fingerprint = text
+        .lines()
+        .find_map(|l| l.trim().strip_prefix("Signing CA:"))
+        .and_then(|rest| rest.split_whitespace().find(|w| w.starts_with("SHA256:")))
+        .and_then(|fp| fp.parse().ok())
+        .ok_or(SignError::NoIssuer)?;
+    // What `ssh-keygen` verified against and what the blob says are one key.
+    if printed != claimed {
+        return Err(SignError::WrongIssuer);
+    }
+    Ok(printed)
+}
+
+/// An agent's certificate checked in full, as pledge does before it hands one out and the broker at
+/// registration: the section 3.1 rules ([`agent_certificate`]: one principal, no critical option, only a
+/// well-formed `groups@procession`, the certified key Ed25519, a user certificate), **and** its
+/// signature is good and made by `delegation_key` ([`certificate_issuer`]). The validity is in the
+/// result (`valid_after`, `valid_before`) and is the caller's to judge.
+pub fn verify_agent_certificate(line: &str, delegation_key: &PublicKey) -> Result<Agent, SignError> {
+    let agent = agent_certificate(line)?;
+    if certificate_issuer(line)? != delegation_key.fingerprint() {
+        return Err(SignError::WrongIssuer);
+    }
+    Ok(agent)
 }
