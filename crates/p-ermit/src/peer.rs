@@ -2,7 +2,7 @@
 //! program, read once, one way, for every program that has such a socket (pledge's three, the broker's
 //! admin socket, preserve's daemon socket).
 //!
-//! No dependency on the formats, signatures or `ssh-keygen`: this module needs `libc` and `std`.
+//! This module needs `libc` and `std` and nothing else.
 //!
 //! **Read or drop.** A [`Peer`] exists only if its credentials were read; a socket whose peer cannot be
 //! read has no `Peer` and no "anyone" to fall back to. [`admit`] reads and checks in one call and either
