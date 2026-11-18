@@ -359,3 +359,9 @@ What I did not find: any place where the broker writes a string from a request's
 - **Reading back:** every person name, group, label, account and fingerprint is validated when the register is read; one that fails means "a register it cannot read whole" and the broker does not start (audit row 23). `page init`'s empty register has `v` 1 and the new members absent where they have no entries.
 - **Site file:** left as the stand-in until stage 3.
 - **Standing `at`:** as told, when p-act's type has it.
+
+## "By whom": accepted with three conditions (SPEC brought in line; waiting for p-act and `account_of`)
+
+1. The restriction takes effect and is stored with the uid first; the name is looked up after, off the path that answers the verb, and added if it arrives (the register is written again then; an entry without a name is complete). I will test it with a lookup that never returns: the block is in force, stored, and answered.
+2. sudo: uid 0 and nothing more; no `SUDO_USER` or any caller-set variable is read; the SPEC does not promise more than the peer lookup gives.
+3. Nothing is decided by the account database; `page` shows both, uid first, from what was stored, never looked up when shown.

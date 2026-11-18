@@ -233,6 +233,19 @@ rule is made here.
   group and account in the register is validated when it is read back
   (`p_ermit::text`, and the name patterns): a register with one that fails is
   one the broker cannot read whole, and it does not start.
+  - **The lookup never stands between an administrator and a block.** The
+    account database may be slow or hang (a directory site reaches it through
+    the name service). The restriction takes effect and is stored with the uid
+    first; the name is looked up afterwards, off the path that answers the verb,
+    and added to the entry if it arrives. An entry without a name is complete.
+  - **An administrator who acts through sudo arrives as uid 0.** The record says
+    uid 0 and nothing more: `SUDO_USER` and anything else the caller could set
+    is not read. The trail is as honest as the peer lookup and no more: on most
+    hosts it will say uid 0. A site that wants names in it has its
+    administrators run `page` as themselves, which needs more than "root or the
+    broker's user" to connect (the administrators' group, not built).
+  - **Nothing is ever decided by the account database**: not who may connect,
+    not what a verb does; the name is shown beside the uid, uid first.
 - When the register cannot be written, what happens goes by direction. A
   change that restricts (a block, a withdrawal, forgetting a registration)
   takes effect in memory at once, always, and its caller is told that it is
