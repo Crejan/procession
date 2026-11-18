@@ -85,9 +85,13 @@ impl Server {
         });
         let server = Self { child, stdin, lines, state, sockets, _dir: dir };
         let deadline = Instant::now() + Duration::from_secs(10);
-        while std::os::unix::net::UnixStream::connect(server.agent()).is_err() {
-            assert!(Instant::now() < deadline, "pledge serve did not start");
-            thread::sleep(Duration::from_millis(50));
+        // Ready means all three sockets are bound: `pledge serve` binds them one after the other, and a
+        // command that runs between the first and the last finds "not running".
+        for socket in ["agent.sock", "control.sock", "service.sock"] {
+            while std::os::unix::net::UnixStream::connect(server.sockets.join(socket)).is_err() {
+                assert!(Instant::now() < deadline, "pledge serve did not bind {socket}");
+                thread::sleep(Duration::from_millis(50));
+            }
         }
         server
     }
