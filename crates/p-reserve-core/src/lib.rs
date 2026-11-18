@@ -10,9 +10,11 @@
 
 pub mod engine;
 pub mod freshness;
+pub mod health;
 pub mod ledger;
 pub mod outcome;
+pub mod textfile;
 
 pub use freshness::{Freshness, Thresholds};
-pub use ledger::{Ledger, Pair};
-pub use outcome::Outcome;
+pub use ledger::{Entry, Ledger, Pair, Run};
+pub use outcome::{Level, Outcome};
