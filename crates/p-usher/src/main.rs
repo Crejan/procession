@@ -18,7 +18,7 @@ usage: p-usher [-c|--config PATH] [--once] [--check]
 
   -c, --config PATH  configuration file (default /etc/p-usher.toml)
       --once         scan once and exit
-      --check        validate the configuration and exit
+      --check        read the configuration and the password file as the daemon would, report every refusal, exit non-zero if any
   -V, --version      print the version";
 
 struct Args {
@@ -78,14 +78,22 @@ fn protect_self(cfg: &SelfProtection, pin: Option<u32>) {
 
 fn run() -> Result<()> {
     let Some(args) = parse_args()? else { return Ok(()) };
-    let cfg = Config::load(&args.config, args.explicit)?;
     let accounts = SystemAccounts;
     let host = nix::unistd::gethostname()?.to_string_lossy().into_owned();
-    let settings = cfg.settings(host, &accounts)?;
     if args.check {
-        println!("configuration ok");
-        return Ok(());
+        // Every file the daemon would read, every refusal; nothing is changed or started.
+        let problems = p_usher::check::problems(&args.config, args.explicit, &host, &accounts);
+        for p in &problems {
+            println!("refused: {p}");
+        }
+        if problems.is_empty() {
+            println!("configuration ok");
+            return Ok(());
+        }
+        bail!("{} problem(s); the daemon would not start", problems.len());
     }
+    let cfg = Config::load(&args.config, args.explicit)?;
+    let settings = cfg.settings(host, &accounts)?;
     let notifiers = cfg.notifiers(&accounts)?;
     let mut engine = Engine::new(
         settings,

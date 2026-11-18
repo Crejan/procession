@@ -8,6 +8,31 @@ tells the thread's owner when it had to step in.
 cargo install p-usher
 ```
 
+## Upgrading: stricter files (can stop a start)
+
+From this version p-usher refuses a configuration file that group or others
+can write, and an SMTP password file (`email.password_file`) that has any
+permission for group or others, or that is not owned by root or the user
+running p-usher. After an upgrade a host that ran before may therefore fail to
+start. **Before upgrading**, run the new binary's check; it reads exactly what
+the daemon would read, changes nothing, and exits non-zero if the daemon would
+refuse to start:
+
+```
+p-usher --check                  # or: p-usher --check --config /path/to/p-usher.toml
+```
+
+It prints one `refused: ...` line per problem, each with the command that
+fixes it. The usual ones:
+
+```
+sudo chown root:root /etc/p-usher.toml && sudo chmod 644 /etc/p-usher.toml
+sudo chown root:root /etc/p-usher.smtp-password && sudo chmod 600 /etc/p-usher.smtp-password
+```
+
+(use the user that runs p-usher instead of `root` if it is not root). The
+details of what is refused are under "The configuration file is checked" below.
+
 ## Why
 
 On a PREEMPT_RT host with RT throttling disabled, a user thread at any RT
@@ -110,7 +135,7 @@ cat /sys/devices/system/cpu/isolated
 Roll out in report mode first. Set `mode = "report"`, then:
 
 ```
-sudo p-usher --check                   # validate the configuration
+sudo p-usher --check                   # read the config and password file, report every refusal
 sudo p-usher --once                    # one scan, prints what it would do
 sudo systemctl daemon-reload
 sudo systemctl enable --now p-usher

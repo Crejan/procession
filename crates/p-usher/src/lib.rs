@@ -7,6 +7,7 @@
 pub mod log;
 
 pub mod accounts;
+pub mod check;
 pub mod config;
 pub mod cpuset;
 pub mod decide;
@@ -14,6 +15,7 @@ pub mod engine;
 pub mod model;
 pub mod notify;
 pub mod procfs;
+pub mod secret;
 pub mod sys;
 pub mod throttle;
 
