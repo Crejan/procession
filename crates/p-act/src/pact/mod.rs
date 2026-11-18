@@ -11,6 +11,7 @@ pub mod bundle;
 pub mod catalogue;
 pub mod cli;
 pub mod compose;
+pub mod http;
 pub mod mcp;
 pub mod outcome;
 pub mod rt;

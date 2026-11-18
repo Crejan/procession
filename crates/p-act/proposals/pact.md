@@ -550,6 +550,20 @@ directory: **`ureq` is not in the local registry** (`no matching package named
 `httparse`, `rustls` 0.23, `rustls-pki-types`, `rustls-webpki` and `webpki-roots`
 are.
 
+## The HTTP client (built on `ureq` 3.5.2)
+
+`p_act::pact::http::HttpTransport`, one `ureq` agent per call. Checked on the fetched crate: the
+TLS feature is `rustls` (so `pact-tls = ["pact", "ureq/rustls"]` was right; `ureq` with
+`default-features = false` is plain http only); `timeout_per_read` is an idle timeout that
+restarts at each read and covers the head and the body, which is the 45 seconds; and
+`Agent::shutdown()` closes the connections of an agent in flight, which is how the model's cancel
+reaches the service (one agent per call). Disarmed: no redirect (a 3xx is `unavailable`), no proxy
+from the environment, no `User-Agent`, no `Accept-Encoding`, `Accept: application/json,
+text/event-stream`, `MCP-Protocol-Version`, no `Origin`. A build without `pact-tls` refuses an
+`https` bundle at start. An error of `ureq` is mapped to "nothing was sent" only when it can
+come from making the connection alone (refused, unreachable, resolve, TLS, bad URL); every
+other one after a connection is a lost answer (`unknown`).
+
 ## What exists
 
 Behind the feature `pact` (`p_act::pact`, and the binary): the bundle parser with every refusal; the in-process Ed25519 SSHSIG writer and its equality test; composing a call from a tool call; the outcome mapping to the closed list; the progress text and interval; the MCP server on a byte stream, and `serve`, `stdio`, `call` and `tools`; the catalogue with the service's schema checked; and the `Transport` trait with an in-memory implementation. What the HTTP client adds is one `Transport` implementation.
