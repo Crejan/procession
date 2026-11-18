@@ -110,3 +110,22 @@ Not verified: memory of an open repository; a repository written by restic or fu
 SHA-256 restore test; large repositories; the `Run`-to-ledger recording by a backup (nothing writes yet); that `dump` of a sparse or very large file streams.
 Decisions of mine: `list` returns direct children only (a recursive listing is the caller's); a snapshot spec with `:` is refused (path is a separate argument);
 no `dump` verb (the engine has it, the verb list is unchanged). Open for the designer: exit code per outcome (now all failures are 3 with the outcome named).
+
+## Unit 3b: the designer's six answers folded in; the start marker (done)
+- `proposals/socket-protocol.md` follows answers 1 to 6 and the additions (section 7 now lists them; the root-helper sentence, the bounded
+  `detail`, `cancel_late`, the schedule rule). SPEC: Architecture bullet on jobs, a "run that began and never ended" line, Core list (`marker`, attempt, cause).
+- `p_reserve_core::marker`: `MarkerDir::begin(&Job)` writes a 0600 file in a 0700 directory and holds a lock on it for the life of the job;
+  `Marker::complete(store, ledger)` saves the ledger then removes the marker; `end()` removes it for a job that wrote no entry (cancelled);
+  `MarkerDir::recover(ledger, store)` turns every unheld marker into `failed` + cause `interrupted` per pair (keeps the last success; first attempt set
+  from the marker's start), saves, then removes. Skips markers whose lock is held (a live job in another process); skips a pair whose ledger already
+  has an attempt at or after the start (crash between save and remove); idempotent; discards empty or damaged markers without an entry.
+- Ledger: `Entry.last_attempt` and `last_cause`, `Run::interrupted()`, `Cause`. Textfile: `backup_last_attempt_timestamp_seconds` and a `cause` label on
+  `backup_last_outcome`. `health`: reason `Interrupted` (a warning).
+- Tests (all run, none skipped): marker 9 (complete order, left-behind marker, idempotence, crash between save and remove, live marker, junk, bad id/second
+  marker/unsafe dir, modes 0600/0700 under umask 000/002/022/077, a ledger that cannot be saved keeps the marker); textfile round trip with the cause and two new
+  malformed cases. `cargo test --workspace --offline` all pass (54 result lines, 0 failed, 0 ignored), clippy on the two crates clean.
+- `detail`: bounded to 512 bytes, control and bidirectional characters replaced (`text::for_display`). **p-act's `text::check` is `pub(crate)`**, so I stated its
+  character set a second time; please have p-act export it and I will replace mine.
+- The marker is not wired to a `backup` yet: no backup exists (it was not built in unit 4, which stayed read-only). It is the primitive the backup, prune and
+  check jobs call; wiring and the one-shot CLI's use are tests-with-the-job later.
+- Merged `integration` again; `Cargo.lock` conflicted and was taken from `integration`, then my dependencies were re-added by the build.
