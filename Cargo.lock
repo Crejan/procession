@@ -2963,6 +2963,7 @@ dependencies = [
  "base64",
  "libc",
  "p-act",
+ "p-age",
  "p-ermit",
  "ring",
  "rustls",
