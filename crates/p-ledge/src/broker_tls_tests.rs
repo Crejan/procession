@@ -176,7 +176,8 @@ fn pledge_signs_in_over_tls_gets_the_standing_and_keeps_the_certificates_the_bro
     let state = &lab.rig.shared.broker_state;
     assert!(state.certificate_for("confirmed").is_some() && state.certificate_for("automatic").is_some());
     assert!(!state.is_blocked());
-    assert!(lab.rig.record().iter().any(|e| e["event"] == "standing-accepted"));
+    // The flag is set before the event is written: wait for the event.
+    eventually("the standing is in the record", || lab.rig.record().iter().any(|e| e["event"] == "standing-accepted"));
 }
 
 #[test]

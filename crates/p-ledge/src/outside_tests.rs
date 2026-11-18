@@ -81,11 +81,21 @@ fn a_key_comment_is_offered_escaped_and_the_key_is_not_refused_over_it() {
         let _ = blob;
     }
     let reply = crate::agent_conn::list_identities(&rig.shared, Some("/usr/bin/ssh"));
-    // The frame holds the blobs (binary) and the comments (text): the comments are what must be clean.
-    let text = String::from_utf8_lossy(&reply).into_owned();
-    assert!(
-        !text.contains('\u{85}') && !text.contains('\u{9b}') && !text.contains('\u{202e}') && !text.contains('\u{1b}')
-    );
+    // Frame: u32 length, type, u32 count, then per key a string (blob) and a string (comment). The blobs are binary and
+    // may hold any byte; only the comments are text.
+    let string_at = |at: usize| {
+        let len = u32::from_be_bytes(reply[at..at + 4].try_into().expect("length")) as usize;
+        (&reply[at + 4..at + 4 + len], at + 4 + len)
+    };
+    let count = u32::from_be_bytes(reply[5..9].try_into().expect("count"));
+    assert!(count >= 4, "every key is offered, none refused over its comment");
+    let mut at = 9;
+    for _ in 0..count {
+        let (_blob, next) = string_at(at);
+        let (comment, next) = string_at(next);
+        assert_clean(std::str::from_utf8(comment).expect("text"), "comment");
+        at = next;
+    }
     assert!(reply.len() > 5, "the keys are offered, not refused");
 }
 
