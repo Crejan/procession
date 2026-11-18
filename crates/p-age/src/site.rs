@@ -11,28 +11,30 @@ use p_act::sign::{PublicKey, SignError};
 use serde::Deserialize;
 use thiserror::Error;
 
+use crate::util::{shown, shown_error};
+
 /// Why the site file was refused.
 #[derive(Debug, Error)]
 pub enum SiteError {
     #[error(transparent)]
     Settings(#[from] p_act::settings::SettingsError),
-    #[error("the groups of `{name}` are not what a standing may carry: {source}")]
+    #[error("the groups of `{}` are not what a standing may carry: {source}", shown(name))]
     BadStanding { name: String, source: p_act::ParseError },
-    #[error("`{0}` is not a name ([A-Za-z0-9._-]+, at most 64 characters)")]
+    #[error("`{}` is not a name ([A-Za-z0-9._-]+, at most 64 characters)", shown(.0))]
     BadName(String),
-    #[error("{what} of `{name}`: {source}")]
+    #[error("{what} of `{}`: {}", shown(name), shown_error(source))]
     BadKey { what: &'static str, name: String, source: SignError },
-    #[error("`{0}` appears twice")]
+    #[error("`{}` appears twice", shown(.0))]
     Duplicate(String),
     #[error("the site file is version {0}, which this broker does not know")]
     Version(u32),
-    #[error("members of group `{group}`: {why}")]
+    #[error("members of group `{}`: {}", shown(group), shown(why))]
     BadMembers { group: String, why: String },
-    #[error("`verified_on` of `{name}` is not a date (YYYY-MM-DD): {value}")]
+    #[error("`verified_on` of `{}` is not a date (YYYY-MM-DD): {}", shown(name), shown(value))]
     BadDate { name: String, value: String },
-    #[error("`{0}` is not enabled and has keys: the view the broker is given has none for a person who is not enabled")]
+    #[error("`{}` is not enabled and has keys: the view the broker is given has none for a person who is not enabled", shown(.0))]
     KeysOnDisabled(String),
-    #[error("`{name}`'s keys: {why}")]
+    #[error("`{}`'s keys: {}", shown(name), shown(why))]
     KeysClash { name: String, why: String },
 }
 
