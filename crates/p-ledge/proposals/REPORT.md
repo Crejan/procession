@@ -606,3 +606,14 @@ Unit tests 20 runs in a loop: 0 failures.
 3. The sshd test prints `SKIPPED ...` (stderr, visible only with `--nocapture`) and
    passes when it cannot bind a TCP port on 127.0.0.1 or finds no sshd. With
    `PLEDGE_REQUIRE_SSHD=1` the same conditions fail the test, so a pass then means it ran.
+
+## The sshd login test has run (as reported by the owner, not run by me)
+
+Reported by the owner, relayed by the designer: on 2026-11-18, on his Mac (macOS,
+outside the sandbox), `PLEDGE_REQUIRE_SSHD=1 cargo test -p p-ledge --test
+real_programs ssh_logs_in -- --nocapture` gave `test
+ssh_logs_in_through_pledge_to_a_local_sshd_or_is_skipped ... ok`, 1 passed, 0
+failed, 1.72 s, no SKIPPED line. So a login with real `ssh` against a local `sshd`
+through pledge's SSH agent socket, with session binding and a verified host, has
+run: on macOS. Not on Linux. This supersedes "written, never run" and the
+"did not run" and "still skipped" lines above; in this sandbox it still cannot run.
