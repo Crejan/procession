@@ -318,8 +318,8 @@ specification).
 for their person and use (`<person>:confirmed`, `<person>:automatic`). A
 service holds one line, the site CA's key, and tells a confirmed approval
 from an automatic one by the name it verifies against. A certificate is
-valid for 30 days and renewed automatically while the person is enabled in
-the site project. The site CA's key is the issuer's (section 6), never at
+valid for 90 days and renewed at a converge while the person is enabled in
+the site project (section 7). The site CA's key is the issuer's (section 6), never at
 the broker: a broker that could certify keys could approve as anyone.
 
 **A service has a key of its own, certified by its host.** The host's SSH
@@ -387,7 +387,7 @@ requests on. An administrator withdraws or blocks at the broker; pledge
 learns of it over its connection, which it holds whenever the machine is
 awake, and stops as well. A service never needs a list of what was
 withdrawn: without a clearance it does nothing, and the broker gives none.
-The 30 days of a person's certificate are only what remains if the broker
+The 90 days of a person's certificate are only what remains if the broker
 itself fails at this.
 
 **Checked with OpenSSH 10.2**, with keys in files: a signature by a
@@ -410,7 +410,7 @@ work).
 | a host | a service | its own key, with the certificate the host key issued for it; the site CA's public key |
 | the broker's host | the broker (`page`); a job that reads group memberships where the site keeps them and writes them in the form `page load` takes | its key, with the certificate the site CA issued for it; its TLS certificate; requests waiting for a person, until their deadlines; persons and their keys, hosts with their keys, and which groups may use which service on which host, from the site project; who is in which group, from the site project or the directory; for each of these where it came from and when; the register of delegations |
 | the site's provisioning | the site project, the roll-out | |
-| the issuer: whoever holds the site CA's key (open, section 10). Never the broker's host | the site CA | the site CA's key |
+| the issuer: the operator, at a converge (section 10). Never the broker's host, and no host that is always on | the site CA | the site CA's key |
 
 ```
  person's machine                         broker's host
@@ -476,9 +476,9 @@ broker, then replaces them in the site project: the person makes new keys on
 the new machine, the administrator enters them, the roll-out certifies them.
 Delegations of the old machine end with its delegation key.
 
-**E. Renewal** The issuer issues fresh
-certificates for every enabled person's approval keys; pledge receives them
-over its connection. A disabled person gets none.
+**E. Renewal** At a converge the issuer issues fresh
+certificates for every enabled person's approval keys that have fewer than
+60 days left; pledge receives them over its connection. A disabled person gets none.
 
 ## 7. Numbers (proposals)
 
@@ -487,7 +487,7 @@ over its connection. A disabled person gets none.
 | a delegation's validity | 8 hours by default, 24 at most | pledge when issuing; broker and pledge when checking |
 | a call's deadline | the agent's choice; 2 minutes ahead is a sensible default, more than 10 is refused | service, pledge |
 | a clearance | issued when the approval comes back; good for 60 seconds | service |
-| a person's certificate, and the broker's | valid 30 days, renewed after 20 | site CA |
+| a person's certificate, and the broker's | valid 90 days; renewed at any converge once fewer than 60 remain; an alert when one nears its end | the issuer, with the site CA's key |
 | a service's certificate | valid 30 days, renewed after 20 | the host key, by the site's provisioning |
 | requests the broker keeps for a pledge that is not connected | until each one's deadline; per agent as many as the setting below, further ones are refused | broker |
 | how long used identifiers are remembered | until the call's deadline; kept on disk across restarts | service, pledge |
@@ -571,6 +571,16 @@ specifications:
 - There is one broker per site. It learns of hosts and their keys with the
   roll-out, like everything else. Its clearance says "passed" and nothing
   more.
+- The issuer is the operator at a converge: the site CA's key is used there
+  and nowhere else, and no host that is always on holds it. Certificates
+  the site CA issues are valid 90 days and renewed at any converge once
+  fewer than 60 remain, with an alert when one nears its end. Nothing
+  scheduled depends on a converge: the broker's data from the site project
+  arrives when the broker's host is converged, and stopping someone at once
+  is `page block` (for a leaver: block, then a limited converge of the
+  broker's host, then the rest). Stages 1 and 2 need no issuer.
+- The broker is built on tokio and rustls; `pact` uses an HTTP client crate
+  instead of one written here.
 
 Open:
 
@@ -581,16 +591,6 @@ Open:
   groups may use a service is a required `groups` parameter on the service's
   binding, and that is its one home (finer rules per action or noun only
   when one is needed).
-- **Who the issuer is, and how long certificates live.** Either the operator
-  at a converge, with longer certificates (90 days, renewed at any converge
-  once fewer than 60 remain, an alert when one nears its end) and no
-  always-on holder of the site CA's key; or an always-on issuer on a host
-  that is not the broker's, with the 30 days of section 7 on a timer. The
-  owner decides. Nothing else depends on which: nothing scheduled depends on
-  a converge, the broker's data from the site project arrives when the
-  broker's host is converged, and stopping someone at once is `page block`
-  (for a leaver: block, then a limited converge of the broker's host, then
-  the rest). Stages 1 and 2 need neither.
 - **Whether a service's key is certified by the site CA instead of its
   host's key**, which would make the list of hosts' keys unnecessary. With
   the owner. Nothing is built on either answer yet.
