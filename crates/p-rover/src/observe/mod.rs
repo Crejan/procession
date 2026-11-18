@@ -2,6 +2,7 @@
 
 pub mod irq;
 pub mod procs;
+pub mod sched;
 
 use p_roc::cpus::{self, Isolation};
 use p_roc::{CpuSet, Unreadable};

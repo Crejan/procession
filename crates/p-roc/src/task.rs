@@ -190,6 +190,8 @@ pub struct Status {
     pub groups: Vec<u32>,
     /// `Cpus_allowed_list`.
     pub cpus_allowed: CpuSet,
+    /// `voluntary_ctxt_switches` and `nonvoluntary_ctxt_switches`, when present.
+    pub switches: Option<Switches>,
 }
 
 /// Parses `/proc/<pid>/status`.
@@ -228,6 +230,7 @@ pub fn parse_status(s: &str) -> Result<Status, Error> {
         gid: gid.ok_or_else(|| missing("Gid"))?,
         groups: groups.unwrap_or_default(),
         cpus_allowed: cpus.ok_or_else(|| missing("Cpus_allowed_list"))?,
+        switches: parse_switches(s).ok(),
     })
 }
 
@@ -438,4 +441,72 @@ pub fn pids_with_comm(root: &Root, comm: &str) -> Result<Vec<i32>, Error> {
             std::fs::read_to_string(root.proc.join(pid.to_string()).join("comm")).is_ok_and(|c| c.trim_end() == comm)
         })
         .collect())
+}
+
+/// The counters of `/proc/<pid>/sched` (needs `CONFIG_SCHED_DEBUG`).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct SchedCounters {
+    /// `nr_switches`.
+    pub switches: Option<u64>,
+    /// `nr_voluntary_switches`.
+    pub voluntary: Option<u64>,
+    /// `nr_involuntary_switches`.
+    pub involuntary: Option<u64>,
+    /// `se.nr_migrations`.
+    pub migrations: Option<u64>,
+}
+
+/// Picks the counters out of `/proc/<pid>/sched`; absent keys stay `None`.
+#[must_use]
+pub fn parse_sched_counters(s: &str) -> SchedCounters {
+    let mut c = SchedCounters::default();
+    for line in s.lines() {
+        let Some((k, v)) = line.split_once(':') else { continue };
+        let Ok(v) = v.trim().parse::<u64>() else { continue };
+        match k.trim() {
+            "nr_switches" => c.switches = Some(v),
+            "nr_voluntary_switches" => c.voluntary = Some(v),
+            "nr_involuntary_switches" => c.involuntary = Some(v),
+            "se.nr_migrations" => c.migrations = Some(v),
+            _ => {}
+        }
+    }
+    c
+}
+
+/// What `sched` reads of one thread.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Counters {
+    /// `schedstat`.
+    pub schedstat: SchedStat,
+    /// `sched`; `None` without `CONFIG_SCHED_DEBUG` or when unreadable.
+    pub sched: Option<SchedCounters>,
+}
+
+/// Reads `schedstat` (required) and `sched` (optional) of a thread.
+///
+/// # Errors
+/// When `schedstat` cannot be read or parsed.
+pub fn read_counters(root: &Root, tgid: i32, tid: i32) -> Result<Counters, Error> {
+    let dir = root.proc.join(tgid.to_string()).join("task").join(tid.to_string());
+    let schedstat = parse_schedstat(&read(&dir.join("schedstat"))?)?;
+    let sched = read(&dir.join("sched")).ok().map(|s| parse_sched_counters(&s));
+    Ok(Counters { schedstat, sched })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn sched_counters_and_schedstat() {
+        let c = parse_sched_counters(
+            "t (1, 1)\nnr_switches                      :               42\nnr_voluntary_switches            :               40\nse.nr_migrations                 :                3\n",
+        );
+        assert_eq!((c.switches, c.voluntary, c.involuntary, c.migrations), (Some(42), Some(40), None, Some(3)));
+        assert_eq!(parse_schedstat("10 20 3\n").unwrap(), SchedStat { run_ns: 10, wait_ns: 20, slices: 3 });
+        assert!(parse_schedstat("10 20").is_err());
+        assert_eq!(irq_thread("irq/125-lan0-TxRx-0"), Some((125, "lan0-TxRx-0")));
+        assert_eq!(irq_thread("kworker/0:1"), None);
+    }
 }

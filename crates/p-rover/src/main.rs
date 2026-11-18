@@ -6,9 +6,9 @@ use std::process::ExitCode;
 use std::time::Duration;
 
 use clap::{Args, Parser, Subcommand, ValueEnum};
-use p_rover::observe::{irq, procs};
+use p_rover::observe::{irq, procs, sched};
 use p_rover::{Config, Env, Error, Report, render};
-use p_roc::Root;
+use p_roc::{CpuSet, Root};
 
 #[derive(Copy, Clone, Debug, ValueEnum)]
 enum Format {
@@ -65,6 +65,18 @@ enum Cmd {
         #[arg(long, default_value_t = procs::DEFAULT_MAX)]
         max: usize,
     },
+    /// Two samples of the RT threads and those on or allowed onto the chosen CPUs: run, wait and switch rates (cost: light).
+    Sched {
+        /// CPUs to watch (a list such as 2-3); default: the isolated set.
+        #[arg(long)]
+        cpus: Option<CpuSet>,
+        /// Sampling window, 1s to 60s.
+        #[arg(long, default_value = "5s", value_parser = humantime::parse_duration)]
+        duration: Duration,
+        /// At most this many thread records.
+        #[arg(long, default_value_t = sched::DEFAULT_MAX)]
+        max: usize,
+    },
     /// IRQ affinity, /proc/interrupts delta, timer ticks (cost: light).
     Irq {
         /// Sampling window, 1s to 60s.
@@ -93,6 +105,9 @@ fn run(cli: &Cli) -> Result<Report, Error> {
     }
     match &cli.command {
         Cmd::Procs { max } => procs::run(&env, &procs::Args { max: *max }),
+        Cmd::Sched { cpus, duration, max } => {
+            sched::run(&env, &sched::Args { cpus: cpus.clone(), duration: *duration, max: *max })
+        }
         Cmd::Irq { duration, top } => irq::run(&env, &irq::Args { duration: *duration, top: *top }),
     }
 }
