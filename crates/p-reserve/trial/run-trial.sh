@@ -65,7 +65,6 @@ printf '[127.0.0.1]:%s %s\n' "$PORT" "$(cut -d' ' -f1-2 "$W/hostkey.pub")" > "$W
 SC="ssh -F /dev/null -i $W/id -o IdentitiesOnly=yes -o UserKnownHostsFile=$W/known_hosts -o StrictHostKeyChecking=yes -o BatchMode=yes -p $PORT $USER@127.0.0.1 -s sftp"
 [ -f "$W/pw" ] || echo secret > "$W/pw"; REPO="sftp:$USER@127.0.0.1:$W/repo"
 echo hello > "$W/src/a.txt"; mkdir -p "$W/src/d"; echo b > "$W/src/d/b.txt"
-R="restic -o sftp.command=\"$SC\" -r $REPO --password-file $W/pw"
 if [ ! -d "$W/repo" ]; then
   restic -o "sftp.command=$SC" -r "$REPO" --password-file "$W/pw" init
   restic -o "sftp.command=$SC" -r "$REPO" --password-file "$W/pw" backup "$W/src"
