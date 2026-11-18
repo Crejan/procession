@@ -106,11 +106,23 @@ fn raw_sign(signer_key: &Path, namespace: &str, data: &[u8]) -> String {
         .arg(signer_key)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
-        .stderr(Stdio::null())
+        .stderr(Stdio::piped())
         .spawn()
         .unwrap();
-    child.stdin.take().unwrap().write_all(data).unwrap();
-    String::from_utf8(child.wait_with_output().unwrap().stdout).unwrap()
+    // A child that has already stopped reading (it failed) closes its end: the write then fails with `Broken pipe`,
+    // which says nothing; its exit status and standard error do.
+    let _ = child.stdin.take().unwrap().write_all(data);
+    let out = child.wait_with_output().unwrap();
+    // An empty namespace is refused by `ssh-keygen` before it reads a byte ("missing namespace"): no signature, and the
+    // write above is a race the child wins under load. Every other namespace must sign.
+    assert_eq!(
+        out.status.success(),
+        !namespace.is_empty(),
+        "ssh-keygen -Y sign: {}: {}",
+        out.status,
+        String::from_utf8_lossy(&out.stderr)
+    );
+    String::from_utf8(out.stdout).unwrap()
 }
 
 fn is_rejected<T: std::fmt::Debug>(r: Result<T, SignError>) -> bool {
