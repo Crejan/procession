@@ -112,13 +112,18 @@ p-robe by sudo, for one) is not reachable from the sandbox. Without this
 rule R1 means nothing: an agent that runs as its person needs nobody's
 approval.
 
-A sandbox should run the signer (`pact`, section 10) as a user that nothing
-the model starts runs as, so that the agent's key cannot be read and carried
-out. Where a sandbox does not, the key protects against the model's text and
-against accident, not against code the model runs. The design holds either
-way: every use of the key still passes the person's machine and is recorded
-there. What the separation buys is that the key cannot be handed to someone
-who then acts from elsewhere until the delegation ends or is withdrawn.
+From stage 2 on, a sandbox runs the signer (`pact`, section 10) under an
+account or in a container of its own: the model reaches it only through
+`pact`'s interface and can read neither the key nor the bundle. That is a
+requirement on how a sandbox is built (what `pact` must be given is in
+`crates/p-act/proposals/pact.md`); how it is built is a proposal of its own
+when stage 2's sandbox is taken up. In stage 1 the model and `pact` may run
+as one user in one sandbox. What that leaves open: the model can read the
+agent's key, so it can sign calls itself, past `pact`'s list of tools, and
+carry the key out. Every call still needs an approval from the person's
+machine and is recorded there, and the key ends with the delegation; what
+is exposed is everything in mode automatic, from wherever the service can
+be reached, until the delegation ends or is withdrawn.
 
 **R3. An agent may have carried out at most what its person may.** A
 delegation names some of the person's groups and can only narrow. Nobody but
@@ -518,9 +523,11 @@ Each stage is usable by itself and is the test of the one before.
    service's allowed-signers file lists the one person's two approval keys
    directly, and there is no R10 because the machine has one person. This
    proves calls, requests, approvals, ratings, deadlines and the record.
+   The model and the signer may share one user there (R2).
 2. **The person's machine is a Mac.** Keys in the Secure Enclave, presence
    checks, dialogs. The broker (`page`) between the Mac and a Linux host,
-   with its register and with hosts and persons from a file.
+   with its register and with hosts and persons from a file. The signer
+   runs apart from the model (R2).
 3. **A site.** The site CA and certificates, the roll-out from the site
    project to broker, hosts and pledge, R10 from the site's model, renewal,
    blocking.
@@ -600,6 +607,8 @@ specifications:
   `page`): one object, an unknown member refused, the file refused if anyone
   but its owner or root can write it. A person cannot comment in them; a
   site's roll-out renders them.
+- The model and the signer are not separated in stage 1 and are separated
+  from stage 2 on (R2 says what stage 1 leaves open).
 - The broker listens for services and pledges on one address; the first
   message says which exchange a connection carries
   (`approval-connections.md`, section 4).
