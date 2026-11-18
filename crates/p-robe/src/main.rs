@@ -36,11 +36,12 @@ fn caller() -> Caller {
 /// Where the audit lines and the locks are. A build with `test-verbs` can be
 /// pointed at a directory of its own by `PROBE_TEST_SANDBOX`: audit lines go
 /// to `<dir>/audit.log`, locks to `<dir>/locks`, and the check that the
-/// process is root is waived. No other build has this.
+/// process is root is waived. No other build has this, and a process that is root
+/// ignores it (`dispatch::test_sandbox`).
 fn wiring(caller: &mut Caller) -> (Box<dyn Audit>, std::path::PathBuf) {
+    // Only for a process that is not root: as root (through sudo) the variable is not looked at at all.
     #[cfg(feature = "test-verbs")]
-    if let Some(dir) = std::env::var_os("PROBE_TEST_SANDBOX") {
-        let dir = std::path::PathBuf::from(dir);
+    if let Some(dir) = p_robe::dispatch::test_sandbox(std::env::var_os("PROBE_TEST_SANDBOX"), caller.euid) {
         let _ = rate::SANDBOX.set(dir.clone());
         caller.euid = 0;
         return (Box::new(audit::FileAudit(dir.join("audit.log"))), dir.join("locks"));

@@ -102,3 +102,31 @@ pledge's state and a group. `undo.sh` removes the Stage A changes.
   `flock` is also held, until it execs, by a child another thread forks at that
   moment; three lock tests that dropped a lock and took it again at once were
   flaky under parallel tests and now wait up to 3 seconds for the release.
+
+## Update: the designer's changes to the runbook
+
+Done on `agent/p-robe` (`integration` was already merged):
+
+1. **Top of the runbook:** a warning before section 0: a trial machine or a VM
+   only; with the test-verbs build and the rule in place `probe-svc` can read any
+   file as root through `test read`, and only a person's approval stands in the way.
+2. **`a1-prepare.sh`** refuses if `/var/lib/probe` exists, like for the rule and
+   the binary, because `undo.sh` removes that directory whole (syntax checked with
+   `sh -n`; not run).
+3. **Getting the checkout onto the machine:** one paragraph in section 1: `integration`
+   is a local branch, nothing is pushed; push to a reachable remote or `git bundle
+   create` / `git clone`; the owner decides. I pushed nothing.
+4. **Dispatcher tests:** after `--within` and `--call`, anything further that starts with
+   `-` is refused (ten shapes, with and without a second flag, `--`, a lone `-`, a
+   flag after the verb); a test lists every `env::var` / `env!` in the library's
+   sources and fails on a new one; and `PROBE_TEST_SANDBOX`, the one variable that
+   moves the audit sink and the lock directory in a test build, is now **ignored by a
+   process that is root** (`dispatch::test_sandbox`, tested), so it cannot be reached through
+   sudo even if a site keeps it with `env_keep`; with the rule's `env_reset` and no
+   `SETENV` it is dropped before the dispatcher starts anyway. The runbook says so
+   (section 2, "The environment"). A consequence: the tests of the test build must
+   run as an ordinary user, as they do.
+5. **Already done in the previous update:** `probe setup` as the idempotent renewing
+   command, the root timer with its undo, `sys kit` reporting the days left.
+
+I did not add the hyper lines.

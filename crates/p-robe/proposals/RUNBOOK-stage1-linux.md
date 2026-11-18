@@ -1,5 +1,14 @@
 # Runbook: stage 1 on one Linux machine, with a real sudo rule and real HTTP
 
+> **For a trial machine or a virtual machine only. Not on a host that matters.**
+> The `probe` this runbook installs is built with the test verbs, and the
+> sudoers rule lets the account `probe-svc` run it as root. With that build and
+> that rule in place, **`probe-svc` can read any file on the machine as root**
+> through `test read` (the cross run of step A3 does exactly that, with the
+> sudoers file); the approval of a person stands between an agent and that, and
+> nothing else does. A production install has no test verbs. Take a VM, and throw
+> it away, or run `undo.sh`.
+
 For the owner, to follow by hand. Stage 1 of `doc/approvals.md` section 8 is
 "one Linux machine, keys in files": pledge, `pact` and `probe` on one host, the
 verb run by the dispatcher through a real sudo rule, the agent reaching the
@@ -40,6 +49,12 @@ programs have today, and what is not yet there is marked.
 - If `sudo` says "you must have a tty to run sudo", the host has `Defaults
   requiretty`: the scripts run `sudo` through `su`, which gives it one only
   if you run them from a terminal; use a terminal.
+- **Getting the checkout onto the machine.** `integration` is a local branch on
+  the owner's Mac and nothing is pushed anywhere. The owner decides between
+  pushing it to a remote the Linux machine can reach and carrying it over with
+  `git bundle create probe.bundle integration` (on the Mac) and `git clone
+  probe.bundle checkout` (on the Linux machine). The runbook assumes the
+  checkout is at `/home/alice/CHECKOUT`.
 - Build, as `alice`, in the checkout:
   ```
   cargo build --workspace --features p-robe/test-verbs
@@ -75,6 +90,21 @@ programs have today, and what is not yet there is marked.
   not sudo. The rule is checked with `visudo -cf` before it is put in place.
 - `/usr/local/bin/probe` is owned by root and writable by root only: sudo runs
   it as root, so whoever can replace it is root.
+- **The environment.** The rule has `env_reset` and no `SETENV` tag, so sudo
+  gives the dispatcher a clean environment and `probe-svc` cannot add to it
+  (`sudo -E` and `VAR=x sudo ...` are refused for a rule without `SETENV`). The
+  test build has one variable that moves things, `PROBE_TEST_SANDBOX`: it
+  sends the audit lines to a file, the locks to a directory, and waives "must be
+  root". It is **not reachable through this rule**: `env_reset` drops it, and
+  even a site that kept it with `env_keep` would not get it, because the
+  dispatcher ignores it in a process that is root (`dispatch::test_sandbox`,
+  tested), which is what a call through sudo is. The only other variables the
+  program reads are `SUDO_USER` (who ran sudo: sudo sets it, a caller cannot
+  choose it for a root process) and `SSH_CONNECTION` (an address for the log
+  line, copied only if it looks like one). A test lists every `env::var` in the
+  sources so that a new one has to be argued for. After `--within` and `--call`,
+  anything further that starts with `-` is refused (`-x`, `--help`, a second
+  `--within`, `--` included), whatever the rule's `*` lets through; tested.
 
 ## 3. Every change to the machine, and how it is undone
 

@@ -17,6 +17,7 @@ command -v logger >/dev/null || { echo "FAIL: logger (util-linux) is not install
 command -v ssh-keygen >/dev/null || { echo "FAIL: ssh-keygen is not installed"; exit 1; }
 [ -e "$RULE" ] && { echo "FAIL: $RULE exists; run undo.sh first or remove it"; exit 1; }
 [ -e "$INSTALLED" ] && { echo "FAIL: $INSTALLED exists; run undo.sh first or remove it"; exit 1; }
+[ -e /var/lib/probe ] && { echo "FAIL: /var/lib/probe exists, and undo.sh removes that directory whole; look at it, move what you want to keep, remove it, and run this again"; exit 1; }
 
 # 1. The service's account: no login, no shell, its own home.
 if id "$SVC" >/dev/null 2>&1; then

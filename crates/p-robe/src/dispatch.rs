@@ -27,6 +27,16 @@ pub const RC_UNAVAILABLE: u8 = 3;
 pub const RC_REFUSED: u8 = 64;
 pub const RC_BUSY: u8 = 75;
 
+/// The directory a test build is pointed at by `PROBE_TEST_SANDBOX`, if it may be: **never for a
+/// process that is root**, which is what a call through sudo is. So even a sudo rule that kept the
+/// variable (`env_keep`, `SETENV`) could not move the audit sink or the lock directory of a dispatcher
+/// that runs as root. (Tests of the test build run as an ordinary user.)
+#[cfg(feature = "test-verbs")]
+#[must_use]
+pub fn test_sandbox(variable: Option<OsString>, euid: u32) -> Option<PathBuf> {
+    variable.filter(|_| euid != 0).map(PathBuf::from)
+}
+
 /// Who calls, as the process found it.
 #[derive(Debug, Clone)]
 pub struct Caller {
@@ -622,6 +632,76 @@ mod tests {
         assert!(text.len() <= 600, "{}", text.len());
         assert!(text.lines().last().unwrap().starts_with("{\"type\":\"truncated\""), "{text}");
         assert!(sink.lines.borrow().last().unwrap().contains("truncated=true"));
+    }
+
+    // -- what may follow the flags, and what the environment may change --------------
+
+    #[test]
+    fn nothing_that_starts_with_a_dash_gets_past_the_flags() {
+        const FLAGS: [&str; 4] = ["--within", "secret,lasting,outage", "--call", CALL];
+        fn with<'a>(rest: &[&'a str]) -> Vec<&'a str> {
+            FLAGS.iter().copied().chain(rest.iter().copied()).collect()
+        }
+        for rest in [
+            &["-x", "sys", "kit"][..],
+            &["--help"],
+            &["--within", "open,none,none", "sys", "kit"],
+            &["--call", CALL, "sys", "kit"],
+            &["-", "sys", "kit"],
+            &["sys", "-x"],
+            &["sys", "kit", "--within", "open,none,none"],
+            &["rt", "irq", "--call", CALL],
+            &["rt", "irq", "-"],
+            &["--", "sys", "kit"],
+        ] {
+            let argv = with(rest);
+            assert!(admit(&sudo("jan"), &words(&argv)).is_err(), "{argv:?}");
+            assert_eq!(call(&sudo("jan"), &argv).rc, RC_REFUSED, "{argv:?}");
+        }
+        // What the sudoers `*` could pass after the identifier is still only a verb and its arguments.
+        assert!(admit(&sudo("jan"), &words(&with(&["sys", "kit"]))).is_ok());
+    }
+
+    #[test]
+    fn the_dispatcher_reads_no_environment_variable_but_two_for_the_log_and_one_for_tests() {
+        // Every `env::var` of the library's sources, found in the files: a new one has to be argued for here.
+        let mut found = Vec::new();
+        for entry in std::fs::read_dir(concat!(env!("CARGO_MANIFEST_DIR"), "/src")).unwrap() {
+            let path = entry.unwrap().path();
+            let file = path.file_name().unwrap().to_string_lossy().into_owned();
+            if file.ends_with("_tests.rs") || !file.ends_with(".rs") {
+                continue;
+            }
+            let text = std::fs::read_to_string(&path).unwrap();
+            // Only the code: tests' own uses, and comments, are not the program's.
+            let code = text.split("#[cfg(test)]").next().unwrap();
+            for line in code.lines().filter(|l| !l.trim_start().starts_with("//")) {
+                for pattern in ["env::var(\"", "env::var_os(\"", "env!(\"", "option_env!(\""] {
+                    if let Some(at) = line.find(pattern) {
+                        let name = line[at + pattern.len()..].split('"').next().unwrap_or("").to_string();
+                        found.push(format!("{file}: {pattern}{name}"));
+                    }
+                }
+            }
+        }
+        found.sort();
+        // SUDO_USER and SSH_CONNECTION (main.rs and the log only), PROBE_TEST_SANDBOX (main.rs, test build, never as root),
+        // and CARGO_PKG_VERSION / CARGO_MANIFEST_DIR at compile time. Nothing chooses an audit sink or a lock directory.
+        for line in &found {
+            let ok = ["CARGO_PKG_VERSION", "SUDO_USER", "SSH_CONNECTION", "PROBE_TEST_SANDBOX", "CARGO_MANIFEST_DIR"]
+                .iter()
+                .any(|name| line.contains(name));
+            assert!(ok, "an environment variable the dispatcher did not read before: {line} (all: {found:?})");
+        }
+    }
+
+    #[cfg(feature = "test-verbs")]
+    #[test]
+    fn the_test_sandbox_is_never_honoured_for_a_process_that_is_root() {
+        let dir = Some(OsString::from("/tmp/x"));
+        assert_eq!(test_sandbox(dir.clone(), 0), None, "root: through sudo");
+        assert_eq!(test_sandbox(dir.clone(), 1000), Some(PathBuf::from("/tmp/x")));
+        assert_eq!(test_sandbox(None, 1000), None);
     }
 
     // -- --within ---------------------------------------------------------
