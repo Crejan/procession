@@ -20,7 +20,7 @@ const USAGE: &str =
        probe <noun>                        the verbs of one noun
        probe catalog [--format json]       every verb with its rating and whether it can run here
        probe serve [--config <file>]       the service for agents (the HTTP transport is not built yet)
-       probe setup --host-key <file>       stage 1: the service's key and certificate
+       probe setup [--host-key <file>]     the service's key and its certificate: first run and renewal (no arguments: from /etc/probe.toml)
 ";
 
 /// What the process is, as the dispatcher needs it.

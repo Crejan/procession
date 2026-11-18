@@ -538,14 +538,27 @@ mod tests {
         assert!(outcome.lines.len() == 1 && outcome.lines[0].starts_with("event=busy "), "{:?}", outcome.lines);
         assert_eq!(call_with(&Memory::default(), &dir, &sudo("eva"), &["sys", "kit"]).rc, 0);
         drop(held);
-        assert_eq!(call_with(&Memory::default(), &dir, &sudo("jan"), &["sys", "kit"]).rc, 0);
+        assert_eq!(released(&dir, "jan"), 0, "the lock is free once its holder is done");
+    }
+
+    /// The exit code of a call of `who` once its lock is free. A process another test forks while the lock
+    /// is held keeps a copy of the descriptor until it has exec'd, so the release can take a moment.
+    fn released(dir: &std::path::Path, who: &str) -> u8 {
+        let started = Instant::now();
+        loop {
+            let rc = call_with(&Memory::default(), dir, &sudo(who), &["sys", "kit"]).rc;
+            if rc != RC_BUSY || started.elapsed() > std::time::Duration::from_secs(3) {
+                return rc;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
     }
 
     #[test]
     fn the_lock_is_released_when_the_call_is_done() {
         let dir = crate::testdir::new("locks");
         for _ in 0..2 {
-            assert_eq!(call_with(&Memory::default(), &dir, &sudo("jan"), &["sys", "kit"]).rc, 0);
+            assert_eq!(released(&dir, "jan"), 0);
         }
     }
 

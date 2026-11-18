@@ -8,6 +8,7 @@
 
 pub mod answer;
 pub mod audit;
+pub mod certificate;
 pub mod clock;
 pub mod config;
 pub mod dispatch;

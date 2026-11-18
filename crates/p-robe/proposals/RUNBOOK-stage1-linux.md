@@ -12,7 +12,9 @@ service over HTTP. Nothing in it has been run on Linux. Terms are those of
 |---|---|
 | `pledge serve`, `pledge keys`, `pledge agents start/withdraw`, `pledge history` | built (p-ledge), tested on macOS |
 | `probe` dispatcher, `sudo -n probe --within <rating> --call <uuid> <noun> <verb> ...` | built, tested on macOS with a simulated root; **never run through sudo** |
-| `probe setup` (service key and certificate from a host key) | built, run on macOS with a throwaway host key |
+| `probe setup` (the service's key and its 30-day certificate from the host key; **the same command renews**: it keeps the key, replaces the certificate by a rename; with no arguments it takes `/etc/probe.toml` or the defaults) | built, run on macOS with a throwaway host key |
+| the renewal timer (`stage1/probe-setup.service` and `.timer`) | written, **never run** (no systemd here); `systemd-analyze verify` is the first check |
+| `sys kit` reports the certificate's days left (a warning under 5) | built and tested on macOS with certificates made by `ssh-keygen -V` |
 | `probe serve`: the service core (checks, request, wait, approval, run), the MCP layer | built; run in-process against the real pledge (`tests/stage1.rs`) |
 | `probe serve` **over HTTP** | **not built.** It needs an HTTP server crate that cannot be fetched in the sandbox (section 6) |
 | `pact` composer, signer, catalogue, `pact call` / `pact tools` | built (p-act) |
@@ -85,7 +87,7 @@ programs have today, and what is not yet there is marked.
 | lines in syslog or the journal (tag `probe`, facility `auth`) | the dispatcher, on every call | not undone: they are history |
 | files in `/var/tmp` (`probe-stage1-run`, `probe-stage1.check.log*`) | `a2`, `a3` | `a3` removes its own; `undo.sh` the rest |
 | temporary files under `/tmp` for pledge's state and sockets | the test | the test removes them when it passes; on a failure `rm -rf /tmp/s1-*` |
-| Stage B only: `/etc/probe/` (service key and certificate), `/etc/probe.toml`, a unit `probe-serve.service`, pledge's state in your home, a TCP port on 127.0.0.1 | Stage B steps | the undo lines of Stage B |
+| Stage B only: `/etc/probe/` (service key and certificate), `/etc/probe.toml`, the units `probe-serve.service`, `probe-setup.service` and `probe-setup.timer`, pledge's state in your home, a TCP port on 127.0.0.1 | Stage B steps | the undo lines of Stage B |
 
 `undo.sh` is safe to run at any time and does nothing to what is not on this list.
 
@@ -227,24 +229,77 @@ Passed: `pledge serve` prints nothing alarming and `ls -l
 `pledge-svc`. Did not pass: it refuses to start naming the directory or its
 mode.
 
-### B2. The service's key, as root
+### B2. The service's key and its certificate, as root; the renewal
 
 ```
 probe setup --host-key /etc/ssh/ssh_host_ed25519_key --host HOSTNAME --out /etc/probe
-chown probe-svc:probe-svc /etc/probe/service-key
+chown probe-svc:probe-svc /etc/probe/service-key /etc/probe/service-key.pub /etc/probe/service-key-cert.pub
 ```
 
-Makes `/etc/probe/service-key` and `service-key-cert.pub`, valid 30 days for the
-principal `probe@HOSTNAME`. It says plainly that this is the stage-1 way: in a
-site the roll-out does it, as root, and renews it; here it must be run again
-before the certificate ends. Passed: it prints the note and exits 0; `ssh-keygen -L
--f /etc/probe/service-key-cert.pub` shows `Principals: probe@HOSTNAME`. Undo:
-`rm -rf /etc/probe`.
+Makes `/etc/probe/service-key` (kept for good) and `service-key-cert.pub`, valid 30
+days for the principal `probe@HOSTNAME`. Passed: it prints that it made them and
+that a root timer renews them; `ssh-keygen -L -f /etc/probe/service-key-cert.pub`
+shows `Principals: probe@HOSTNAME` and a `Valid:` that ends in 30 days. Did not
+pass: it prints `probe setup: ssh-keygen: ...` (a host key it cannot read, a name
+that is not a key) and **leaves no key behind**. Undo: `rm -rf /etc/probe`.
+
+**It is also the renewing command, and idempotent.** Run again (as root, with
+the same arguments or none once B3 is in place) it keeps the key, makes a new
+certificate in a directory of its own and renames it over the old one, owned by
+the key's owner (so after the `chown` above it stays the service's). The running
+service reads the certificate on every signature, so it needs no restart: the
+old certificate is used until the rename, the new one after, never half of one. A
+renewal that fails leaves the old certificate as it was and exits non-zero.
+Passed: it prints `Kept the service's key and replaced its certificate`; `cmp
+/etc/probe/service-key` before and after says they are the same file contents (copy
+it first), and the certificate's `Valid:` end moved. Did not pass: as above, and the
+old certificate is still there.
+
+**The timer.** Put `stage1/probe-setup.service` and `stage1/probe-setup.timer` in
+`/etc/systemd/system/` and:
+
+```
+systemd-analyze verify /etc/systemd/system/probe-setup.service /etc/systemd/system/probe-setup.timer
+systemctl daemon-reload
+systemctl enable --now probe-setup.timer
+systemctl start probe-setup.service
+systemctl status probe-setup.service
+systemctl list-timers probe-setup.timer
+```
+
+The unit runs `probe setup` with no arguments, as root, 10 minutes after boot
+and then 20 days after each run, with a random delay of up to an hour; it needs
+nothing off the host and does not wait for anything else. Passed: `verify`
+prints nothing; `status` shows `Active: inactive (dead)` with `status=0/SUCCESS`
+and the line `Kept the service's key and replaced its certificate` in its journal;
+`list-timers` shows NEXT about 20 days ahead. Did not pass: `status` shows
+`failed` and the journal says why (`probe setup: ...`); the old certificate is
+untouched. `probe setup` with no arguments reads `/etc/probe.toml`: if that file
+exists and does not parse, it refuses (exit 64) rather than guess, which shows as
+a failed unit.
+
+**What `sys kit` says.** `probe` reports the certificate's days left. Run it as a login that has
+sudo (the dispatcher takes only a call that came through sudo): `sudo
+/usr/local/bin/probe sys kit` shows in its
+`installation` record `service_certificate` (the path) and
+`service_certificate_days_left` (30 right after a renewal), and in its `summary`
+a warning when fewer than 5 are left (`the service's certificate has 3 days left
+(fewer than 5): run probe setup as root`), and one that says it has ended at 0 or
+less. It never makes `usable` false by itself. To see the warning, as root:
+copy the certificate aside, make one that ends soon (`ssh-keygen -s
+/etc/ssh/ssh_host_ed25519_key -I probe@HOSTNAME -n probe@HOSTNAME -V +3d -O clear
+/etc/probe/service-key.pub` writes `service-key-cert.pub` beside the key file),
+run `sudo /usr/local/bin/probe sys kit`, then run `probe setup` and `sudo
+/usr/local/bin/probe sys kit` again: the
+warning is gone and the days are 30. Undo of the timer: `systemctl disable --now
+probe-setup.timer; rm /etc/systemd/system/probe-setup.service
+/etc/systemd/system/probe-setup.timer; systemctl daemon-reload`.
 
 ### B3. `/etc/probe.toml`
 
 ```
 host = "HOSTNAME"
+host_key = "/etc/ssh/ssh_host_ed25519_key"
 person = "alice"
 confirmed_key = "/etc/probe/alice-confirmed.pub"
 automatic_key = "/etc/probe/alice-automatic.pub"
@@ -360,7 +415,7 @@ All of it on one macOS machine (Darwin 25.5), in a sandbox with no network, no
 root, no sudo rule, no systemd, no Linux.
 
 - Run: `cargo test -p p-robe` with and without `--features test-verbs` (unit
-  tests, the CLI tests, `tests/stage1.rs` five times in a row: the real
+  tests, including `probe setup` made twice, a renewal that fails, a signer that keeps working across a renewal, and the days left read from certificates of both key types; the CLI tests, `tests/stage1.rs` five times in a row: the real
   `pledge serve`, `pact`'s composer and signer, the service core, the dispatcher
   in this process as a simulated root). `tests/stage1_sudo.rs` **compiles**, and
   its gate works: without `PROBE_STAGE1_SUDO=1` it does nothing and passes.

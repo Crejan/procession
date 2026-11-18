@@ -74,3 +74,31 @@ Listed with its undo in the runbook, section 3: the account `probe-svc`,
 (checked with `visudo -cf` first), syslog lines (not undone), files in
 `/var/tmp` and `/tmp`; and for Stage B `/etc/probe/`, `/etc/probe.toml`, a unit,
 pledge's state and a group. `undo.sh` removes the Stage A changes.
+
+## Update: `probe setup` renews, the timer, the days left (designer's decision)
+
+- `probe setup` is now idempotent and the renewing command: it **keeps the
+  service's key**, replaces the certificate (30 days) in a directory of its own
+  and renames it into place, owned by the key's owner; a failed renewal leaves
+  the old certificate, a failed first run leaves no key. With **no arguments**
+  it takes `/etc/probe.toml` (new optional key `host_key`) or the defaults, and
+  refuses a settings file that does not parse. The service reads the
+  certificate on every signature (`ssh-keygen -Y sign` is given the certificate
+  file), so a renewal needs no restart: tested with a `Signer` made before the
+  renewal that signs with the new certificate afterwards.
+- `sys kit` reports `service_certificate` and `service_certificate_days_left`
+  (read from the certificate line itself, Ed25519 and ECDSA P-256), and warns
+  below 5 days, and at 0 or less says it has ended; never a problem by itself.
+- The timer: `stage1/probe-setup.service` (oneshot, root, `probe setup`) and
+  `stage1/probe-setup.timer` (`OnBootSec=10min`, `OnUnitActiveSec=20d`, a random
+  delay up to an hour). In the runbook with how to start it, what passing and
+  failing look like, how to see the warning, and how to undo it.
+- Tests added (134 unit with `test-verbs`, 128 without; all targets pass, clippy
+  and fmt clean): setup made twice, key kept, certificate new, no leftover;
+  a failed renewal and a failed first run; `--no-args` defaults; the days left
+  for both key types and for ended ones; the warning thresholds. Not run: the
+  timer and the units (no systemd here), anything as root.
+- One thing found on the way, not a defect of the product: a lock held through
+  `flock` is also held, until it execs, by a child another thread forks at that
+  moment; three lock tests that dropped a lock and took it again at once were
+  flaky under parallel tests and now wait up to 3 seconds for the release.

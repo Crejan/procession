@@ -783,11 +783,18 @@ fn a_tool_call_that_is_malformed_is_a_protocol_error_not_an_outcome() {
 }
 
 #[test]
-fn setup_makes_a_key_whose_certificate_the_host_key_vouches_for_and_does_not_overwrite() {
+fn setup_run_again_keeps_the_key_and_renews_the_certificate_that_the_host_key_vouches_for() {
     let pki = Pki::new();
-    let again = crate::setup::run(&pki.dir.path().join("host"), HOST, &pki.dir.path().join("probe"));
-    assert!(again.unwrap_err().contains("exists"));
-    // The certificate's principal is `probe@host`: a request signed with it verifies under the host key (the pledge fake does that).
+    let cert = std::fs::read(pki.dir.path().join("probe/service-key-cert.pub")).unwrap();
+    let key = std::fs::read(pki.dir.path().join("probe/service-key")).unwrap();
+    assert_eq!(
+        crate::setup::run(&pki.dir.path().join("host"), HOST, &pki.dir.path().join("probe")),
+        Ok(crate::setup::Done::Renewed)
+    );
+    assert_eq!(std::fs::read(pki.dir.path().join("probe/service-key")).unwrap(), key);
+    assert_ne!(std::fs::read(pki.dir.path().join("probe/service-key-cert.pub")).unwrap(), cert);
+    // The renewed certificate's principal is `probe@host`: a request signed with it verifies under the host key
+    // (the pledge fake does that in the tests above).
     assert!(pki.service.with_file_name("service-key-cert.pub").exists());
 }
 
