@@ -258,7 +258,7 @@ fn host() -> Host {
 }
 
 fn request(d: &Delegation, rating: Rating) -> Request {
-    Request::compose(&d.call, &d.sig, rating).unwrap()
+    Request::compose(&d.call, &d.sig, rating, false).unwrap()
 }
 
 #[test]
@@ -291,7 +291,7 @@ fn a_request_is_refused_for_another_service_host_key_bytes_namespace_and_expiry(
 
     // A request whose call names a different service than the signer: the name comes from the call inside.
     let other_call = Call::compose(&call_content("probe", "b.example")).unwrap();
-    let for_b = Request::compose(&other_call, &d.sig, INTERNAL).unwrap();
+    let for_b = Request::compose(&other_call, &d.sig, INTERNAL, false).unwrap();
     let sig_for_a = sign_request(&h.service, &request).unwrap();
     assert!(is_rejected(verify_request(&for_b, &sig_for_a, &host_key)));
 
@@ -419,7 +419,7 @@ fn an_approval_is_refused_for_another_person_the_broker_other_requests_namespace
     // is approved only by bob.
     let for_bob = {
         let bobs_agent = delegation("bob");
-        Request::compose(&bobs_agent.call, &bobs_agent.sig, INTERNAL).unwrap()
+        Request::compose(&bobs_agent.call, &bobs_agent.sig, INTERNAL, false).unwrap()
     };
     assert!(is_rejected(verify_approval(&for_bob, &sign_approval(&s.confirmed, &for_bob).unwrap(), trust)));
     assert_eq!(
@@ -554,7 +554,7 @@ fn one_exchange_from_call_to_clearance() {
     // The service receives call bytes and signature, checks them, and writes a request around them.
     let received = Call::parse(call.as_bytes()).unwrap();
     verify_call(&received, &call_sig, &delegation_keys.public(&delegation_key)).unwrap();
-    let request = Request::compose(&received, &call_sig, INTERNAL).unwrap();
+    let request = Request::compose(&received, &call_sig, INTERNAL, false).unwrap();
     let request_sig = sign_request(&host.service, &request).unwrap();
 
     // The broker and pledge parse what the service sent, and verify all of it.
@@ -668,7 +668,7 @@ fn an_agent_certificate_for_a_p256_key_is_refused_everywhere() {
     assert!(named(signature_agent(&sig).unwrap_err()));
     assert!(named(signature_person(&sig).unwrap_err()));
     let request = request(&delegation("alice"), INTERNAL);
-    let on_p256 = Request::compose(&call, &sig, INTERNAL).unwrap();
+    let on_p256 = Request::compose(&call, &sig, INTERNAL, false).unwrap();
     assert!(named(request_person(&on_p256).unwrap_err()));
     assert!(request_person(&request).is_ok());
     // The raw reading, which judges nothing, still shows it.

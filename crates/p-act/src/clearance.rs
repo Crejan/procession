@@ -92,7 +92,8 @@ mod tests {
         let request = crate::request::tests::request();
         let c = Clearance::compose(request.hash(), Timestamp::from_unix(0).unwrap()).unwrap();
         assert!(c.covers(&request));
-        let other = Request::compose(request.call(), crate::request::tests::SIG, crate::rating::Rating::WORST).unwrap();
+        let other =
+            Request::compose(request.call(), crate::request::tests::SIG, crate::rating::Rating::WORST, false).unwrap();
         assert!(!c.covers(&other));
     }
 
