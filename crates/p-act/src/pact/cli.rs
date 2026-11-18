@@ -76,7 +76,13 @@ fn parse(args: &[String]) -> Result<Options, String> {
 /// One line to standard error, **escaped and bounded**: what reaches a log may hold text from a service or a certificate
 /// (a transport's detail, a tool's name), and nothing of it is written raw.
 fn log(line: &str) {
-    eprintln!("pact: {}", p_ermit::text::escape_clipped(line, MAX_LOG_LINE_CHARS).text);
+    eprintln!("pact: {}", escaped(line));
+}
+
+/// `text` as it may be written to standard error: escaped and cut. An error can hold an argument the person or the
+/// model gave (a path, an option) or a name from a bundle.
+fn escaped(text: &str) -> String {
+    p_ermit::text::escape_clipped(text, MAX_LOG_LINE_CHARS).text
 }
 
 /// The longest line `pact` logs, in characters of the escaped text.
@@ -88,7 +94,7 @@ pub fn run(args: Vec<String>) -> i32 {
     let options = match parse(&args) {
         Ok(o) => o,
         Err(e) => {
-            eprintln!("pact: {e}\n{USAGE}");
+            eprintln!("pact: {}\n{USAGE}", escaped(&e));
             return 2;
         }
     };
@@ -105,7 +111,7 @@ pub fn run(args: Vec<String>) -> i32 {
     match result {
         Ok(()) => 0,
         Err(e) => {
-            eprintln!("pact: {e}");
+            eprintln!("pact: {}", escaped(&e));
             1
         }
     }

@@ -399,3 +399,42 @@ fn serve_admits_the_running_user_only_and_says_so_and_drops_other_clients_in_sil
     assert_eq!(refused.len(), 1, "throttled to one line: {stderr}");
     assert!(refused[0].contains(&own.to_string()), "{stderr}");
 }
+
+#[test]
+fn nothing_raw_comes_out_of_the_binary_whatever_the_bundle_and_the_model_hold() {
+    use p_ermit::probe::{PROBE_ALL, PROBES, assert_clean_in};
+    let dir = tempfile::tempdir().unwrap();
+    let (good, _) = bundle(dir.path(), "20200101Z:20990101Z");
+    let text = String::from_utf8(good.clone()).unwrap();
+    // The probes in the configuration: a host and a service name (JSON-escaped, so the bundle is valid JSON).
+    let json_escaped = PROBE_ALL
+        .replace('\u{1b}', "\\u001b")
+        .replace('\u{85}', "\\u0085")
+        .replace('\u{9b}', "\\u009b")
+        .replace('\u{202e}', "\\u202e");
+    for (from, to) in [
+        ("a.example", json_escaped.as_str()),
+        ("\"probe\"", &format!("\"{json_escaped}\"")),
+        ("\"v\":1", &format!("\"v\":1,\"{json_escaped}\":1")),
+    ] {
+        let (code, stdout, stderr) = run(&["tools"], text.replacen(from, to, 1).as_bytes());
+        assert_eq!(code, 1, "{stderr}");
+        stdout.lines().for_each(|l| assert_clean_in("stdout", l));
+        stderr.lines().for_each(|l| assert_clean_in("stderr", l));
+    }
+    // The model's own names and arguments through `pact call`, and what `pact` logs about them.
+    for p in PROBES.iter().chain([&PROBE_ALL]) {
+        let (_, stdout, stderr) = run(&["call", &format!("no{p}tool"), r#"{"params":["a"]}"#], &good);
+        stdout.lines().for_each(|l| assert_clean_in("stdout", l));
+        stderr.lines().for_each(|l| assert_clean_in("stderr", l));
+        let (_, stdout, stderr) = run(&["call", "x", &format!(r#"{{"{p}":"{p}"}}"#)], &good);
+        stdout.lines().for_each(|l| assert_clean_in("stdout", l));
+        stderr.lines().for_each(|l| assert_clean_in("stderr", l));
+        let (_, stdout, stderr) = run(&["serve", "--socket", &format!("/nonexistent/{p}/s")], &good);
+        stdout.lines().for_each(|l| assert_clean_in("stdout", l));
+        stderr.lines().for_each(|l| assert_clean_in("stderr", l));
+        let (_, stdout, stderr) = run(&["frobnicate", p], &[]);
+        stdout.lines().for_each(|l| assert_clean_in("stdout", l));
+        stderr.lines().for_each(|l| assert_clean_in("stderr", l));
+    }
+}
