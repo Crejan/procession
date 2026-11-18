@@ -258,3 +258,25 @@ also for a restart) waited only for `service.sock`, the last one bound, which wa
 anything stated; it now waits for all three. `stage1_sudo.rs` and `stage1_http.rs` start pledge through it.
 `a3-run-cross.sh` does not start pledge (the test does). The runbook's Stage B (B1) now says what the owner waits for: the
 line `pledge: serving.`, and what the error in the gap looks like.
+
+## Update: visudo rejected the rule (first run on Debian 13 in an LXC container)
+
+- **Cause and fix (unconfirmed by a run on the target):** a comma separates commands in a sudoers list, so in arguments `,`, `:`,
+  `=` and `\` must be escaped (`sudoers(5)`, "Command line arguments"). The rating's commas are now `\,`:
+  `--within [a-z]*\,[a-z]*\,[a-z]*`. Every other character of the rule was checked against the man page text
+  (read here, macOS sudo 1.9.x): none needs escaping. **Could I run `visudo -cf` here?** Yes, as an ordinary user on a
+  file under `$TMPDIR` (mode 0440): it reproduces the owner's error on the old line (`expected a fully-qualified path name`,
+  at the first comma) and says `parsed OK` for the `\,` line. That shows the syntax only; `sudo` itself was not run, so the
+  matching is not shown. The runbook and `a1` mark the `\,` form as not yet confirmed on the owner's host.
+- **What the wildcards match:** every `*` slot is "anything, spaces included", and `[a-z]*` is one letter then anything. The rule pins only
+  the prefix shape; the dispatcher parses its flags from the first argument (each once, values checked), then a table noun and verb
+  and arguments of the argument class, refusing a leading `-`, and sees separate arguments where sudo matches the joined string. I
+  found no way to match and be read differently (tested in the dispatcher and by A2); a regular-expression rule that pins more
+  parses with `visudo -cf` here and is in the runbook as an alternative, not used.
+- **a1:** the rule is written to a temporary file and checked with `visudo -cf` **before anything is changed** (the failed run left the
+  account behind); then the account, the program, the directories; the rule is installed and `visudo -c` checks the whole
+  configuration, removing the rule again if that fails. Syntax checked with `sh -n`; not run.
+- **a2:** stops with one `STOP:` line when `/etc/sudoers.d/probe-svc`, `/usr/local/bin/probe` or the account is absent, and
+  stops after the first call (the positive control: a verb through the rule) if that did not run through it, so the refusal
+  checks (`sudo -n` says the same when no rule matches as when the rule forbids) cannot pass for the wrong reason.
+- **Runbook:** run the scripts one at a time and read the last line of each (section 4).
