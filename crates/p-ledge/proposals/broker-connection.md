@@ -3,7 +3,8 @@
 Status: a proposal by the p-ledge agent, for the designer. Contract:
 `doc/approval-connections.md` sections 3 and 5, `SPEC.md` sections 2 and 4,
 `doc/approvals.md`. Types: `p_act::broker`, `p_act::exchange`; none is written
-again. Nothing is built yet.
+again. Built in step 6 as decided; this text says what was built, where it differs
+from the first proposal.
 
 ## 1. How the connection lives in `pledge serve`
 
@@ -110,11 +111,14 @@ connection (section 5).
 - `ping` every 30 s.
 - Delegations and withdrawals: section 5.
 
-**Proposal (a):** the restrictions of the last accepted standing are kept in
-`standing.json` (mode 0600, state directory), because they only restrict: a
-restarted pledge that has not connected yet must not forget a block or a
-withdrawal. `n` and the nonce belong to the connection and are not kept.
-Certificates are kept in `certificates.json` the same way.
+**Decided and built (a):** what the standing restricts is kept in `broker-state.json`
+(0600): `blocked`, `blocked_keys`, `withdrawn`, the certificates, and the withdrawals
+with their state. It only restricts, so a restart that has not connected yet does not
+forget a block. Certificates are checked again when the file is loaded
+(`reverify_certificates`) and dropped if they no longer verify. Groups are shown,
+decide nothing and are not trusted from disk. `n` and the nonce belong to the
+connection and are not kept. A standing missing a restriction lifts it, but only
+a verified, newer one.
 
 ## 5. Delegations and withdrawals
 
@@ -171,13 +175,9 @@ exercised here).
   `ConnectionDocument::sign` needs a key file, so pledge builds the armoured
   signature itself, as it does for approvals.
 
-## 8. Questions for the designer
+## 8. Decided
 
-1. Thread with blocking rustls (proposed) or a runtime in the reader.
-2. (a) above: keep the standing's restrictions and certificates on disk across
-   restarts.
-3. Registration before the bundle is handed over, failing `agents start` when the
-   broker cannot be reached (SPEC order), and the two new control codes.
-4. `agents start` with a broker configured but not connected: refused
-   (`broker-unavailable`), never a local-only delegation.
-5. `carried` ignored in this step.
+1. Blocking rustls on a thread: built. 2. Restrictions and certificates kept on
+disk, certificates re-checked: built. 3. Registration before the bundle, two new
+control codes: built. 4. A broker configured but not connected refuses `agents start`;
+no local-only delegation: built. 5. `carried` is ignored in this step (SPEC says so).

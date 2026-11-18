@@ -48,4 +48,6 @@ mod approvals_tests;
 #[cfg(test)]
 mod broker_tests;
 #[cfg(test)]
+mod broker_tls_tests;
+#[cfg(test)]
 mod testing;
