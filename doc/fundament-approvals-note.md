@@ -212,14 +212,20 @@ approval-broker:
   are issued with everything cleared (`ssh-keygen -s ... -O clear`, or the
   builder's equivalent), because a verifier refuses one that has any
   (`approval-formats.md`, section 3.2). What it writes for the broker has
-  one layout: the certificates go into one directory, each a file named
-  `<login>-<purpose>-cert.pub` (OpenSSH's convention for a certificate
-  file; `broker-cert.pub` for the broker's own if it lives there too), from
-  which the broker reads only `*-cert.pub` and takes person, purpose and
-  key from the certificate, never from the name; directory and files are
-  owned by root or the broker's user with no write bit for group or others,
-  and a directory that fails that is refused whole; the site CA's public
-  key is a file of its own (`site_ca` in the broker's configuration). The
+  one layout. The certificates directory holds only what the broker
+  carries to persons' machines, the approval-key certificates, each a file
+  named `<login>-<purpose>-cert.pub` (OpenSSH's convention for a
+  certificate file); the broker reads only `*-cert.pub` there and takes
+  person, purpose and key from the certificate, never from the name;
+  directory and files are owned by root or the broker's user with no write
+  bit for group or others, and a directory that fails that is refused
+  whole. The broker's own certificate is not in that directory: it is a
+  separate file beside the broker's signing key, named in the broker's
+  configuration (a `certificate` path next to the key's). The broker checks
+  it at start (issuer the site CA, the name `broker`, validity, no critical
+  option, no extension, and that it certifies the key the broker holds) and
+  issues no clearance without a valid one. The site CA's public key is a
+  file of its own (`site_ca` in the broker's configuration). The
   hosts list is a product of the same converge, signed
   while the key is unlocked. It needs an SSHSIG signature by the CA key
   itself; `ssh-keygen -Y sign` takes a key from a file or an SSH agent, and
