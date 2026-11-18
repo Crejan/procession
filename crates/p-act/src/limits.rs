@@ -16,6 +16,9 @@ pub const MAX_PARAMS: usize = crate::call::MAX_PARAMS;
 pub const MAX_PARAM_BYTES: usize = crate::call::MAX_PARAM_BYTES;
 /// All parameters of a call together can be shown up to this many characters (not bytes): `Call::showable`.
 pub const MAX_PARAMS_SHOWN_CHARS: usize = crate::call::MAX_PARAMS_SHOWN_CHARS;
+/// A prompt carries a call's service name, host and action, together at most this many characters (as shown, not
+/// bytes): `Call::showable`. The service name and the action have no limit of their own in the formats, the host has 64.
+pub const MAX_PROMPT_NAMES_CHARS: usize = crate::call::MAX_PROMPT_NAMES_CHARS;
 /// A claim is at most this many characters.
 pub const MAX_CLAIM_CHARS: usize = crate::call::MAX_CLAIM_CHARS;
 
@@ -51,3 +54,28 @@ pub const MAX_CONNECTION_DOCUMENT_BYTES: usize = 1024;
 /// A standing is at most this many bytes (the documents give no limit; it must fit in a line of the exchange
 /// once in base64, with its signature).
 pub const MAX_STANDING_BYTES: usize = 64 * 1024;
+
+/// A name (a person's, a host's, a user's) in the formats is at most this many characters (they are ASCII).
+pub const MAX_NAME_CHARS: usize = 64;
+
+/// Whether `parts` (the names a prompt will carry: a login's user and host, a delegation's person and the like) fit the
+/// budget of [`MAX_PROMPT_NAMES_CHARS`] together, counted in characters as shown. What does not fit is refused, never
+/// cut. One definition for every prompt, so that pledge and the services count alike.
+#[must_use]
+pub fn prompt_names_fit(parts: &[&str]) -> bool {
+    parts.iter().map(|p| p.chars().count()).sum::<usize>() <= MAX_PROMPT_NAMES_CHARS
+}
+
+#[cfg(test)]
+mod prompt_tests {
+    use super::*;
+
+    #[test]
+    fn names_fit_by_characters_not_bytes() {
+        assert!(prompt_names_fit(&[]));
+        assert!(prompt_names_fit(&[&"a".repeat(120), &"b".repeat(120)]));
+        assert!(!prompt_names_fit(&[&"a".repeat(120), &"b".repeat(121)]));
+        assert!(prompt_names_fit(&[&"\u{e9}".repeat(240)]), "480 bytes, 240 characters");
+        assert!(!prompt_names_fit(&[&"\u{1f600}".repeat(241)]));
+    }
+}
