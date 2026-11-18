@@ -79,7 +79,7 @@ programs have today, and what is not yet there is marked.
   ```
   Defaults:probe-svc !lecture
   Defaults:probe-svc env_reset
-  probe-svc ALL=(root) NOPASSWD: /usr/local/bin/probe --within [a-z]*,[a-z]*,[a-z]* --call ????????-????-????-????-???????????? --until [0-9]* [a-z]* [a-z]*
+  probe-svc ALL=(root) NOPASSWD: /usr/local/bin/probe --within [a-z]*\,[a-z]*\,[a-z]* --call ????????-????-????-????-???????????? --until [0-9]* [a-z]* [a-z]*
   ```
   It lets `probe-svc` run `/usr/local/bin/probe` as root in one form: `--within
   <rating> --call <uuid> --until <seconds> <noun> <verb> [arguments]`. Sudoers wildcards match
@@ -89,6 +89,38 @@ programs have today, and what is not yet there is marked.
   account can, through this rule, run every verb of the table** (the designer's
   decision, `crates/p-robe/SPEC.md`); what holds it back is the service's checks,
   not sudo. The rule is checked with `visudo -cf` before it is put in place.
+- **The rule's characters, checked against `sudoers(5)`.** In command arguments sudoers
+  wants `,` `:` `=` and `\` escaped (a comma separates commands in a list); the rule has
+  commas in the rating, written `\,`. Its other characters need nothing: `*` any string
+  (spaces included), `?` any one character, `[a-z]` and `[0-9]` one character of the range,
+  `-` and the spaces literal. **The `\,` form is not yet confirmed by a run on the owner's
+  host** (the first form, with plain commas, was refused by `visudo`: `expected a fully-qualified
+  path name`); `a1` checks the rule with `visudo -cf` before it changes anything, and a
+  `visudo` refusal is then the finding. (On the author's macOS, `visudo -cf` parses the `\,`
+  form and refuses the plain one with that very message; no `sudo` was run.)
+- **What the wildcards match, and what they do not pin.** `[a-z]*` is not "letters": it is one
+  letter followed by **anything**, spaces included, and so is every `*` slot (the rating, the
+  digits after `--until`, the noun and the verb). The rule pins only the prefix shape: the
+  path, `--within` and a first letter, the two commas somewhere after it, `--call` with 36
+  characters of the shape of an identifier, `--until` and a digit, then two more
+  space-separated words. It does **not** pin that the rating is three known words, that the
+  number is a number, or that no more flags follow. The dispatcher covers all of it, because it
+  parses the flags itself, from the first argument, each at most once with its value
+  checked (the rating against the table of words, the identifier, the number), then reads a
+  noun and a verb that must be a row of the table and arguments of the argument class, and
+  refuses anything starting with `-` after the flags; sudo joins the arguments with single
+  spaces and matches that string, but the dispatcher sees the separate arguments, so a
+  single argument that contains spaces and imitates several is refused (a rating with spaces
+  is not a rating; an argument with a space is not in the class). I found no way to match the
+  rule and be read by the dispatcher differently from what the rule appears to say; the
+  checks of A2 and the dispatcher's tests ("nothing that starts with a dash gets past the
+  flags", ten shapes, and the `--until` shapes) cover the cases I could think of. **A tighter
+  rule is possible** with a regular expression (`^...$` in the arguments, where no
+  escaping is needed): for example `^--within (open|internal|secret),(none|recoverable|lasting),(none|brief|outage)
+  --call [0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12} --until [0-9]{1,11}
+  [a-z][a-z0-9-]* [a-z][a-z0-9-]*( [^ ]+)*$` (all on one line) parses with `visudo -cf` on the
+  author's macOS. It is not used: the designer's decision is the wildcard form; it is here to
+  choose from if the rule is to say more.
 - **The lock and the deadline.** `--call` is the waiting form: the dispatcher
   waits up to 10 seconds for the one lock of the calling identity (`probe-svc`:
   one call at a time) instead of failing at once, so that a call the person has
@@ -141,9 +173,12 @@ programs have today, and what is not yet there is marked.
 
 ## 4. Stage A: the sudo part, today
 
-All three scripts are in `crates/p-robe/proposals/stage1/`. Run them as root,
-from a terminal, in this order. Each prints `PASS:` or `FAIL:` lines, and ends
-with `ALL PASSED` or `SOMETHING FAILED`.
+The scripts are in `crates/p-robe/proposals/stage1/`. Run them as root, from a
+terminal, **one at a time, in this order, and read the last line of each before
+the next**: each prints `PASS:` or `FAIL:` lines and ends with `ALL PASSED` or
+`SOMETHING FAILED`, or with `STOP:` and one line when it cannot go on. Do not run a
+script after one that did not end well: the next one tells you so (`a2` refuses to
+check anything unless a1 passed), but a wrong order would only confuse the output.
 
 ### A1. Prepare
 

@@ -20,6 +20,12 @@ FAR=4102444800
 LOCK=/var/lib/probe/locks/probe-svc.lock
 
 [ "$(id -u)" = 0 ] || { echo "FAIL: run as root"; exit 1; }
+# Nothing is checked unless a1-prepare.sh has passed: without the rule every "sudo refuses" check would pass for the
+# wrong reason (sudo -n says the same thing when no rule matches as when none exists).
+for need in /etc/sudoers.d/probe-svc /usr/local/bin/probe; do
+  [ -e "$need" ] || { echo "STOP: $need is absent: a1-prepare.sh has not passed, so nothing was checked. Run a1 first and read its last line."; exit 1; }
+done
+id "$SVC" >/dev/null 2>&1 || { echo "STOP: the account $SVC does not exist: a1-prepare.sh has not passed, so nothing was checked."; exit 1; }
 
 # run NAME EXPECTED_RC COMMAND...   (as probe-svc; stdout to $LOG.out, stderr to $LOG.err)
 run() {
@@ -38,6 +44,12 @@ run "a verb of the table runs as root through the rule" 0 \
   "sudo -n $PROBE --within open,none,none --call $U1 --until $FAR sys kit"
 if grep -q '"euid":0' "$LOG.out"; then echo "PASS: sys kit says it ran as euid 0"; else echo "FAIL: sys kit did not say euid 0"; FAILED=1; fi
 # sys kit was the last to write $LOG.out; the next run overwrites it.
+# The positive control: if this first call did not run through the rule, none of the refusals below means anything
+# (sudo -n refuses a call that no rule matches in the same words as a call the rule forbids), so stop here.
+if [ "$FAILED" != 0 ]; then
+  echo "STOP: the first call, which the rule must allow, did not run through it. The refusals are not checked: they would pass for the wrong reason. Look at the FAIL line above ('sudo -l -U probe-svc' shows what sudo thinks the rule is)."
+  exit 1
+fi
 
 run "above the approved rating: refused (64)" 64 \
   "sudo -n $PROBE --within open,none,none --call $U2 --until $FAR test peak"
