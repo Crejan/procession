@@ -21,7 +21,7 @@ use p_age::core::Settings;
 use p_age::crypto::SshCrypto;
 use p_age::log::MemoryLog;
 use p_age::net::{Broker, Clock, Lines, Timeouts, serve_connection};
-use p_age::testing::{BrokerSetup, PersonSpec, SiteBuilder};
+use p_age::testing::{BrokerSetup, PersonSpec, SiteBuilder, write_certificate};
 use tempfile::TempDir;
 use tokio::io::{AsyncWriteExt, DuplexStream, ReadHalf, WriteHalf, duplex};
 
@@ -109,6 +109,11 @@ impl Clock for TestClock {
 
 pub struct World {
     pub keys: Keys,
+    pub site: p_age::site::Site,
+    pub certs_dir: PathBuf,
+    pub jan_automatic: PathBuf,
+    pub eva_confirmed: PathBuf,
+    pub eva_automatic: PathBuf,
     pub site_ca: PathBuf,
     pub broker_key: PathBuf,
     pub host_key: PathBuf,
@@ -116,6 +121,7 @@ pub struct World {
     pub jan_connection: PathBuf,
     pub eva_connection: PathBuf,
     pub jan_delegation: PathBuf,
+    pub eva_delegation: PathBuf,
     pub jan_confirmed: PathBuf,
     pub agent: PathBuf,
     pub clock: Arc<TestClock>,
@@ -148,8 +154,10 @@ impl World {
         let (jan_delegation, eva_delegation) = (keys.key("jan-delegation"), keys.key("eva-delegation"));
         let jan_confirmed = keys.certified("jan-confirmed", &site_ca, "jan:confirmed", VALID, &[]);
         let agent = keys.certified("agent", &jan_delegation, "jan", "-5m:+8h", &["extension:groups@procession=ops"]);
-        let (jan_automatic, eva_confirmed, eva_automatic) =
-            (keys.key("jan-automatic"), keys.key("eva-confirmed"), keys.key("eva-automatic"));
+        // every approval key is certified by the site CA, issued as the signing step does (`-O clear`)
+        let jan_automatic = keys.certified("jan-automatic", &site_ca, "jan:automatic", VALID, &[]);
+        let eva_confirmed = keys.certified("eva-confirmed", &site_ca, "eva:confirmed", VALID, &[]);
+        let eva_automatic = keys.certified("eva-automatic", &site_ca, "eva:automatic", VALID, &[]);
         let line = |k: &Path| keys.public(k).to_string();
         let site = SiteBuilder::new()
             .person(
@@ -167,7 +175,17 @@ impl World {
             .unwrap();
         let clock = TestClock::new();
         let state = keys.path("register.json");
-        let started = BrokerSetup::new(site, &broker_key, keys.dir.path())
+        let certs_dir = keys.path("certificates");
+        for (login, purpose, key) in [
+            ("jan", "confirmed", &jan_confirmed),
+            ("jan", "automatic", &jan_automatic),
+            ("eva", "confirmed", &eva_confirmed),
+            ("eva", "automatic", &eva_automatic),
+        ] {
+            write_certificate(&certs_dir, login, purpose, &keys.cert_line(key));
+        }
+        let started = BrokerSetup::new(site.clone(), &broker_key, keys.dir.path())
+            .certificates(keys.public(&site_ca), &certs_dir)
             .settings(settings)
             .timeouts(timeouts)
             .clock(clock.clone())
@@ -176,6 +194,11 @@ impl World {
         let (log, broker) = (started.log, started.broker);
         World {
             keys,
+            site,
+            certs_dir,
+            jan_automatic,
+            eva_confirmed,
+            eva_automatic,
             site_ca,
             broker_key,
             host_key,
@@ -183,6 +206,7 @@ impl World {
             jan_connection,
             eva_connection,
             jan_delegation,
+            eva_delegation,
             jan_confirmed,
             agent,
             clock,
@@ -473,6 +497,13 @@ impl p_age::crypto::Crypto for SlowCrypto {
     ) -> Result<p_act::sign::Agent, p_age::crypto::CryptoError> {
         self.inner.check_agent_certificate(l, k)
     }
+    fn check_approval_certificate(
+        &self,
+        l: &str,
+        ca: &PublicKey,
+    ) -> Result<p_act::sign::ApprovalCertificate, p_age::crypto::CryptoError> {
+        self.inner.check_approval_certificate(l, ca)
+    }
     fn sign_clearance(&self, c: &p_act::Clearance) -> Result<String, p_age::crypto::CryptoError> {
         self.inner.sign_clearance(c)
     }
@@ -504,4 +535,23 @@ pub async fn wait_logged(w: &World, n: usize) {
         assert!(start.elapsed() < Duration::from_secs(30), "the log has {} entries, not {n}", w.log.entries().len());
         tokio::time::sleep(Duration::from_millis(10)).await;
     }
+}
+
+/// A certificate of the key in `pub_of` (a key file whose `.pub` is certified), issued by `ca` as the signing step
+/// does (`-O clear`) with the principals, validity and extra options given: its line. The certificate is made from a
+/// copy of the public key, so that the key's own certificate file is not touched.
+pub fn issue(w: &World, pub_of: &Path, ca: &Path, principals: &str, validity: &str, options: &[&str]) -> String {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static N: AtomicU64 = AtomicU64::new(0);
+    let stem = w.keys.path(&format!("issued-{}", N.fetch_add(1, Ordering::SeqCst)));
+    std::fs::copy(format!("{}.pub", pub_of.display()), format!("{}.pub", stem.display())).unwrap();
+    let mut args =
+        vec!["-q", "-s", ca.to_str().unwrap(), "-I", "issued", "-n", principals, "-V", validity, "-O", "clear"];
+    for o in options {
+        args.extend(["-O", o]);
+    }
+    let pub_file = format!("{}.pub", stem.display());
+    args.push(&pub_file);
+    w.keys.keygen(&args);
+    w.keys.cert_line(&stem)
 }

@@ -87,9 +87,10 @@ Answers:
 | usage | | 2 |
 | cannot reach the broker | `page: no broker answers at <path>` | 3 |
 | `status`, degraded | the status | 5 |
+| `status`, an enabled person has no valid certificate for a purpose | the status | 6 |
 
 (One meaning each: 0 done, 1 refused, 2 usage, 3 no broker, 4 in force but NOT
-stored, 5 degraded, `status` only; each verb's `--help` prints the table.)
+stored, 5 degraded, 6 an enabled person without a valid certificate, 5 and 6 `status` only; each verb's `--help` prints the table.)
 
 An unblock of a person or key that is not blocked is `done`, `stored` as the
 write goes (it is idempotent, as a repeated withdrawal is).

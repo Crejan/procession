@@ -21,6 +21,7 @@ use p_act::limits::{CLOCK_TOLERANCE_SECONDS, MAX_DEADLINE_AHEAD_SECONDS, MAX_DEL
 use p_act::sign::{Agent, Fingerprint, signature_person};
 use p_act::{Clearance, Document, DocumentHash, Timestamp};
 
+use crate::certs::{self, CertificateInput, Loaded};
 use crate::crypto::Crypto;
 use crate::log::{LogEntry, LogSink};
 use crate::perm::{self, PermError};
@@ -139,6 +140,16 @@ struct Degraded {
 /// A degraded broker tries the whole write again at least this often.
 const RETRY_EVERY: Duration = Duration::from_secs(60);
 
+/// A line on standard error for each certificate that was not carried, and for a directory that was refused.
+fn report_certificates(loaded: &Loaded) {
+    if let Some(why) = &loaded.directory_refused {
+        eprintln!("page: the certificates directory is refused whole: {why}");
+    }
+    for n in &loaded.not_carried {
+        eprintln!("page: certificate {:?} is not carried: {}", n.file, n.reason);
+    }
+}
+
 /// What `page status` shows.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Status {
@@ -151,6 +162,21 @@ pub struct Status {
     pub withdrawn: usize,
     pub blocked_persons: Vec<String>,
     pub blocked_keys: Vec<String>,
+    /// The certificate input, if one is configured.
+    pub certificates: Option<CertificateStatus>,
+}
+
+/// What `page status` says of the certificates.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CertificateStatus {
+    /// Carried and valid now.
+    pub carried: usize,
+    /// Read and not carried.
+    pub not_carried: usize,
+    /// The directory failed the rule and was refused whole.
+    pub directory_refused: bool,
+    /// `<person>:<purpose>` for each enabled person with keys who has no valid certificate for a purpose.
+    pub uncovered: Vec<String>,
 }
 
 /// The broker's settings.
@@ -278,7 +304,19 @@ pub struct Core {
     log: Box<dyn LogSink>,
     seq: u64,
     degraded: Option<Degraded>,
+    /// The certificates the broker carries to pledge, if that input is configured.
+    certs: Option<CertState>,
 }
+
+/// The certificate input and what was read from it.
+struct CertState {
+    input: CertificateInput,
+    loaded: Loaded,
+    last_check: SystemTime,
+}
+
+/// The certificates are looked at again this often.
+const CERTIFICATES_EVERY: Duration = Duration::from_secs(60);
 
 impl Core {
     pub fn new(
@@ -300,7 +338,49 @@ impl Core {
             log,
             seq: 0,
             degraded: None,
+            certs: None,
         }
+    }
+
+    /// The certificates the broker carries to pledge come from a directory (a separate input), checked against the site
+    /// CA's key; they are read now, and again by the sweep when the directory changed or one has ended or begun.
+    #[must_use]
+    pub fn with_certificates(mut self, input: CertificateInput, now: SystemTime) -> Core {
+        let loaded = certs::load(&input, &self.site, &*self.crypto, now);
+        report_certificates(&loaded);
+        self.certs = Some(CertState { input, loaded, last_check: now });
+        self
+    }
+
+    /// Read the certificates again if the directory changed or something ended or began; a connected pledge whose
+    /// person's set changed is sent a new standing.
+    fn reload_certificates(&mut self, now: SystemTime) -> Vec<Effect> {
+        let Some(state) = &self.certs else { return Vec::new() };
+        if now < state.last_check + CERTIFICATES_EVERY {
+            return Vec::new();
+        }
+        let needed = certs::changed(&state.input, &state.loaded) || state.loaded.due(now);
+        // What pledge was last told is what was valid at the previous look: a certificate that ended since is a change.
+        let previous = state.last_check;
+        if let Some(state) = self.certs.as_mut() {
+            state.last_check = now;
+        }
+        if !needed {
+            return Vec::new();
+        }
+        let Some(state) = &self.certs else { return Vec::new() };
+        let fresh = certs::load(&state.input, &self.site, &*self.crypto, now);
+        report_certificates(&fresh);
+        let changed: Vec<String> = self
+            .links
+            .keys()
+            .filter(|p| fresh.lines_for(p, now) != state.loaded.lines_for(p, previous))
+            .cloned()
+            .collect();
+        if let Some(state) = self.certs.as_mut() {
+            state.loaded = fresh;
+        }
+        changed.iter().filter_map(|p| self.standing(p, now).ok()).collect()
     }
 
     /// The register as kept on disk. A file that cannot be read whole (not JSON, a version this broker does not
@@ -584,7 +664,7 @@ impl Core {
                 .filter(|fp| self.register.is_key_blocked(fp.as_str()))
                 .collect(),
             withdrawn: self.register.withdrawn_of(person, now).iter().filter_map(|fp| fp.parse().ok()).collect(),
-            certificates: known.map(|p| p.certificates.clone()).unwrap_or_default(),
+            certificates: self.certs.as_ref().map(|s| s.loaded.lines_for(person, now)).unwrap_or_default(),
             groups: known.map(|p| p.groups.clone()).unwrap_or_default(),
         };
         // `compose` writes every member, the lists sorted and without duplicates, and checks the result.
@@ -913,7 +993,7 @@ impl Core {
 
     /// What the register and the queue hold, and whether the broker is degraded.
     #[must_use]
-    pub fn status(&self) -> Status {
+    pub fn status(&self, now: SystemTime) -> Status {
         let (delegations, withdrawn) = self.register.counts();
         Status {
             degraded: self.degraded.as_ref().map(|d| d.why.code),
@@ -923,6 +1003,12 @@ impl Core {
             withdrawn,
             blocked_persons: self.register.blocked_persons(),
             blocked_keys: self.register.blocked_keys(),
+            certificates: self.certs.as_ref().map(|s| CertificateStatus {
+                carried: s.loaded.carried_count(now),
+                not_carried: s.loaded.not_carried.len(),
+                directory_refused: s.loaded.directory_refused.is_some(),
+                uncovered: s.loaded.uncovered(&self.site, now),
+            }),
         }
     }
 
@@ -939,6 +1025,7 @@ impl Core {
                 fx.extend(h.conn.map(|c| Effect::Service(c, ServiceOut::Close)));
             }
         }
+        fx.extend(self.reload_certificates(now));
         // Forgetting a registration restricts: in force in memory, stored if it can be.
         if self.register.forget_ended(now) > 0 {
             let _ = self.store_restriction(now);
@@ -1014,6 +1101,13 @@ mod tests {
             Ok(())
         }
         fn check_agent_certificate(&self, _: &str, _: &PublicKey) -> Result<Agent, CryptoError> {
+            Err(CryptoError::Sign(SignError::MalformedSignature))
+        }
+        fn check_approval_certificate(
+            &self,
+            _: &str,
+            _: &PublicKey,
+        ) -> Result<p_act::sign::ApprovalCertificate, CryptoError> {
             Err(CryptoError::Sign(SignError::MalformedSignature))
         }
         fn sign_clearance(&self, _: &Clearance) -> Result<String, CryptoError> {
@@ -1530,13 +1624,13 @@ mod tests {
         let (fx, stored) = f.core.block_key(AGENT_A, now(1));
         assert_eq!(stored, Stored::Yes);
         assert_eq!(refusal_of(&fx), Some(BrokerReason::Delegation), "what waits under an agent key is refused");
-        let status = f.core.status();
+        let status = f.core.status(now(0));
         assert_eq!(
             (status.pledges, status.held, status.delegations, status.degraded, status.blocked_keys),
             (1, 1, 4, None, vec![AGENT_A.to_owned()])
         );
         assert!(f.core.unblock_key(AGENT_A, now(2)).is_ok());
-        assert!(f.core.status().blocked_keys.is_empty());
+        assert!(f.core.status(now(0)).blocked_keys.is_empty());
     }
 
     // --- a register that cannot be written ------------------------------------------------

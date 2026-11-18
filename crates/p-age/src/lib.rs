@@ -11,6 +11,7 @@
 //! `doc/approval-connections.md` is the specification; `SPEC.md` the contract.
 
 pub mod admin;
+pub mod certs;
 pub mod config;
 pub mod core;
 pub mod crypto;
