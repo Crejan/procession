@@ -227,7 +227,8 @@ fn call(ctx: &Context, out: &Out, name: &str, params: &Value, cancel: &CancelTok
 fn call_waiting(ctx: &Context, out: &Out, name: &str, params: &Value, cancel: &CancelToken) -> Value {
     let found = ctx.catalogue.read().ok().and_then(|c| c.find(name).cloned());
     let Some(tool) = found else {
-        let shown: String = name.chars().take(60).collect();
+        // The model's own name, escaped and cut (`model_error` escapes the whole message again, so cut first).
+        let shown = p_ermit::text::escape_clipped(name, 60).text;
         return ModelResult::model_error(&format!("there is no tool `{shown}`"));
     };
     let Some(service) = ctx.services.get(tool.service) else {
@@ -742,6 +743,61 @@ mod tests {
             Call::parse(STANDARD.decode(call.1["params"]["_meta"]["procession/call"].as_str().unwrap()).unwrap())
                 .unwrap();
         assert_eq!(signed.service().principal(), "probe@b.example");
+    }
+
+    fn done_structured(request: &Value, records: &Value) -> Value {
+        let call =
+            Call::parse(STANDARD.decode(request["params"]["_meta"]["procession/call"].as_str().unwrap()).unwrap())
+                .unwrap();
+        json!({"jsonrpc": "2.0", "id": request["id"], "result": {"content": [{"type": "text", "text": "ignored"}], "structuredContent": {"outcome": "done", "id": call.id().as_str(), "rc": 0, "records": records}}})
+    }
+
+    /// Every line `pact` writes to a client, whatever a service or the model put into the text: no raw control
+    /// character and no bidirectional mark (`p_ermit::probe`).
+    #[test]
+    fn nothing_raw_comes_out_of_a_session_whatever_the_service_and_the_model_send() {
+        use p_ermit::probe::{PROBE_ALL, PROBES, assert_clean_in};
+        let dirty: Vec<String> = PROBES.iter().map(ToString::to_string).chain([PROBE_ALL.to_owned()]).collect();
+        let shape = Arc::new(AtomicBool::new(false));
+        let by = Arc::clone(&shape);
+        let dirty_for_service = dirty.clone();
+        let e = env(move |_, r, _| {
+            let records = json!([{PROBE_ALL: PROBE_ALL, "list": dirty_for_service.clone()}]);
+            if by.load(Ordering::SeqCst) {
+                Ok(done_structured(r, &records))
+            } else {
+                Ok(done(r, 0, &format!("text {PROBE_ALL}")))
+            }
+        });
+        let mut c = connect(&e.ctx);
+        let mut lines = Vec::new();
+        let mut id = 0;
+        for structured in [false, true] {
+            shape.store(structured, Ordering::SeqCst);
+            id += 1;
+            c.call(id, "rt_procs", &json!({"params": ["a"], "claim": "c"}), None);
+            lines.push(c.recv().to_string());
+        }
+        for p in &dirty {
+            // The model's own names and arguments: an unknown tool, an unknown method, parameters with the probes.
+            id += 1;
+            c.call(id, &format!("no{p}tool"), &json!({}), None);
+            lines.push(c.recv().to_string());
+            id += 1;
+            c.send(&json!({"jsonrpc": "2.0", "id": id, "method": format!("m{p}")}));
+            lines.push(c.recv().to_string());
+            id += 1;
+            c.call(id, "rt_procs", &json!({"params": [p], "claim": p}), None);
+            lines.push(c.recv().to_string());
+            id += 1;
+            c.call(id, "rt_procs", &json!({format!("k{p}"): p}), None);
+            lines.push(c.recv().to_string());
+        }
+        c.finish();
+        assert!(lines.len() > 10);
+        for line in &lines {
+            assert_clean_in("a line pact wrote", line);
+        }
     }
 
     #[test]
