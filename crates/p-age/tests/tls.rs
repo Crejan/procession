@@ -14,31 +14,19 @@ use p_act::broker::{
 };
 use p_act::exchange::{ClearancePolicy, Message};
 use p_age::net::{Lines, serve_tls};
-use p_age::tls::{client_config, server_config};
-use rcgen::{BasicConstraints, CertificateParams, IsCa, Issuer, KeyPair};
+use p_age::testing::TestPki;
+use p_age::tls::client_config;
 use rustls_pki_types::ServerName;
+use rustls_pki_types::pem::PemObject;
 use tokio::io::{AsyncWriteExt, duplex};
 use tokio_rustls::TlsConnector;
 
-struct Pki {
-    root_pem: String,
-    server_cert_pem: String,
-    server_key_pem: String,
+fn pki() -> TestPki {
+    TestPki::new(&["broker.test"])
 }
 
-fn pki() -> Pki {
-    let ca_key = KeyPair::generate().unwrap();
-    let mut ca_params = CertificateParams::new(Vec::<String>::new()).unwrap();
-    ca_params.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
-    let ca = ca_params.self_signed(&ca_key).unwrap();
-    let server_key = KeyPair::generate().unwrap();
-    let server_params = CertificateParams::new(vec!["broker.test".to_owned()]).unwrap();
-    let server = server_params.signed_by(&server_key, &Issuer::new(ca_params, &ca_key)).unwrap();
-    Pki { root_pem: ca.pem(), server_cert_pem: server.pem(), server_key_pem: server_key.serialize_pem() }
-}
-
-fn acceptor(p: &Pki) -> tokio_rustls::TlsAcceptor {
-    tokio_rustls::TlsAcceptor::from(server_config(p.server_cert_pem.as_bytes(), p.server_key_pem.as_bytes()).unwrap())
+fn acceptor(p: &TestPki) -> tokio_rustls::TlsAcceptor {
+    p.acceptor()
 }
 
 #[tokio::test]
@@ -120,4 +108,37 @@ async fn a_service_talks_to_the_broker_over_tls_and_a_wrong_root_is_not_trusted(
     let (client_end, server_end) = duplex(1 << 20);
     tokio::spawn(serve_tls(server_end, acceptor(&p), Arc::clone(&w.broker)));
     assert!(connector.connect(ServerName::try_from("elsewhere.test").unwrap(), client_end).await.is_err());
+}
+
+#[tokio::test]
+async fn a_tls_1_2_client_is_refused_whatever_features_the_build_has() {
+    // The restriction is in code (`with_protocol_versions(&[&TLS13])` in `tls.rs`), not in the absence of rustls's
+    // `tls12` feature, which another crate in a workspace can switch on: this test has the feature and a client that
+    // offers only TLS 1.2.
+    let w = World::new();
+    let p = pki();
+    let mut roots = rustls::RootCertStore::empty();
+    for cert in rustls_pki_types::CertificateDer::pem_slice_iter(p.root_pem.as_bytes()) {
+        roots.add(cert.unwrap()).unwrap();
+    }
+    let provider = std::sync::Arc::new(rustls::crypto::ring::default_provider());
+    let tls12 = rustls::ClientConfig::builder_with_provider(provider)
+        .with_protocol_versions(&[&rustls::version::TLS12])
+        .unwrap()
+        .with_root_certificates(roots)
+        .with_no_client_auth();
+    let (client_end, server_end) = duplex(1 << 20);
+    let served = tokio::spawn(serve_tls(server_end, acceptor(&p), Arc::clone(&w.broker)));
+    let result =
+        TlsConnector::from(Arc::new(tls12)).connect(ServerName::try_from("broker.test").unwrap(), client_end).await;
+    assert!(result.is_err(), "a TLS 1.2 handshake must fail");
+    served.await.unwrap();
+    // and the same broker and root talk TLS 1.3 to a client that offers it
+    let (client_end, server_end) = duplex(1 << 20);
+    tokio::spawn(serve_tls(server_end, acceptor(&p), Arc::clone(&w.broker)));
+    let tls = TlsConnector::from(client_config(p.root_pem.as_bytes()).unwrap())
+        .connect(ServerName::try_from("broker.test").unwrap(), client_end)
+        .await
+        .unwrap();
+    assert_eq!(tls.get_ref().1.protocol_version(), Some(rustls::ProtocolVersion::TLSv1_3));
 }

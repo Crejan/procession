@@ -19,4 +19,6 @@ pub mod net;
 pub mod perm;
 pub mod register;
 pub mod site;
+#[cfg(feature = "test-support")]
+pub mod testing;
 pub mod tls;

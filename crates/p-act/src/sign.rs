@@ -128,6 +128,10 @@ pub enum SignError {
     BadGroups(&'static str),
     #[error("`{0}` is not a fingerprint like SHA256:<43 base64 characters>")]
     MalformedFingerprint(String),
+    #[error("the certificate has bytes after its signature, which the signature does not cover")]
+    CertificateTrailingData,
+    #[error("the certificate is for another person or role than the one expected")]
+    NotTheExpectedName,
     #[error("the certificate is not valid yet")]
     CertificateNotYetValid,
     #[error("the certificate has expired")]
@@ -560,6 +564,11 @@ pub(crate) fn certificate_from_blob(blob: &[u8]) -> Result<Certificate, SignErro
         return Err(SignError::UnsupportedKeyType(issuer));
     }
     let issuer = Fingerprint::of_blob(issuer_blob);
+    // The signature is the last field and the end of the certificate: what follows is not covered by it.
+    let _signature = key.string().ok_or_else(bad)?;
+    if !key.0.is_empty() {
+        return Err(SignError::CertificateTrailingData);
+    }
     let fingerprint = Fingerprint::of_blob(&plain);
     let key_type = kind.trim_end_matches("-cert-v01@openssh.com").to_owned();
     Ok(Certificate {
@@ -961,6 +970,19 @@ impl ApprovalCertificate {
     pub fn certifies(&self, key: &PublicKey) -> bool {
         self.key == *key
     }
+
+    /// Whether `now` is within the certificate's validity: at or after its start, before its end (the end is exclusive,
+    /// as `ssh-keygen` treats it).
+    pub fn valid_at(&self, now: crate::time::Timestamp) -> Result<(), SignError> {
+        let now = u64::try_from(now.unix()).unwrap_or(0);
+        if now < self.valid_after {
+            Err(SignError::CertificateNotYetValid)
+        } else if now >= self.valid_before {
+            Err(SignError::CertificateExpired)
+        } else {
+            Ok(())
+        }
+    }
 }
 
 /// The names the site CA must never certify for a person (formats section 7).
@@ -990,6 +1012,27 @@ pub fn verify_approval_certificate(
     site_ca: &PublicKey,
     now: crate::time::Timestamp,
 ) -> Result<ApprovalCertificate, SignError> {
+    let cert = check_approval_certificate(line, site_ca)?;
+    cert.valid_at(now)?;
+    Ok(cert)
+}
+
+/// As [`verify_approval_certificate`], and the certificate must be for exactly `person` and `kind`: its one principal is
+/// `<person>:<kind>`. This is what pledge asks for a certificate of its own person's key.
+pub fn verify_approval_certificate_for(
+    line: &str,
+    site_ca: &PublicKey,
+    person: &str,
+    kind: ApprovalKind,
+    now: crate::time::Timestamp,
+) -> Result<ApprovalCertificate, SignError> {
+    let cert = verify_approval_certificate(line, site_ca, now)?;
+    if cert.person == person && cert.kind == kind { Ok(cert) } else { Err(SignError::NotTheExpectedName) }
+}
+
+/// Everything of [`verify_approval_certificate`] except the time: the shape, the name, the issuer and the signature. The
+/// caller judges validity itself, from `valid_after` and `valid_before` or [`ApprovalCertificate::valid_at`].
+pub fn check_approval_certificate(line: &str, site_ca: &PublicKey) -> Result<ApprovalCertificate, SignError> {
     let cert = certificate_from_blob(&certificate_line_blob(line)?)?;
     if cert.cert_type != 1 {
         return Err(SignError::NotUserCertificate);
@@ -1015,13 +1058,6 @@ pub fn verify_approval_certificate(
     // The signature and the issuer, by `ssh-keygen`, before anything of the certificate is believed.
     if certificate_issuer(line)? != site_ca.fingerprint() {
         return Err(SignError::WrongIssuer);
-    }
-    let now = u64::try_from(now.unix()).unwrap_or(0);
-    if now < cert.valid_after {
-        return Err(SignError::CertificateNotYetValid);
-    }
-    if now >= cert.valid_before {
-        return Err(SignError::CertificateExpired);
     }
     Ok(ApprovalCertificate {
         person: person.to_owned(),

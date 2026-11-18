@@ -269,8 +269,7 @@ async fn a_request_waits_for_a_pledge_that_is_away_and_comes_after_the_standing_
     let submit = w.submit(1, 120);
     let mut service = open_service(&w);
     service.send(&submit_line(&submit)).await;
-    tokio::time::sleep(Duration::from_millis(300)).await;
-    assert_eq!(w.broker.held_count(), 1);
+    wait_held(&w, 1).await;
 
     let mut pledge = open_pledge(&w).await;
     pledge.sign_in("jan", &w.jan_connection).await;
@@ -293,10 +292,9 @@ async fn a_service_that_lost_its_connection_submits_the_same_bytes_and_gets_the_
     service.send(&submit_line(&submit)).await;
     assert_eq!(pledge.recv_type().await, "submit");
     drop(service); // the connection breaks; that does not cancel
-    tokio::time::sleep(Duration::from_millis(200)).await;
-    assert_eq!(w.broker.held_count(), 1);
+    wait_held(&w, 1).await;
     pledge.send(&answer_line(hash_of(&submit), Outcome::Declined)).await;
-    tokio::time::sleep(Duration::from_millis(200)).await;
+    wait_logged(&w, 1).await; // the answer is in the broker's hands before the service comes back
 
     let mut again = open_service(&w);
     again.send(&submit_line(&submit)).await;
@@ -315,7 +313,7 @@ async fn a_second_connection_for_the_same_request_takes_the_place_of_the_first()
     let submit = w.submit(1, 120);
     let mut first = open_service(&w);
     first.send(&submit_line(&submit)).await;
-    tokio::time::sleep(Duration::from_millis(200)).await;
+    wait_held(&w, 1).await; // the first is held before the second comes
     let mut second = open_service(&w);
     second.send(&submit_line(&submit)).await;
     assert_eq!(first.recv().await["error"], "superseded");
@@ -331,7 +329,7 @@ async fn at_the_deadline_the_service_is_told_expired() {
     let submit = w.submit(1, 60);
     let mut service = open_service(&w);
     service.send(&submit_line(&submit)).await;
-    tokio::time::sleep(Duration::from_millis(300)).await;
+    wait_held(&w, 1).await; // held, with its deadline ahead: only then does the clock move
     w.clock.advance(61);
     w.broker.sweep().await;
     assert_eq!(service_answer(&mut service).await.outcome, Outcome::Expired(By::Broker));
@@ -863,4 +861,27 @@ async fn a_withdrawal_of_an_unknown_delegation_and_of_another_persons_cannot_be_
     // and the administrator can see the foreign one, and only that one
     let log: Vec<_> = w.log.entries().into_iter().map(|e| (e.result, e.person, e.delegation)).collect();
     assert_eq!(log, [("foreign-withdrawal".to_owned(), Some("eva".to_owned()), Some(jans))]);
+}
+
+#[tokio::test]
+async fn a_slow_check_does_not_leave_a_request_held_past_its_deadline() {
+    // The signature work takes longer than the test's whole wait: the request is held only after the clock has
+    // moved on past its deadline. (This is the race of `at_the_deadline_the_service_is_told_expired` made
+    // certain: it is not a matter of how loaded the machine is.)
+    let w = World::with_crypto(Settings::default(), Timeouts::default(), |inner| {
+        std::sync::Arc::new(SlowCrypto { inner, delay: Duration::from_millis(600) })
+    });
+    let mut pledge = open_pledge(&w).await;
+    pledge.connect_as("jan", &w.jan_connection).await;
+    register(&w, &mut pledge).await;
+    let mut service = open_service(&w);
+    service.send(&submit_line(&w.submit(1, 60))).await;
+    tokio::time::sleep(Duration::from_millis(100)).await; // the check is still running
+    w.clock.advance(61);
+    w.broker.sweep().await; // nothing is held yet to sweep
+    // the check ends after the deadline: the broker must answer now, not leave the request for a sweep that may
+    // be a second away (or, here, never comes)
+    let answer = service_answer(&mut service).await;
+    assert_eq!(refusal(&answer), BrokerReason::Deadline);
+    assert_eq!(w.broker.held_count(), 0);
 }
