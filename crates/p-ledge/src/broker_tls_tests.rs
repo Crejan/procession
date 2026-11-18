@@ -11,14 +11,8 @@ use p_act::Document as _;
 use p_act::exchange::{ClearancePolicy, Message, Outcome, Submit};
 use p_act::rating::Rating;
 use p_act::sign::{ApprovalKind, ApprovalTrust, PublicKey, verify_approval};
-use p_age::core::{Core, Settings};
-use p_age::crypto::SshCrypto;
-use p_age::log::MemoryLog;
-use p_age::net::{Broker, Lines, SystemClock, Timeouts, serve_tls};
-use p_age::site::Site;
-use p_age::tls::server_config;
-use rcgen::{BasicConstraints, CertificateParams, IsCa, Issuer, KeyPair};
-use serde_json::json;
+use p_age::net::{Broker, Lines, serve_tls};
+use p_age::testing::{BrokerSetup, PersonSpec, SiteBuilder, TestBroker, TestPki, socket_dir};
 use tokio::io::AsyncWriteExt;
 
 use crate::approvals_tests::{Lab, yes};
@@ -38,8 +32,6 @@ impl Site2 {
     /// `delegation_key` is what the site says jan's delegations are certified by.
     fn new(lab: &Lab, delegation_key: &str) -> Self {
         let dir = lab.material.dir.path();
-        // p-age keeps its register in a private directory.
-        std::fs::set_permissions(dir, std::os::unix::fs::PermissionsExt::from_mode(0o700)).expect("chmod");
         let line = |name: &str| std::fs::read_to_string(dir.join(name)).expect("key").trim().to_owned();
         let connection = lab.rig.shared.key_with_purpose("connection").expect("connection key").public_line();
         let certificates: Vec<String> = ["confirmed", "automatic"]
@@ -64,52 +56,24 @@ impl Site2 {
                 line(&format!("{role}-tls-cert.pub"))
             })
             .collect();
-        let key = |role: &str| {
-            let public = lab.rig.shared.key_with_purpose(role).expect("key").public_line();
-            json!({"key": public, "verified_on": "2026-11-10"})
-        };
-        let site = json!({
-            "v": 1,
-            "persons": [{"name": "jan", "enabled": true, "groups": ["ops"], "certificates": certificates,
-                         "keys": {"confirmed": key("confirmed"), "automatic": key("automatic"),
-                                  "delegation": {"key": delegation_key, "verified_on": "2026-11-10"},
-                                  "connection": {"key": connection, "verified_on": "2026-11-10"}}}],
-            "hosts": [{"name": "a.example", "key": lab.material.host_line()}],
-        });
-        let site = Arc::new(Site::from_json(&site.to_string()).expect("site"));
-        let state = dir.join("register.json");
-        Core::init_state(&state).expect("state");
-        let crypto = Arc::new(SshCrypto::new(dir.join("broker")));
-        let core = Core::new(
-            Arc::clone(&site),
-            Settings::default(),
-            Core::read_state(&state).expect("read state"),
-            Some(state),
-            crypto.clone(),
-            Box::new(MemoryLog::default()),
-        );
-        let broker = Broker::new(core, crypto, site, Arc::new(SystemClock), Timeouts::default(), 8);
-
-        let ca_key = KeyPair::generate().expect("key");
-        let mut ca_params = CertificateParams::new(Vec::<String>::new()).expect("params");
-        ca_params.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
-        let ca = ca_params.self_signed(&ca_key).expect("ca");
-        let server_key = KeyPair::generate().expect("key");
-        let server = CertificateParams::new(vec!["broker.test".to_owned()])
-            .expect("params")
-            .signed_by(&server_key, &Issuer::new(ca_params, &ca_key))
-            .expect("server cert");
-        let acceptor = tokio_rustls::TlsAcceptor::from(
-            server_config(server.pem().as_bytes(), server_key.serialize_pem().as_bytes()).expect("server config"),
-        );
+        let public = |role: &str| lab.rig.shared.key_with_purpose(role).expect("key").public_line();
+        let site = SiteBuilder::new()
+            .person(
+                PersonSpec::new("jan")
+                    .keys(&public("confirmed"), &public("automatic"), delegation_key, &connection)
+                    .groups(&["ops"])
+                    .certificates(certificates),
+            )
+            .host("a.example", &lab.material.host_line())
+            .build()
+            .expect("site");
+        let TestBroker { broker, .. } = BrokerSetup::new(site, dir.join("broker"), dir.join("state")).start();
+        let pki = TestPki::new(&["broker.test"]);
+        let acceptor = pki.acceptor();
+        let ca = pki;
 
         let rt = tokio::runtime::Builder::new_multi_thread().worker_threads(2).enable_all().build().expect("runtime");
-        std::fs::create_dir_all("/tmp/claude").ok();
-        let base = if std::path::Path::new("/tmp/claude").is_dir() {
-            PathBuf::from("/tmp/claude")
-        } else {
-            std::env::temp_dir()
-        };
+        let base = socket_dir();
         static N: AtomicUsize = AtomicUsize::new(0);
         let socket = base.join(format!("pl-tls-{}-{}.sock", std::process::id(), N.fetch_add(1, Ordering::SeqCst)));
         let _ = std::fs::remove_file(&socket);
@@ -125,7 +89,7 @@ impl Site2 {
                 accept_tasks.lock().expect("tasks").push(task);
             }
         });
-        Self { rt, broker, socket, root_pem: ca.pem(), tasks }
+        Self { rt, broker, socket, root_pem: ca.root_pem.clone(), tasks }
     }
 
     /// The broker closes every connection it holds.

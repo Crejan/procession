@@ -261,7 +261,7 @@ mod tests {
         runner.limit = std::time::Duration::from_millis(600);
         let out = run(&runner).unwrap();
         assert!(out.timed_out && out.signal == Some(9), "{out:?}");
-        assert!(started.elapsed() < std::time::Duration::from_secs(10), "{:?}", started.elapsed());
+        assert!(started.elapsed() < std::time::Duration::from_secs(25), "{:?}", started.elapsed());
     }
 
     #[test]

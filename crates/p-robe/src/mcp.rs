@@ -428,7 +428,7 @@ mod tests {
         assert_eq!(names.len(), ready);
         assert!(names.iter().all(|n| n.len() <= 64 && !n.contains(' ')));
         assert!(
-            !names.iter().any(|n| n == "rt_irq" || n == "run_command"),
+            !names.iter().any(|n| n == "rt_jitter" || n == "run_command"),
             "unavailable and service-only rows are not offered"
         );
     }
