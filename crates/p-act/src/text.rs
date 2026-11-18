@@ -6,15 +6,10 @@ use crate::error::ParseError;
 /// marks (U+061C, U+200E, U+200F, U+202A to U+202E, U+2066 to U+2069) are
 /// refused.
 pub(crate) fn check(member: &str, s: &str) -> Result<(), ParseError> {
-    for c in s.chars() {
-        if c.is_control() {
-            return Err(ParseError::ControlCharacter(member.to_owned()));
-        }
-        if matches!(c, '\u{061C}' | '\u{200E}' | '\u{200F}' | '\u{202A}'..='\u{202E}' | '\u{2066}'..='\u{2069}') {
-            return Err(ParseError::BidiMark(member.to_owned()));
-        }
-    }
-    Ok(())
+    p_ermit::text::check(s).map_err(|refused| match refused {
+        p_ermit::text::Refused::Control => ParseError::ControlCharacter(member.to_owned()),
+        p_ermit::text::Refused::Bidi => ParseError::BidiMark(member.to_owned()),
+    })
 }
 
 /// A name that can safely stand in an allowed-signers principal: it contains
