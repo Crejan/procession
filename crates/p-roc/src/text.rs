@@ -1,51 +1,76 @@
-//! Host strings as Rust strings without losing a byte. The kernel gives
-//! bytes (`comm`, command lines, link targets, file names); a byte that is not
-//! UTF-8 must reach the output escaped, not replaced. These functions map
-//! each invalid byte to a private-use character, [`BYTE_BASE`] plus the byte;
-//! the output stage (`prover`'s sanitizer) writes it as `\x{ff}`. A genuine
-//! character in that range (U+10F700 to U+10F7FF, plane 16 private use) is
-//! indistinguishable from an invalid byte; none is known to occur.
+//! Host strings as Rust strings without losing or confusing a byte. The kernel gives
+//! bytes (`comm`, command lines, link targets, file names); a string must be able to
+//! stand for any of them, and two different byte strings must never become the same
+//! string. UTF-8 text is itself. A byte that is not UTF-8 is `ESC` followed by the
+//! private-use character `BYTE_BASE + byte`; a genuine `ESC` character is written
+//! `ESC ESC`. That mapping is injective, so [`to_bytes`] gives back exactly the bytes
+//! the host had, and the output stage escapes *those bytes* with
+//! `p_ermit::text::escape_bytes`. (A genuine private-use character in
+//! `BYTE_BASE..BYTE_BASE+256` stays itself: only after `ESC` does it mean a byte.)
 
 use std::ffi::OsStr;
 use std::io;
 use std::os::unix::ffi::OsStrExt;
 use std::path::Path;
 
-/// The private-use code point that stands for the invalid byte 0x00.
+/// The private-use code point that, after [`ESC`], stands for the invalid byte 0x00.
 pub const BYTE_BASE: u32 = 0x10_F700;
 
-/// The byte a stand-in character stands for.
+/// The character that introduces a stand-in for an invalid byte, and is doubled when it is
+/// genuine (U+10FFFF, a noncharacter).
+pub const ESC: char = '\u{10FFFF}';
+
+/// The byte a stand-in character stands for (after [`ESC`]).
 #[must_use]
 pub fn stands_for_byte(c: char) -> Option<u8> {
     let v = u32::from(c);
     (BYTE_BASE..BYTE_BASE + 256).contains(&v).then(|| (v - BYTE_BASE) as u8)
 }
 
-/// Bytes to a string; each byte that is not part of valid UTF-8 becomes its stand-in.
+/// Bytes to a string, injectively; see the module text.
 #[must_use]
 pub fn from_bytes(bytes: &[u8]) -> String {
     let mut out = String::with_capacity(bytes.len());
     for chunk in bytes.utf8_chunks() {
-        out.push_str(chunk.valid());
-        out.extend(chunk.invalid().iter().filter_map(|b| char::from_u32(BYTE_BASE + u32::from(*b))));
-    }
-    out
-}
-
-/// The bytes a string from [`from_bytes`] stands for: stand-ins turn back into their bytes.
-#[must_use]
-pub fn to_bytes(s: &str) -> Vec<u8> {
-    let mut out = Vec::with_capacity(s.len());
-    for c in s.chars() {
-        match stands_for_byte(c) {
-            Some(b) => out.push(b),
-            None => out.extend_from_slice(c.encode_utf8(&mut [0; 4]).as_bytes()),
+        for c in chunk.valid().chars() {
+            out.push(c);
+            if c == ESC {
+                out.push(ESC);
+            }
+        }
+        for b in chunk.invalid() {
+            out.push(ESC);
+            out.extend(char::from_u32(BYTE_BASE + u32::from(*b)));
         }
     }
     out
 }
 
-/// An OS string (file name, link target) to a string, losslessly in the sense of [`from_bytes`].
+/// The bytes a string from [`from_bytes`] stands for.
+#[must_use]
+pub fn to_bytes(s: &str) -> Vec<u8> {
+    let mut out = Vec::with_capacity(s.len());
+    let mut chars = s.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c == ESC {
+            match chars.peek().copied() {
+                Some(ESC) => {
+                    chars.next();
+                }
+                Some(n) if stands_for_byte(n).is_some() => {
+                    out.extend(stands_for_byte(n));
+                    chars.next();
+                    continue;
+                }
+                _ => {}
+            }
+        }
+        out.extend_from_slice(c.encode_utf8(&mut [0; 4]).as_bytes());
+    }
+    out
+}
+
+/// An OS string (file name, link target) to a string, as [`from_bytes`] does.
 #[must_use]
 pub fn from_os(s: &OsStr) -> String {
     from_bytes(s.as_bytes())
@@ -70,11 +95,25 @@ mod tests {
     use super::*;
 
     #[test]
-    fn invalid_bytes_get_stand_ins_and_valid_text_is_untouched() {
+    fn the_mapping_is_injective_and_reversible() {
+        let genuine_stand_in = "\u{10F7FF}".as_bytes(); // what the byte 0xff would be, as a real character
+        let samples: [&[u8]; 8] = [
+            b"a",
+            b"\xff",
+            genuine_stand_in,
+            "\u{10FFFF}".as_bytes(),
+            b"\xf4\x8f\x9f",
+            b"\xf4\x8f\x9f\xff",
+            b"x\xffy\xc3",
+            b"",
+        ];
+        let strings: Vec<String> = samples.iter().map(|b| from_bytes(b)).collect();
+        for (i, a) in strings.iter().enumerate() {
+            assert_eq!(to_bytes(a), samples[i], "round trip {i}");
+            for (j, b) in strings.iter().enumerate().filter(|(j, _)| *j != i) {
+                assert_ne!(a, b, "{i} and {j} became the same string");
+            }
+        }
         assert_eq!(from_bytes("héllo".as_bytes()), "héllo");
-        let s = from_bytes(b"a\xffb\xc3");
-        assert_eq!(s.chars().map(stands_for_byte).collect::<Vec<_>>(), [None, Some(0xff), None, Some(0xc3)]);
-        assert_eq!(stands_for_byte('x'), None);
-        assert_eq!(to_bytes(&from_bytes(b"a\xffb\xc3\xa9\xc3")), b"a\xffb\xc3\xa9\xc3");
     }
 }

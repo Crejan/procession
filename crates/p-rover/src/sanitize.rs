@@ -28,7 +28,7 @@ pub struct Cleaned {
     pub clipped: Option<usize>,
 }
 
-/// Escapes `s` (which may carry `p_roc::text` stand-ins for invalid bytes) and cuts it to `max_chars`.
+/// Escapes `s` (from `p_roc::text`: it may stand for bytes that are not UTF-8, which `to_bytes` gives back exactly) and cuts it to `max_chars`.
 #[must_use]
 pub fn clean(s: &str, max_chars: usize) -> Cleaned {
     let c = escape_bytes_clipped(&p_roc::text::to_bytes(s), max_chars);

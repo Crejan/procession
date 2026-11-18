@@ -13,29 +13,25 @@ use p_rover::observe::{clock, cmdline, hung, irq, lastboot, nic, procs, sched, s
 use p_rover::runner::Scripted;
 use p_rover::{Report, analyze, render};
 
-/// C1 controls, a bidi mark, ESC, DEL.
-const BAD: &str = "x\u{202e}y\u{85}z\u{9b}w\u{1b}v\u{7f}";
+use p_ermit::probe::{assert_clean_in, is_dirty};
 
-fn refused(c: char) -> bool {
-    matches!(c, '\u{0}'..='\u{8}' | '\u{b}'..='\u{1f}' | '\u{7f}'..='\u{9f}' | '\u{200e}' | '\u{200f}' | '\u{202a}'..='\u{202e}' | '\u{2066}'..='\u{2069}')
-}
+/// Every probe (C1 NEL and CSI, RLO, ESC) in one string, and DEL.
+const BAD: &str = "a\u{85}b\u{9b}c\u{202e}d\u{1b}e\u{7f}";
 
-/// One function for every output: no refused character, in the text, in the JSON text, nor in any
+/// One function for every output: no refused character in the text, in the JSON text, nor in any
 /// string of the parsed JSON (so that a parser cannot turn an escape back into the character).
 fn assert_clean(what: &str, r: &Report) {
     let json = serde_json::to_string_pretty(r).unwrap();
     let text = render::text(r);
     for (kind, out) in [("json", &json), ("text", &text)] {
-        assert!(!out.contains(|c: char| refused(c) && c != '\n'), "{what} {kind}: raw refused character in output");
+        out.lines().for_each(|l| assert_clean_in(&format!("{what} {kind}"), l));
     }
     fn walk(v: &serde_json::Value, what: &str) {
         match v {
-            serde_json::Value::String(s) => {
-                assert!(!s.contains(refused), "{what}: parsed string holds a refused character: {s:?}")
-            }
+            serde_json::Value::String(s) => assert!(!is_dirty(s), "{what}: parsed string holds a refused character: {s:?}"),
             serde_json::Value::Array(a) => a.iter().for_each(|x| walk(x, what)),
             serde_json::Value::Object(o) => o.iter().for_each(|(k, x)| {
-                assert!(!k.contains(refused), "{what}: key {k:?}");
+                assert!(!is_dirty(k), "{what}: key {k:?}");
                 walk(x, what);
             }),
             _ => {}
@@ -201,4 +197,25 @@ fn a_tool_error_line_in_unreadable_is_escaped_and_bounded() {
     let u = r.unreadable.iter().find(|u| u.source.contains("ethtool -i")).unwrap();
     assert!(u.reason.chars().count() <= 512, "{}", u.reason.chars().count());
     assert!(u.reason.contains("\\u{202e}"));
+}
+
+#[test]
+fn a_real_private_use_character_and_an_invalid_byte_never_show_alike() {
+    // U+10F7FF is what the byte 0xff would look like to a naive stand-in scheme.
+    let comms: [&[u8]; 2] = [&[b'q', 0xf4, 0x8f, 0x9f, 0xbf], &[b'q', 0xff]];
+    let mut shown = Vec::new();
+    for comm in comms {
+        let host = Host::new("host3");
+        let stat = fs::read(host.path("proc/10/task/10/stat")).unwrap();
+        let head = b"10 (";
+        let tail = &stat[stat.windows(2).position(|w| w == b") ").unwrap()..];
+        put(&host, "proc/10/task/10/stat", &[head.as_slice(), comm, tail].concat());
+        let r = procs::run(&host.env(|_| {}), &procs::Args::default()).unwrap();
+        let t = r.values.iter().find(|v| v["tid"] == 10).expect("thread 10 is listed");
+        let text = t["comm"].as_str().unwrap().to_string();
+        assert_eq!(p_ermit::text::unescape_bytes(&text).unwrap(), comm, "each output stands for its own bytes");
+        shown.push(text);
+    }
+    assert_ne!(shown[0], shown[1], "two different byte strings showed alike");
+    assert!(shown[1].contains("\\x{ff}") || shown[1].contains("\\x{ff}"), "{shown:?}");
 }
