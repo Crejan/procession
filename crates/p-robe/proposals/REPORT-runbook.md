@@ -261,13 +261,13 @@ line `pledge: serving.`, and what the error in the gap looks like.
 
 ## Update: visudo rejected the rule (first run on Debian 13 in an LXC container)
 
-- **Cause and fix (unconfirmed by a run on the target):** a comma separates commands in a sudoers list, so in arguments `,`, `:`,
+- **Cause and fix (confirmed on Debian 13 by the owner's run of 2026-11-18: `visudo -cf` accepts it and sudo matched a real call; no verb has run as root through it yet):** a comma separates commands in a sudoers list, so in arguments `,`, `:`,
   `=` and `\` must be escaped (`sudoers(5)`, "Command line arguments"). The rating's commas are now `\,`:
   `--within [a-z]*\,[a-z]*\,[a-z]*`. Every other character of the rule was checked against the man page text
   (read here, macOS sudo 1.9.x): none needs escaping. **Could I run `visudo -cf` here?** Yes, as an ordinary user on a
   file under `$TMPDIR` (mode 0440): it reproduces the owner's error on the old line (`expected a fully-qualified path name`,
   at the first comma) and says `parsed OK` for the `\,` line. That shows the syntax only; `sudo` itself was not run, so the
-  matching is not shown. The runbook and `a1` mark the `\,` form as not yet confirmed on the owner's host.
+  matching is not shown. (The `unconfirmed` mark was removed after the owner's run; the runbook says exactly what was shown.)
 - **What the wildcards match:** every `*` slot is "anything, spaces included", and `[a-z]*` is one letter then anything. The rule pins only
   the prefix shape; the dispatcher parses its flags from the first argument (each once, values checked), then a table noun and verb
   and arguments of the argument class, refusing a leading `-`, and sees separate arguments where sudo matches the joined string. I
@@ -304,3 +304,17 @@ defaults), read by `p_act::settings::read` (`parse` for text in memory); my own 
 `read_optional` would save that); (b) for a wrong-kind value it cannot say which member (serde's path is dropped on purpose: a
 `describe` that kept the field name only for `invalid type` would help a person who has typed `"max_waiting": "many"`);
 (c) nothing about the directory the file is in (the helper says so itself).
+
+## Update: a2's fixed far deadline
+
+The owner's second run: a2 failed its first call, `probe: refused: --until is more than ten minutes ahead`. The dispatcher was right: a2 used
+`FAR=4102444800` (the year 2100) as `--until` for every ordinary call, and the 660-second bound (added a commit earlier, with its own a2 check
+for "an hour ahead") refused it. **Fixed:** every ordinary call in a2 carries `$(( $(date +%s) + 300 ))`, computed when its command is built, so
+a long run does not drift past it; the "an hour ahead is refused" and "`--until 1`" checks stay; `FAR` is gone.
+**Looked at, per place:** `a2-check-rule.sh`: the only place with a fixed far deadline (six calls). `a1-prepare.sh`: no value. `a3-run-cross.sh`, `stage1_sudo.rs`,
+`stage1_http.rs`, `tests/common/mod.rs`: no `--until` at all (the deadline comes from `pact`'s setting, 120 s, through the service). The runbook: `--until 1`
+(the past check) and the rule's pattern only; no hand command carries a deadline.
+**Why no test caught it:** the bound was tested in the dispatcher, and a2 was only syntax-checked; nothing connected the script's numbers to the dispatcher's
+rule. **Built:** `tests/scripts.rs` reads every `--until` in the scripts (and the variables they use) and applies the dispatcher's own `until_too_far` to
+it: a literal must be a past one (under 1000), an expression `now + N` must not be too far unless its check is the one that expects the refusal. A
+fixed far constant, or a new check that mixes the two, fails the test.

@@ -93,11 +93,12 @@ programs have today, and what is not yet there is marked.
   wants `,` `:` `=` and `\` escaped (a comma separates commands in a list); the rule has
   commas in the rating, written `\,`. Its other characters need nothing: `*` any string
   (spaces included), `?` any one character, `[a-z]` and `[0-9]` one character of the range,
-  `-` and the spaces literal. **The `\,` form is not yet confirmed by a run on the owner's
-  host** (the first form, with plain commas, was refused by `visudo`: `expected a fully-qualified
-  path name`); `a1` checks the rule with `visudo -cf` before it changes anything, and a
-  `visudo` refusal is then the finding. (On the author's macOS, `visudo -cf` parses the `\,`
-  form and refuses the plain one with that very message; no `sudo` was run.)
+  `-` and the spaces literal. **Confirmed on Debian 13 (the owner's run of 2026-11-18):** `visudo -cf` accepts the `\,` form (the
+  first form, with plain commas, was refused: `expected a fully-qualified path name`), and `sudo` matched a real
+  invocation of this form including `--until`. **That is all that is shown:** the dispatcher that ran refused
+  that call at its `--until` check, which comes after its root check, so it ran as root under `probe-svc`; but
+  **no verb has yet run as root through the rule** (the next run shows it). `a1` checks the rule with `visudo -cf`
+  before it changes anything.
 - **What the wildcards match, and what they do not pin.** `[a-z]*` is not "letters": it is one
   letter followed by **anything**, spaces included, and so is every `*` slot (the rating, the
   digits after `--until`, the noun and the verb). The rule pins only the prefix shape: the

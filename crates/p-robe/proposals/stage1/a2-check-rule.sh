@@ -16,7 +16,6 @@ U4=3f2b6c1e-8a57-4d0e-9b1a-5c2e7d9f0a14
 U5=3f2b6c1e-8a57-4d0e-9b1a-5c2e7d9f0a15
 U6=3f2b6c1e-8a57-4d0e-9b1a-5c2e7d9f0a16
 U7=3f2b6c1e-8a57-4d0e-9b1a-5c2e7d9f0a17
-FAR=4102444800
 LOCK=/var/lib/probe/locks/probe-svc.lock
 
 [ "$(id -u)" = 0 ] || { echo "FAIL: run as root"; exit 1; }
@@ -41,7 +40,7 @@ run() {
 }
 
 run "a verb of the table runs as root through the rule" 0 \
-  "sudo -n $PROBE --within open,none,none --call $U1 --until $FAR sys kit"
+  "sudo -n $PROBE --within open,none,none --call $U1 --until $(( $(date +%s) + 300 )) sys kit"
 if grep -q '"euid":0' "$LOG.out"; then echo "PASS: sys kit says it ran as euid 0"; else echo "FAIL: sys kit did not say euid 0"; FAILED=1; fi
 # sys kit was the last to write $LOG.out; the next run overwrites it.
 # The positive control: if this first call did not run through the rule, none of the refusals below means anything
@@ -52,13 +51,13 @@ if [ "$FAILED" != 0 ]; then
 fi
 
 run "above the approved rating: refused (64)" 64 \
-  "sudo -n $PROBE --within open,none,none --call $U2 --until $FAR test peak"
+  "sudo -n $PROBE --within open,none,none --call $U2 --until $(( $(date +%s) + 300 )) test peak"
 run "at the approved rating: runs" 0 \
-  "sudo -n $PROBE --within open,none,outage --call $U3 --until $FAR test peak"
+  "sudo -n $PROBE --within open,none,outage --call $U3 --until $(( $(date +%s) + 300 )) test peak"
 run "run command is refused by the dispatcher (64)" 64 \
-  "sudo -n $PROBE --within secret,lasting,outage --call $U4 --until $FAR run command"
+  "sudo -n $PROBE --within secret,lasting,outage --call $U4 --until $(( $(date +%s) + 300 )) run command"
 run "the same flag twice is refused by the dispatcher (64)" 64 \
-  "sudo -n $PROBE --within open,none,none --call $U4 --until $FAR --call $U4 sys kit"
+  "sudo -n $PROBE --within open,none,none --call $U4 --until $(( $(date +%s) + 300 )) --call $U4 sys kit"
 run "the form without --within is not in the rule (sudo refuses, 1)" 1 \
   "sudo -n $PROBE sys kit"
 run "the form without --until is not in the rule (sudo refuses, 1)" 1 \
@@ -72,7 +71,7 @@ run "a deadline already past: the verb is not started (76)" 76 \
 flock "$LOCK" sleep 3 &
 sleep 1
 run "a call waits for the identity's lock and then runs (0)" 0 \
-  "sudo -n $PROBE --within open,none,none --call $U6 --until $FAR sys kit"
+  "sudo -n $PROBE --within open,none,none --call $U6 --until $(( $(date +%s) + 300 )) sys kit"
 wait
 # Held for 6 seconds, the deadline 2 seconds away: the wait is cut at the deadline and the verb is not started.
 flock "$LOCK" sleep 6 &

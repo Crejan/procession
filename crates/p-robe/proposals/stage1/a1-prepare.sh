@@ -23,8 +23,9 @@ command -v ssh-keygen >/dev/null || { echo "FAIL: ssh-keygen is not installed"; 
 
 # 0. The sudoers rule, written to a temporary file and checked with visudo -cf BEFORE anything is changed.
 # `\,` is the comma escaped: sudoers(5) says that , : = and \ must be escaped in command arguments (a comma
-# separates commands in a list). THIS LINE IS NOT YET CONFIRMED by a run on the target host; if visudo says
-# otherwise, nothing has been changed and the message is the finding.
+# separates commands in a list). Confirmed on Debian 13: visudo -cf accepts this line, and sudo matched a real
+# call of this form (the owner's run of 2026-11-18). If visudo says otherwise on another host, nothing has been
+# changed and the message is the finding.
 CHECK=/var/tmp/probe-svc.sudoers.check
 cat > "$CHECK" <<'RULE'
 # probe-svc may run the dispatcher of probe, as root, in exactly this form: --within <rating>
