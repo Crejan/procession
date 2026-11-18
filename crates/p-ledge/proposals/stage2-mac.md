@@ -739,6 +739,40 @@ Each step leaves `cargo test` green on Linux and keys in files working.
 
 ## 7. Open questions for the designer
 
+**Where each stands, 2026-11-18.** The designer read this proposal and
+accepted it as a proposal. Nothing is built from it until the owner has run
+checks 1 to 5 (the program and the steps are in `stage2-mac-checks/`). The
+questions below are left as they were asked; this table says what became of
+them.
+
+| # | Question | Stands | What was said |
+|---|---|---|---|
+| 1 | Password in place of Touch ID | with the owner | The designer recommends this proposal's answer: Touch ID only for confirmed approvals and delegations, so a Mac with its lid closed and no Touch ID keyboard makes none |
+| 2 | Blob in a file, or keychain with an access group | decided | After check 3, as recommended. `SPEC.md` section 11 is marked accordingly by the designer |
+| 3 | One key holder or two | decided | Two: one for keys with a presence check, one for keys without |
+| 4 | Does a locked screen stop automatic approvals | with the owner | The designer recommends this proposal's answer: it does not |
+| 5 | Dialog and touch as one step | decided | One step: the Touch ID prompt is raised with the dialog and the touch is the yes. Keys in files keep today's two steps. The limits (one dialog at a time, the queue limit, muting after declines) apply unchanged |
+| 6 | "Admit generally" for which programs | decided | Only for Developer ID code with the hardened runtime; and, also accepted, an ad-hoc build may be admitted generally by its hash, which lasts until the binary changes |
+| 7 | Presence for what ends in no signature | decided | `LAContext.evaluatePolicy` in the key holder, said plainly to be software. Retiring a key with a presence check requires that key's signature first. No fifth key |
+| 8 | Who signs pledge's Mac programs, and as what | with the owner | Which signing identity and which identifiers |
+| 9 | A request while no presence check is possible | decided | It waits until its deadline and ends `expired`; the record says why it could not be asked (locked, sensor locked out) |
+| 10 | What the Touch ID prompt says | decided, subject to check 5 | As recommended: service, host and action; user and host for a login; person, groups and validity for a delegation; never a parameter or the agent's claim |
+| 11 | A first Mac stage with `Terminal` and real keys | decided | Accepted, for the owner only |
+| 12 | One Mac app or two | open | Not yet answered |
+| 13 | Take Atticus's SwiftUI front end at all | open | Not yet answered |
+| 14 | "Cancel by closing" in p-reserve's protocol | open | Not yet answered |
+| 15 | The licence of what is taken from Atticus | open | Not yet answered; the owner's in any case |
+| 16 | Where the dialog for a request lives | open | Not yet answered; section 8.6 now says which process it is |
+
+Two of these decisions add to what the sections above say:
+
+- Question 6 widens section 3.4: the row for ad-hoc signed code may be
+  admitted generally, by its hash.
+- Question 9 adds a fact to the record: for a request that expired
+  unasked, why it could not be asked. Section 2.2's error codes (check 2)
+  and check 10 are where the key holder learns "locked" and "sensor locked
+  out" from.
+
 1. **Password in place of Touch ID, per key.**
    *Recommendation:* confirmed approval and delegation: Touch ID only
    (`.biometryAny`), and a Mac where that is not possible makes no
@@ -883,9 +917,9 @@ Each step leaves `cargo test` green on Linux and keys in files working.
     *Reason:* it cannot be decided by whoever does the copying.
 
 16. **Where the dialog for a request lives** (section 8.6).
-    *Recommendation:* a small program in pledge's app bundle that `pledge
-    serve` starts itself; the app's window is a second place that shows
-    the same question.
+    *Recommendation:* a separate small program in pledge's app bundle that
+    `pledge serve` starts itself, with one pipe and no connection to
+    `control.sock`; the front end shows only that a question is open.
     *Reason:* a request can arrive with no app open, and the answer never
     depends on the app: the touch is the yes.
 
@@ -1096,9 +1130,9 @@ what crosses the sockets. So that a Linux desktop is not cornered:
 5. **A dialog is a message, and the protocol says what an answer is
    worth.** An event "a question is open" with an identifier, a title as a
    code, the labelled fields whole, and the deadline; "closed" with the
-   reason. Where the key enforces presence, the protocol offers `decline`
-   and no `approve` (section 8.6). Where it does not, it says so, and an
-   answer over the socket is then all there is. A FIDO2 token on Linux
+   reason. Where the key enforces presence, whatever shows the dialog can
+   say `decline` and never `approve` (section 8.6). Where it does not, the
+   protocol says so, and an answer is then all there is. A FIDO2 token on Linux
    (`doc/approvals.md`, section 9) fits the first case unchanged: the touch
    is at the token.
 6. **Long work has an identifier, progress as events, and a cancel; and
@@ -1136,32 +1170,60 @@ the views, not after.
 Section 4.2 proposed a dialog process of pledge's own until the desktop app
 exists. With an app, the question is whether the dialog can live there.
 
-**It can, as the place where the request is shown.** What ties the answer
-to the signature does not move: it is the key. The confirmed approval key
-enforces presence in the Secure Enclave; the Touch ID prompt is raised by
-the key holder, with words that come from the reader (section 4.3). The
-app shows the request whole and can say "decline". It has no way to say
-"yes": `control.sock` offers no such message where the key enforces
-presence. A touch is the only yes.
+**It can live in that app's bundle, not in that app's process.** What ties
+the answer to the signature does not move: it is the key. The confirmed
+approval key enforces presence in the Secure Enclave; the Touch ID prompt
+is raised by the key holder, with words that come from the reader (section
+4.3). Whatever shows the request can say "decline" and has no way to say
+"yes". A touch is the only yes.
+
+**Which process: the dialog process of section 4.2 is a separate small
+process, not the front end.** The front end (window, menu bar item, panes)
+is one program; the dialog process is another, shipped in the same app
+bundle and written with the same components. The reasons are those of
+section 4.4, which wants the thing that shows requests to hold no key and
+decide nothing:
+
+- *It holds no key* either way: neither program has a key, and neither is
+  the key holder.
+- *It decides nothing* only if it also **does nothing else**. The front end
+  is a client of `control.sock` that can start agents, set ceilings, admit
+  programs and retire keys. A program that can ask for those things and
+  also shows the request is two powers in one process: taken over, it
+  could raise a ceiling and show the dialog that hides it. The dialog
+  process has no connection to `control.sock` at all. It has one pipe, to
+  `pledge serve`, over which it receives a `Description` and returns
+  "declined" or "closed". There is nothing else it can say.
+- *It is started by `pledge serve`*, not by the person and not by the
+  front end, so a request is shown whether or not a window is open, and
+  `pledge serve` knows which process it is talking to: its own child, not
+  a peer of a socket to be identified.
+- *It is small enough to read*: one window, no network, no updater, no
+  settings, no state.
+
+The front end may show that a question is open (a badge on the menu bar
+item, a line in a list), from the events of `control.sock`. It does not
+show the request for approval and takes no answer. So section 4.2's
+proposal stands as it was, and this section adds only where the dialog
+process ships and what it is drawn with.
 
 Conditions:
 
 1. **The dialog must not depend on the person having opened an app.**
    `pledge serve` is a job of launchd; a request can arrive with no window
-   open. *Proposal:* the dialog is a small program inside pledge's app
-   bundle that `pledge serve` starts itself, speaking the `Dialogs` seam
-   (section 6.3). The app's window and menu bar item are a second client
-   that shows the same open question. If neither can be shown, the request
-   waits and expires (question 9).
+   open. The dialog process is started by `pledge serve` itself, speaking
+   the `Dialogs` seam (section 6.3). If it cannot be shown, the request
+   waits and expires (question 9, decided).
 2. **It is pledge's app, not a shared one** (section 8.4), so that the
    program that shows requests has no updater and no backup code in it.
-3. **`control.sock` sends a request's contents only to a peer it has
-   identified** by audit token and code signature (section 3). Until
-   builds are signed (question 8) that check is the user and nothing more,
-   and the document must say so.
+3. **A request's contents go to the dialog process only.** The events on
+   `control.sock` say that a question is open, for which agent and until
+   when, and not what it asks. A front end therefore learns no parameter,
+   whatever its code signature is worth (question 8).
 4. **`control.sock` gains what `control-sock.md`, section 6, left for
-   later:** the subscription, with events for a question opened and
-   closed, and a `decline`.
+   later:** the subscription, with events that a question opened and
+   closed. No answer travels over `control.sock`: declining is the dialog
+   process's, over its pipe.
 
 What Atticus offers for the dialog itself: nothing to take over. Its
 confirmation of a signature is the system's Touch ID prompt with one
@@ -1260,11 +1322,19 @@ commands were `git branch -a`, `git log --all --oneline`, `git status
 --short`, `git show`, and reading files.
 
 No Apple documentation and no header was looked up. Every **[D]** is from
-memory, every **[U]** is a belief. In particular not checked: the names
-`LOCAL_PEERTOKEN`, `kSecGuestAttributeAudit`,
-`SecCodeCopySigningInformation`, `LAContext.invalidate()`,
-`touchIDAuthenticationAllowableReuseDuration`, and the CryptoKit
-initialisers that take an `authenticationContext`.
+memory, every **[U]** is a belief. Not checked at all: the names
+`LOCAL_PEERTOKEN`, `kSecGuestAttributeAudit` and
+`SecCodeCopySigningInformation`.
 
-Nothing was run: no build, no test, no `ssh-keygen`, no program that makes
-or uses a Secure Enclave key, no Touch ID prompt.
+Added on 2026-11-18 with the checks program
+(`stage2-mac-checks/sechecks.swift`): that file was type-checked against
+the SDK (`swiftc -typecheck`, Swift 6.3.3, SDK 26.5; no binary written,
+nothing run). So these names now exist as used, where before they were
+from memory: `SecureEnclave.P256.Signing.PrivateKey(accessControl:)` and
+`(dataRepresentation:authenticationContext:)`, the flags `.biometryAny`,
+`.biometryCurrentSet`, `.userPresence`, `LAContext.localizedReason`,
+`touchIDAuthenticationAllowableReuseDuration` and `invalidate()`. What they
+do is still for the hand checks to show.
+
+Nothing was run: no build of a binary, no test, no `ssh-keygen`, no
+program that makes or uses a Secure Enclave key, no Touch ID prompt.
