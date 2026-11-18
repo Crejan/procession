@@ -94,6 +94,8 @@ pub fn run(env: &Env, _args: &[String], answer: &mut Answer<'_>) -> Result<u8, F
         config::Config::load_optional(std::path::Path::new(config::DEFAULT_FILE)).ok().flatten().as_ref(),
     );
     let certificate = look_at_certificate(&cert_path, Timestamp::now().map_or(0, Timestamp::unix));
+    let prover = crate::prover::program(env);
+    let prover_problem = prover.check().err().map(|failure| failure.code());
     let executable = std::env::current_exe().ok().map(|path| path.display().to_string());
     answer.record(&header("sys", "kit", &hostname(), &clock::now()))?;
     answer.record(
@@ -108,6 +110,8 @@ pub fn run(env: &Env, _args: &[String], answer: &mut Answer<'_>) -> Result<u8, F
             .str("audit", &env.audit)
             .str("lock_dir", &env.lock_dir.display().to_string())
             .opt_str("lock_dir_problem", lock_problem.as_deref())
+            .str("prover", &prover.path.display().to_string())
+            .opt_str("prover_problem", prover_problem.as_deref())
             .opt_str(
                 "service_certificate",
                 (certificate != Certificate::Absent).then(|| cert_path.display().to_string()).as_deref(),
@@ -132,7 +136,13 @@ pub fn run(env: &Env, _args: &[String], answer: &mut Answer<'_>) -> Result<u8, F
                 .opt_str("reason", row.reason()),
         )?;
     }
-    let found = judge(lock_problem.as_deref(), env.euid, test_verbs, &certificate);
+    let mut found = judge(lock_problem.as_deref(), env.euid, test_verbs, &certificate);
+    if let Some(problem) = &prover_problem {
+        found.warnings.push(format!(
+            "prover ({}) cannot be used: rt irq and rt procs fail until it can: {problem}",
+            prover.path.display()
+        ));
+    }
     answer.record(
         &Record::new("summary")
             .bool("usable", found.problems.is_empty())

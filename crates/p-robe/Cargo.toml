@@ -24,7 +24,7 @@ test-verbs = []
 [dependencies]
 p-act = { path = "../p-act", version = "0.0.0" }
 libc = "0.2"
-serde_json = "1"
+serde_json = { version = "1", features = ["raw_value"] }
 serde = { version = "1", features = ["derive"] }
 base64 = "0.23"
 hyper = { version = "1.11", default-features = false, features = ["server", "http1"] }

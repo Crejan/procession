@@ -395,7 +395,7 @@ impl Session {
     pub fn handle(&mut self, line: &[u8]) -> Result<Vec<Vec<u8>>, End> {
         let message = match ToPledge::parse(line) {
             Ok(message) => message,
-            Err(error) => return self.unreadable(line, &error),
+            Err(error) => return self.unreadable(&error),
         };
         let mut out = Vec::new();
         match (message, &self.phase) {
@@ -430,6 +430,15 @@ impl Session {
             {
                 return Err(End::Blocked);
             }
+            // `carried` is ignored in this step (hosts come from config.json); noted once.
+            (ToPledge::Carried { .. }, Phase::Ready) => {
+                if !self.carried_noted {
+                    self.carried_noted = true;
+                    eprintln!(
+                        "pledge: the broker sent a `carried` document; ignored in this version (hosts come from config.json)"
+                    );
+                }
+            }
             (ToPledge::Exchange(message), Phase::Ready) => self.exchange(*message)?,
             (other, phase) => {
                 return Err(End::Protocol(format!("unexpected {:?} in {phase:?}", std::mem::discriminant(&other))));
@@ -438,19 +447,8 @@ impl Session {
         Ok(out)
     }
 
-    /// A line `ToPledge` did not read: `carried` is ignored (once noted); anything else ends the connection.
-    fn unreadable(&mut self, line: &[u8], error: &ExchangeError) -> Result<Vec<Vec<u8>>, End> {
-        let kind =
-            serde_json::from_slice::<serde_json::Value>(line).ok().and_then(|v| v["type"].as_str().map(str::to_owned));
-        if kind.as_deref() == Some("carried") && self.phase == Phase::Ready {
-            if !self.carried_noted {
-                self.carried_noted = true;
-                eprintln!(
-                    "pledge: the broker sent a `carried` document; ignored in this version (hosts come from config.json)"
-                );
-            }
-            return Ok(Vec::new());
-        }
+    /// A line `ToPledge` did not read ends the connection.
+    fn unreadable(&mut self, error: &ExchangeError) -> Result<Vec<Vec<u8>>, End> {
         Err(End::Protocol(format!("a line that cannot be read: {error}")))
     }
 

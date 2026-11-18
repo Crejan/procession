@@ -9,7 +9,8 @@ use p_act::rating::{Damage, Disruption, Exposure, Rating};
 use crate::answer::{Answer, Full};
 use crate::json::{Record, SCHEMA_VERSION};
 use crate::kit;
-use crate::rate::{Param, PathUse};
+use crate::prover;
+use crate::rate::{Form, Param, ParamType, PathUse};
 #[cfg(feature = "test-verbs")]
 use crate::testverbs;
 
@@ -28,6 +29,8 @@ pub struct Env {
     pub lock_dir: PathBuf,
     /// Where audit lines go, in words.
     pub audit: String,
+    /// Where `prover` is, if a test build was pointed elsewhere (never for root); the system's otherwise.
+    pub prover: Option<PathBuf>,
 }
 
 /// How a verb runs: writes its answer, returns its exit code.
@@ -54,7 +57,6 @@ pub enum Args {
     Some,
     /// Parameters with their rules (`rate.rs`): the rating of a call is the
     /// worst of `floor` and what each parameter contributes.
-    #[allow(dead_code, reason = "no production row has parameter rules yet")]
     Params { floor: Rating, params: &'static [Param] },
 }
 
@@ -109,7 +111,31 @@ impl Verb {
     }
 }
 
-const NEEDS_PROVER: Availability = Availability::NotBuilt("needs prover, which is specified and not built");
+const NEEDS_PROVER: Availability = Availability::NotBuilt("needs prover jitter, which is specified and not built");
+
+/// What `rt procs` accepts: how many thread records at most. Contributes nothing to the rating.
+const PROCS_PARAMS: &[Param] = &[Param {
+    name: "max",
+    form: Form::Key("max"),
+    required: false,
+    ty: ParamType::Number { min: 1, max: 10_000, steps: &[] },
+}];
+
+/// What `rt irq` accepts: the window in seconds and how many unflagged IRQs at most. Nothing contributes to the rating.
+const IRQ_PARAMS: &[Param] = &[
+    Param {
+        name: "duration",
+        form: Form::Key("duration"),
+        required: false,
+        ty: ParamType::Number { min: 1, max: 30, steps: &[] },
+    },
+    Param {
+        name: "top",
+        form: Form::Key("top"),
+        required: false,
+        ty: ParamType::Number { min: 1, max: 1000, steps: &[] },
+    },
+];
 
 /// The rows. The ratings are proposals (`SPEC.md`).
 const CORE: &[Verb] = &[
@@ -127,18 +153,21 @@ const CORE: &[Verb] = &[
         verb: "irq",
         runs: "prover irq",
         rating: Rating::HARMLESS,
-        args: Args::Some,
+        args: Args::Params { floor: Rating::HARMLESS, params: IRQ_PARAMS },
         summary: "interrupts, their threads and the CPUs they run on",
-        availability: NEEDS_PROVER,
+        availability: Availability::Ready(prover::irq),
     },
     Verb {
         noun: "rt",
         verb: "procs",
         runs: "prover procs",
         rating: Rating::new(Exposure::Internal, Damage::None, Disruption::None),
-        args: Args::Some,
+        args: Args::Params {
+            floor: Rating::new(Exposure::Internal, Damage::None, Disruption::None),
+            params: PROCS_PARAMS,
+        },
         summary: "realtime processes and threads, with their command lines",
-        availability: NEEDS_PROVER,
+        availability: Availability::Ready(prover::procs),
     },
     Verb {
         noun: "rt",
@@ -305,11 +334,12 @@ mod tests {
     }
 
     #[test]
-    fn the_rows_that_need_prover_are_declared_and_unavailable() {
-        for verb in ["irq", "procs", "jitter"] {
-            assert_eq!(row("rt", verb).status(), "unavailable");
-            assert!(row("rt", verb).reason().unwrap().contains("prover"));
+    fn the_rows_that_run_prover_are_ready_except_the_one_that_needs_a_probe() {
+        for verb in ["irq", "procs"] {
+            assert_eq!(row("rt", verb).status(), "ready");
         }
+        assert_eq!(row("rt", "jitter").status(), "unavailable");
+        assert!(row("rt", "jitter").reason().unwrap().contains("prover"));
         assert_eq!(row("sys", "kit").status(), "ready");
     }
 
@@ -356,7 +386,11 @@ mod tests {
         let params: usize =
             verbs().map(|row| if let Args::Params { params, .. } = row.args { params.len() } else { 0 }).sum();
         assert_eq!(records.len(), 1 + verbs().count() + params);
-        assert_eq!(catalog_records(Some("rt")).len(), 1 + 3);
+        assert_eq!(
+            catalog_records(Some("rt")).len(),
+            1 + 3 + 3,
+            "three verbs and the three parameters of irq and procs"
+        );
         assert_eq!(catalog_text(Some("sys")).lines().count(), 2);
     }
 

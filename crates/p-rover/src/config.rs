@@ -10,13 +10,13 @@ use serde::Deserialize;
 
 use crate::error::Error;
 
-/// The one place the settings file is read: through `p_act::settings`.
+/// The one place the settings file is read: through `p_ermit::settings`.
 fn read_toml(p: &Path) -> Result<Config, Error> {
-    p_act::settings::read_toml(p).map_err(|e| Error::Config { path: p.display().to_string(), detail: e.to_string() })
+    p_ermit::settings::read_toml(p).map_err(|e| Error::Config { path: p.display().to_string(), detail: e.to_string() })
 }
 
 fn read_toml_optional(p: &Path) -> Result<Option<Config>, Error> {
-    p_act::settings::read_toml_optional(p).map_err(|e| Error::Config { path: p.display().to_string(), detail: e.to_string() })
+    p_ermit::settings::read_toml_optional(p).map_err(|e| Error::Config { path: p.display().to_string(), detail: e.to_string() })
 }
 
 /// Default location of the configuration.
@@ -160,7 +160,7 @@ impl IrqExpectation {
 impl Config {
     /// Loads `path`, or [`DEFAULT_PATH`] when `None`. A missing default file
     /// is the default configuration; a missing explicit file is an error. The
-    /// file is read by `p_act::settings`: a regular file, owned by root or
+    /// file is read by `p_ermit::settings`: a regular file, owned by root or
     /// the running user, not writable by group or others, no unknown key.
     ///
     /// # Errors

@@ -202,7 +202,8 @@ A delegation exists only once the bundle with key and certificate has been
 handed over (`agents.delivered` on `control.sock`): until then pledge signs
 for no call under it and has not registered it, and a control connection
 that closes first ends it, leaving a record entry. A bundle is never
-written to a terminal. The key's bytes are held in a type that cannot be
+written to a terminal. A bundle file is created exclusively and set to exactly 0600 whatever the umask; an
+inherited ACL on macOS is not removed by chmod and is not checked. The key's bytes are held in a type that cannot be
 printed or logged. Which services the bundle names is the person's own file
 or options; never the broker's word.
 
