@@ -11,8 +11,13 @@ include = ["src/**"]
 publish = false
 
 [features]
+# Everything but `peer`: the signed formats, the exchange, the signatures. On by default, so a crate that depends on
+# `p-act` as before gets what it had; a crate that wants only `p_act::peer` (who is on the other end of a Unix
+# socket) says `default-features = false` and has `libc` and nothing else.
+default = ["formats"]
+formats = ["dep:base64", "dep:serde", "dep:serde_json", "dep:ring", "dep:tempfile", "dep:thiserror"]
 # The agent-side signer `pact` (proposals/pact.md): the library the binary is made of, and the binary.
-pact = ["dep:ureq"]
+pact = ["formats", "dep:ureq"]
 # TLS for `pact`'s HTTP client (stage 2). Without it `pact` speaks plain http only.
 pact-tls = ["pact", "ureq/rustls", "dep:rustls"]
 
@@ -26,14 +31,20 @@ libc = "0.2"
 ureq = { version = "3", default-features = false, optional = true }
 # Only to recognise a refused certificate in an error of the TLS handshake (feature pact-tls).
 rustls = { version = "0.23", default-features = false, optional = true }
-base64 = "0.23"
-serde = { version = "1", features = ["derive"] }
-serde_json = { version = "1", features = ["raw_value"] }
-ring = { version = "0.17", default-features = false }
-tempfile = "3"
-thiserror = "2"
+base64 = { version = "0.23", optional = true }
+serde = { version = "1", features = ["derive"], optional = true }
+serde_json = { version = "1", features = ["raw_value"], optional = true }
+ring = { version = "0.17", default-features = false, optional = true }
+tempfile = { version = "3", optional = true }
+thiserror = { version = "2", optional = true }
+
+[[test]]
+name = "ssh"
+path = "tests/ssh.rs"
+required-features = ["formats"]
 
 [dev-dependencies]
+tempfile = "3"
 # For the TLS tests of `pact`'s HTTP client (feature pact-tls): a test CA and a fake https server.
 rcgen = { version = "0.14", default-features = false, features = ["ring", "pem"] }
 rustls = { version = "0.23.46", default-features = false, features = ["ring", "std"] }
