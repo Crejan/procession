@@ -111,3 +111,96 @@ fn the_reading_finds_what_it_should_and_judges_the_old_mistake() {
     // The bound itself.
     assert!(!until_too_far(NOW + 300, NOW) && until_too_far(NOW + 3600, NOW));
 }
+
+// -- a3 finds its executables from cargo's own messages ---------------------------------------------------
+
+fn find_artifact(kind: &str, name: &str, messages: &str) -> (bool, String, String) {
+    use std::io::Write;
+    use std::process::{Command, Stdio};
+    let script = Path::new(env!("CARGO_MANIFEST_DIR")).join("proposals/stage1/find-artifact.sh");
+    let mut child = Command::new("sh")
+        .arg(script)
+        .args([kind, name])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    child.stdin.take().unwrap().write_all(messages.as_bytes()).unwrap();
+    let out = child.wait_with_output().unwrap();
+    (
+        out.status.success(),
+        String::from_utf8(out.stdout).unwrap().trim().to_string(),
+        String::from_utf8(out.stderr).unwrap(),
+    )
+}
+
+/// Messages in the shape cargo 1.97 prints them (`--message-format=json`, one compact object per line).
+fn artifact(kind: &str, name: &str, executable: &str) -> String {
+    format!(
+        "{{\"reason\":\"compiler-artifact\",\"package_id\":\"path+file:///c/crates/p-robe#0.0.0\",\"manifest_path\":\"/c/crates/p-robe/Cargo.toml\",\"target\":{{\"kind\":[\"{kind}\"],\"crate_types\":[\"bin\"],\"name\":\"{name}\",\"src_path\":\"/c/{name}.rs\",\"edition\":\"2024\",\"doc\":false,\"doctest\":false,\"test\":true}},\"profile\":{{\"opt_level\":\"0\",\"debuginfo\":2,\"debug_assertions\":true,\"overflow_checks\":true,\"test\":true}},\"features\":[\"test-verbs\"],\"filenames\":[\"{executable}\"],\"executable\":{},\"fresh\":true}}\n",
+        if executable.is_empty() { "null".to_string() } else { format!("\"{executable}\"") }
+    )
+}
+
+#[test]
+fn the_executable_is_the_one_cargo_names_for_that_target_and_nothing_else() {
+    let messages = [
+        "{\"reason\":\"compiler-message\",\"message\":{\"rendered\":\"warning: name stage1_sudo\"}}\n".to_string(),
+        artifact("lib", "p_robe", ""),
+        artifact("test", "stage1", "/c/target/debug/deps/stage1-aaaa"),
+        artifact("test", "stage1_sudo", "/c/target/debug/build/p-robe/0db5/out/stage1_sudo-0db5"),
+        artifact("bin", "pledge", "/c/target/debug/pledge"),
+        "{\"reason\":\"build-finished\",\"success\":true}\n".to_string(),
+    ]
+    .concat();
+    // The layout of the owner's cargo: not under `deps/`; the script does not mind.
+    assert_eq!(
+        find_artifact("test", "stage1_sudo", &messages),
+        (true, "/c/target/debug/build/p-robe/0db5/out/stage1_sudo-0db5".to_string(), String::new())
+    );
+    assert_eq!(find_artifact("bin", "pledge", &messages).1, "/c/target/debug/pledge");
+    // A test and a bin of the same name are told apart by their kind.
+    let both = [artifact("test", "x", "/c/t/x-test"), artifact("bin", "x", "/c/t/x-bin")].concat();
+    assert_eq!(find_artifact("bin", "x", &both).1, "/c/t/x-bin");
+}
+
+#[test]
+fn nothing_is_guessed_when_cargo_does_not_name_exactly_one() {
+    let none = artifact("lib", "p_robe", "");
+    let two = [artifact("test", "stage1_sudo", "/c/a"), artifact("test", "stage1_sudo", "/c/b")].concat();
+    let relative = artifact("test", "stage1_sudo", "target/debug/deps/stage1_sudo-1");
+    let spaced = artifact("test", "stage1_sudo", "/c/my checkout/stage1_sudo-1");
+    let quoted = artifact("test", "stage1_sudo", "/c/x;rm -rf /");
+    let only_null = artifact("test", "stage1_sudo", "");
+    for (what, messages) in [
+        ("empty", String::new()),
+        ("another target", none),
+        ("two", two),
+        ("a relative path", relative),
+        ("a path with a space", spaced),
+        ("a path with shell characters", quoted),
+        ("no executable", only_null),
+    ] {
+        let (ok, out, err) = find_artifact("test", "stage1_sudo", &messages);
+        assert!(!ok && out.is_empty() && err.starts_with("find-artifact:"), "{what}: {out:?} {err:?}");
+    }
+}
+
+#[test]
+fn a3_does_not_look_in_a_directory_for_the_newest_file_and_is_valid_shell() {
+    let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("proposals/stage1");
+    let a3 = std::fs::read_to_string(dir.join("a3-run-cross.sh")).unwrap();
+    for guess in ["ls -t", "deps/", "target/debug/deps", "*.d"] {
+        assert!(!a3.contains(guess), "a3 guesses where a file is: {guess}");
+    }
+    assert!(
+        a3.contains("find-artifact.sh")
+            && a3.contains("--message-format=json")
+            && a3.contains("PROBE_EXPECT_BUILT_FROM")
+    );
+    for script in ["a3-run-cross.sh", "find-artifact.sh"] {
+        let status = std::process::Command::new("sh").arg("-n").arg(dir.join(script)).status().unwrap();
+        assert!(status.success(), "{script} is not valid shell");
+    }
+}

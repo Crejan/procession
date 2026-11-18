@@ -63,12 +63,10 @@ programs have today, and what is not yet there is marked.
   This gives `target/debug/probe`, `pledge` and `pact`. `probe` is built **with
   the test verbs** (`test echo`, `test peak`, `test read`) so that the cases
   have a harmless verb and one rated at the top of a scale. Such a build is
-  for a trial host only (`sys kit` warns of it). Then:
-  ```
-  cargo test -p p-robe --features test-verbs --test stage1_sudo --no-run
-  ```
-  prints `Executable tests/stage1_sudo.rs (target/debug/deps/stage1_sudo-HASH)`.
-  Note the path.
+  for a trial host only (`sys kit` warns of it).
+  (`a3` builds the test and `pledge` itself and takes their paths from cargo's own messages; nothing is
+  looked for by name in a directory, because this cargo (1.97) may keep test executables outside `target/debug/deps/`:
+  the owner's first run at `2a38839` took an older binary from `deps/` for the new one.)
 
 ## 2. The rule and the account, in words
 
@@ -227,20 +225,19 @@ looks (`journalctl -t probe`, `/var/log/auth.log`, `/var/log/syslog`,
 
 ### A3. The cross run with the verb through sudo
 
-As `alice`, make the files readable by root (they are copied):
+As root (the checkout must belong to the user who builds it, here `alice`):
 
 ```
-ls -l target/debug/pledge target/debug/deps/stage1_sudo-HASH
+sh stage1/a3-run-cross.sh /home/alice/CHECKOUT
 ```
 
-As root:
-
-```
-sh stage1/a3-run-cross.sh /home/alice/CHECKOUT/target/debug/deps/stage1_sudo-HASH /home/alice/CHECKOUT/target/debug
-```
-
-It copies the test and `pledge` to `/var/tmp/probe-stage1-run` and runs the
-test **as `probe-svc`**. The test starts its own `pledge serve` in a temporary
+It builds, as the checkout's owner in a login shell, the test (with the checkout's commit compiled in) and
+`pledge`, and reads their paths from `cargo ... --message-format=json` with `stage1/find-artifact.sh` (it needs only
+`grep` and `sed`; no `jq`). It stops if cargo does not name exactly one executable for each. Its first lines say the
+checkout's commit and the two paths; the test's first line says `test binary built from: <commit>`, and the test
+stops with "stale test binary" if that is not the commit the script expected (a working tree with changes counts as
+`<commit>-dirty`, so it is never the commit). It copies the two to `/var/tmp/probe-stage1-run` and runs the
+test **as `probe-svc`**, naming `pledge` in `PROBE_PLEDGE_BIN`. The test starts its own `pledge serve` in a temporary
 directory (keys in files, the person's answers scripted on its standard
 input), makes the service's key and certificate with `probe setup` from a
 throwaway host key, starts an agent with `pledge agents start`, has `pact`'s own
