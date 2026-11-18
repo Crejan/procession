@@ -66,7 +66,7 @@ pub struct Config {
     pub log: PathBuf,
     /// How many requests of one agent may wait (five by default).
     #[serde(default = "five")]
-    pub max_waiting_per_agent: usize,
+    pub waiting_per_agent: usize,
     /// Connections in total, and from one address.
     #[serde(default = "max_connections")]
     pub max_connections: usize,
@@ -94,7 +94,7 @@ impl Config {
         let crypto = Arc::new(SshCrypto::new(&self.broker_key));
         let core = Core::new(
             Arc::clone(&site),
-            Settings { max_waiting_per_agent: self.max_waiting_per_agent },
+            Settings { waiting_per_agent: self.waiting_per_agent },
             register,
             Some(self.state_dir.join("register.json")),
             crypto.clone(),
