@@ -38,7 +38,18 @@ not published (`publish = false`).
   crates.io, so `cargo install p-usher` etc. needs nothing but cargo.
 - Linux at runtime; p-lumber also on macOS. Readers take a root (`/proc`,
   `/sys`) so tests run against fixture trees on any OS.
-- Configuration in `/etc/<crate>.toml`; every key optional; defaults work.
+- Configuration: two classes of settings file, by who writes them. A file
+  that a roll-out renders and that carries trust decisions (keys, anchors,
+  who may connect) is JSON: `pledge`, `probe`, `page`. A file a person
+  writes by hand for a tool, with lists that want comments, is TOML in
+  `/etc/<crate>.toml`: `pusher`, `preserve`, `prover`. Every key optional;
+  defaults work. The strictness does not differ: a regular file, owned by
+  root or the running user, no group or other write bit, an unknown key
+  refused, a key given twice refused, a size limit, and error texts that
+  carry no value from the file. Secrets are never in a settings file: a path
+  to a file of mode 0600, or the key store.
+- A `health` or `status` verb meant for a monitor documents its exit codes
+  in a table in the program's SPEC and never uses one code for two meanings.
 - Machine output: `--format json` with `schema_version`, one record type per
   observed object.
 - Every change a tool makes to a thread, an IRQ or a NIC is a `Change` from
