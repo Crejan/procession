@@ -34,10 +34,10 @@ Daemon to client:
 - `error`: `{"type":"error","id":..., "code":"<code>", ...}`, in place of the answer. Codes are a closed
   list. Outcomes keep their names (`no-repository`, `locked`, `wrong-password`, `timed-out`, `failed`), plus
   `bad-request`, `unsupported`, `not-found`, `busy` (with the job that holds it), `too-large`,
-  `refused` (a rule said no), `shutting-down`. An optional `detail` is the engine's own words **for a log, not for
-  display**; it is cut to 512 bytes and passes the rule of every shown string in the workspace (no control
-  characters, no bidirectional marks: p-act's `text::check`, which is not exported yet, so `p_reserve_core::text::for_display`
-  states it again until it is).
+  `refused` (a rule said no), `shutting-down`. There is **no `detail` on the wire**: the engine's own words
+  (rustic's messages quote paths and repository data) go to the daemon's log only, escaped (`p_ermit::text::escape_clipped`,
+  at most 512 characters). A name or path in an answer is the escape form of its bytes (`escape_bytes`), and a record
+  that holds an escaped one says `"escaped": true`.
 - `event`: `{"type":"event","subscription":"<id>","seq":n,"topic":"...", ...}`.
 
 Strictness. The daemon refuses a request with an unknown member, an unknown type, a wrong version or a

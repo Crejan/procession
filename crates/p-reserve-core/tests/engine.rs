@@ -52,6 +52,10 @@ fn digests(root: &Path) -> BTreeMap<PathBuf, String> {
     out
 }
 
+/// File names a source file system can hold and a terminal, a log or a front end must not meet raw: a C1 control
+/// (U+0085, U+009B), a bidirectional mark (U+202E), an ESC sequence and a newline.
+const WEIRD: [&str; 5] = ["c1\u{85}next", "csi\u{9b}31m", "rtl\u{202e}txt.exe", "esc\x1b[2Jclear", "two\nlines"];
+
 /// A source tree: small files, an empty file, a symlink, a nested directory, a file of several chunks that does not
 /// compress and one that does.
 fn make_source(root: &Path) -> PathBuf {
@@ -71,6 +75,10 @@ fn make_source(root: &Path) -> PathBuf {
         })
         .collect();
     fs::write(source.join("deep/noise.bin"), noise).unwrap();
+    fs::create_dir(source.join("weird")).unwrap();
+    for (i, name) in WEIRD.iter().enumerate() {
+        fs::write(source.join("weird").join(name), format!("content {i}")).unwrap();
+    }
     fs::write(source.join("deep/er/zeros.bin"), vec![0u8; 2 * 1024 * 1024]).unwrap();
     source
 }
@@ -191,8 +199,13 @@ fn the_engine_lists_and_reads_what_restic_wrote() {
     assert_eq!(snapshots.len(), 1);
     assert_eq!(snapshots[0].paths, vec![w.source.to_str().unwrap().to_owned()]);
     assert!(!snapshots[0].host.is_empty());
-    let mut top: Vec<_> =
-        w.engine.list("latest", &w.path_in_snapshot("")).unwrap().into_iter().map(|n| (n.name, n.kind)).collect();
+    let mut top: Vec<_> = w
+        .engine
+        .list("latest", &w.path_in_snapshot(""))
+        .unwrap()
+        .into_iter()
+        .map(|n| (String::from_utf8(n.name).unwrap(), n.kind))
+        .collect();
     top.sort_by(|a, b| a.0.cmp(&b.0));
     assert_eq!(
         top,
@@ -201,6 +214,7 @@ fn the_engine_lists_and_reads_what_restic_wrote() {
             ("deep".to_owned(), NodeKind::Dir),
             ("empty".to_owned(), NodeKind::File),
             ("link".to_owned(), NodeKind::Symlink),
+            ("weird".to_owned(), NodeKind::Dir),
         ]
     );
     let mut out = Vec::new();
@@ -297,4 +311,42 @@ fn a_repository_restic_is_writing_to_can_be_read_and_data_written_after_the_open
     let mut fresh = Vec::new();
     open(&repo).dump(late, "/late.txt", &mut fresh).unwrap();
     assert_eq!(fresh, b"written later\n");
+}
+
+fn assert_weird_names_are_listed_read_and_restored_under_their_real_names(w: &Written, name: &str) {
+    use std::os::unix::ffi::OsStrExt;
+    let dir = w.path_in_snapshot("weird");
+    // listed, never refused: the names come back as the bytes the file system held
+    let mut listed: Vec<Vec<u8>> = w.engine.list("latest", &dir).unwrap().into_iter().map(|n| n.name).collect();
+    listed.sort();
+    let mut want: Vec<Vec<u8>> = WEIRD.iter().map(|n| n.as_bytes().to_vec()).collect();
+    want.sort();
+    assert_eq!(listed, want);
+    // read: the bytes of each, by its real path
+    for (i, weird) in WEIRD.iter().enumerate() {
+        let mut out = Vec::new();
+        w.engine.dump("latest", &format!("{dir}/{weird}"), &mut out).unwrap();
+        assert_eq!(out, format!("content {i}").as_bytes(), "{weird:?}");
+    }
+    // restored under the real names, and nothing else
+    let dest = w.scratch(name);
+    w.engine.restore("latest", &dir, &dest).unwrap();
+    let mut on_disk: Vec<Vec<u8>> =
+        fs::read_dir(&dest).unwrap().map(|e| e.unwrap().file_name().as_bytes().to_vec()).collect();
+    on_disk.sort();
+    assert_eq!(on_disk, want);
+    for (i, weird) in WEIRD.iter().enumerate() {
+        assert_eq!(fs::read(dest.join(weird)).unwrap(), format!("content {i}").as_bytes());
+    }
+}
+
+#[test]
+fn names_with_c1_controls_and_a_bidi_mark_are_listed_read_and_restored_under_their_real_names_from_a_rustic_repository() {
+    assert_weird_names_are_listed_read_and_restored_under_their_real_names(by_rustic(), "weird-rustic");
+}
+
+#[test]
+fn names_with_c1_controls_and_a_bidi_mark_are_listed_read_and_restored_under_their_real_names_from_a_restic_repository() {
+    let Some(w) = by_restic() else { return skipped() };
+    assert_weird_names_are_listed_read_and_restored_under_their_real_names(w, "weird-restic");
 }

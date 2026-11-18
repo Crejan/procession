@@ -132,11 +132,7 @@ impl MarkerDir {
 
     /// Record that `job` is starting: write its marker and lock it.
     pub fn begin(&self, job: &Job) -> Result<Marker, MarkerError> {
-        let valid = !job.id.is_empty()
-            && job.id.len() <= 64
-            && job.id.bytes().all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'-'))
-            && !job.id.starts_with('.');
-        if !valid {
+        if !valid_id(&job.id) {
             return Err(MarkerError::BadId(job.id.clone()));
         }
         DirBuilder::new()
@@ -255,9 +251,22 @@ fn open_orphan(path: &Path) -> Result<Orphan, MarkerError> {
     let stored = if bytes.len() as u64 > MAX_MARKER_BYTES {
         None
     } else {
-        serde_json::from_slice::<Stored>(&bytes).ok().filter(|s| s.schema_version == SCHEMA_VERSION)
+        serde_json::from_slice::<Stored>(&bytes).ok().filter(|s| {
+            s.schema_version == SCHEMA_VERSION
+                && valid_id(&s.job)
+                && s.pairs
+                    .iter()
+                    .all(|p| p_ermit::text::check(&p.source).is_ok() && p_ermit::text::check(&p.target).is_ok())
+        })
     };
     Ok(Some((file, stored)))
+}
+
+fn valid_id(id: &str) -> bool {
+    !id.is_empty()
+        && id.len() <= 64
+        && id.bytes().all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'-'))
+        && !id.starts_with('.')
 }
 
 fn own_uid() -> u32 {
@@ -427,6 +436,24 @@ mod tests {
         assert!(e.markers.recover(&mut ledger, &e.store).unwrap().is_empty());
         assert_eq!(files(&e.marker_path), vec!["dir.marker", "notes.txt"]);
         assert_eq!(ledger, Ledger::default());
+    }
+
+    #[test]
+    fn a_marker_holding_a_name_with_a_control_character_or_a_bad_job_id_is_discarded_without_an_entry() {
+        let e = env();
+        e.markers.begin(&job("j-11", &[("a", "b")], 1)).unwrap().end().unwrap(); // makes the directory
+        let marker = |id: &str, source: &str| {
+            format!(
+                "{{\"schema_version\":1,\"job\":\"{id}\",\"kind\":\"backup\",\"started\":1000,\"pairs\":[{{\"source\":\"{source}\",\"target\":\"t\"}}]}}\n"
+            )
+        };
+        fs::write(e.marker_path.join("a.marker"), marker("ok", "x\\u0085y")).unwrap();
+        fs::write(e.marker_path.join("b.marker"), marker("ok", "x\\u202ey")).unwrap();
+        fs::write(e.marker_path.join("c.marker"), marker("../evil", "x")).unwrap();
+        let mut ledger = Ledger::default();
+        assert!(e.markers.recover(&mut ledger, &e.store).unwrap().is_empty());
+        assert_eq!(ledger, Ledger::default());
+        assert!(files(&e.marker_path).is_empty());
     }
 
     #[test]

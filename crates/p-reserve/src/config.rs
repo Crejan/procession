@@ -128,7 +128,7 @@ pub fn check_name(what: &str, name: &str) -> Result<(), String> {
     if is_name(name) {
         return Ok(());
     }
-    let shown = p_reserve_core::text::for_display(name, 64);
+    let shown = p_ermit::text::escape_clipped(name, 64).text;
     Err(format!("the {what} name {shown:?} is not allowed: a name is {NAME_RULE}"))
 }
 

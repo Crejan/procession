@@ -196,3 +196,19 @@ What I would do (nothing done yet):
 - **restore** must restore the real name on disk and only the output is escaped; rustic does that. The test the workspace rule asks for: a snapshot holding a file named with U+0085, U+009B and U+202E (and ESC and a newline, and one with invalid UTF-8
   if restic can store it), listed in text and JSON, dumped (bytes equal), restored (the on-disk name is the real one, the output shows it escaped), and a ledger or marker with such a name refused or escaped, through every output preserve has.
 - `for_display` stays only where a string is bounded for a log; it is not the escape form and goes away when the escape lands.
+
+## The audit's fixes (done), and the three answers asked for again
+- Merged `integration`; `p_reserve_core::text` is a thin layer on `p_ermit::text` (`escape`, `escape_bytes`, `escape_clipped`); my `for_display` is deleted. `for_log` (escaped, 512 characters) is for rustic's words and errors; `shown` for an argument echoed in an error.
+- **Sites fixed** (numbers of the audit table): 1, 2, 3, 4 (host, paths, tags and names through the escape form, names as **bytes** via `Node.name: Vec<u8>`, records marked `"escaped": true`; arguments echoed
+  in `ls` JSON and the restore destination escaped); 9 (no `detail` in the JSON `error`; stderr text escaped and bounded); 11, 12, 15 (the ledger is read with `p_ermit::text::check`); 13 (ledger errors say the line and what, never
+  the value; `health` stderr through `for_log`); 14 (`Textfile::save` refuses a name the rule refuses, nothing written); 16 (a marker with a bad name or job id is discarded without an entry); 17 (the refused name shown escaped, 64 characters);
+  18 (argv echoes escaped). 6 was already right (rustic restores the real name; read, and now tested).
+- **Tests** (all run; engine tests need the feature): a file named with U+0085, U+009B, U+202E, ESC and a newline in a snapshot, from a repository written by rustic and by restic 0.19.0: listed (bytes equal), dumped (bytes equal), restored (the
+  on-disk names are exactly those); through the CLI: `ls` text (no raw refused character on stdout, one line per name, the escape form present), `ls` JSON (each entry `"escaped": true`, reversible with `unescape`, an ordinary name `false`),
+  `restore` (real names on disk, output clean), an error about a weird missing path (stderr and JSON clean, no `detail` in JSON). Default-run tests: ledger with a bad name refused on read and write with the line only, errors without the value,
+  markers with bad names or ids discarded, `health` on such a ledger exits 3 and prints nothing raw.
+- Default sweep and 3-umask sweep of my crates pass; the engine suite: `cargo test -p p-reserve-core -p p-reserve --features p-reserve/engine-rustic --offline`: all pass, none skipped, 10 min 45 s here on a loaded machine
+  (the `--test engine` file alone: 7 tests, the lib's engine tests 56 in 71 s, the CLI process tests 245 s in parallel).
+- What 6bfc376 and the commits after 2235bc2 contain: 6bfc376 and the commits after 2235bc2 up to here are: p-ermit for the character rule, settings and password file (and `p-act` dropped); `tests/engine.rs` (SHA-256 restore, a restic-written repository, a writing restic: item 4);
+  a fix of a flaky umask test; the audit (c0d9aa0); and this unit.
+- Still open: the proposal's job messages and socket are not built; `Outcome`-per-exit-code; the SHA test is against local repositories only.

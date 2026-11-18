@@ -51,7 +51,7 @@ fn parse(args: &[&str]) -> Result<Options, String> {
                 options.json = match value("text or json")? {
                     "json" => true,
                     "text" => false,
-                    other => return Err(format!("unknown format {other:?}")),
+                    other => return Err(format!("unknown format {}", p_reserve_core::text::shown(other))),
                 }
             }
             "--now" => {
@@ -59,7 +59,7 @@ fn parse(args: &[&str]) -> Result<Options, String> {
                     value("seconds")?.parse().map_err(|_| "--now takes whole seconds since the epoch".to_owned())?,
                 )
             }
-            other => return Err(format!("unknown argument {other:?}")),
+            other => return Err(format!("unknown argument {}", p_reserve_core::text::shown(other))),
         }
     }
     Ok(options)
@@ -96,7 +96,7 @@ pub fn run(args: &[&str], out: &mut impl Write, err: &mut impl Write) -> u8 {
             }
         }
         Err(message) => {
-            let _ = writeln!(err, "preserve health: {message}");
+            let _ = writeln!(err, "preserve health: {}", p_reserve_core::text::for_log(&message));
             EXIT_FAILED
         }
     }

@@ -8,6 +8,7 @@
 
 use std::collections::BTreeMap;
 use std::io::Write;
+use std::os::unix::ffi::OsStrExt;
 use std::path::{Component, Path, PathBuf};
 use std::time::SystemTime;
 
@@ -49,7 +50,7 @@ impl std::fmt::Debug for RusticEngine {
 }
 
 fn fail(outcome: Outcome, detail: impl AsRef<str>) -> EngineError {
-    EngineError { outcome, detail: crate::text::for_display(detail.as_ref(), crate::text::MAX_DETAIL) }
+    EngineError { outcome, detail: crate::text::for_log(detail.as_ref()) }
 }
 
 /// What a rustic error is called. Only the kinds that mean something to a
@@ -135,7 +136,7 @@ impl Engine for RusticEngine {
             .nodes
             .iter()
             .map(|n| Node {
-                name: n.name().to_string_lossy().into_owned(),
+                name: n.name().as_bytes().to_vec(),
                 kind: kind(n),
                 size: n.meta.size,
                 mtime: n.meta.mtime.map(system_time),
@@ -285,13 +286,13 @@ mod tests {
         let engine = &f.engine;
         let mut top = engine.list("latest", &inside(f, "")).unwrap();
         top.sort_by(|a, b| a.name.cmp(&b.name));
-        let names: Vec<_> = top.iter().map(|n| (n.name.as_str(), n.kind)).collect();
+        let names: Vec<_> = top.iter().map(|n| (std::str::from_utf8(&n.name).unwrap(), n.kind)).collect();
         assert_eq!(names, vec![("a.txt", NodeKind::File), ("d", NodeKind::Dir)]);
         assert_eq!(top[0].size, 6);
         assert!(top[0].mtime.is_some());
         let sub = engine.list("latest", &inside(f, "d")).unwrap();
         assert_eq!(sub.len(), 2);
-        assert!(sub.iter().any(|n| n.name == "e" && n.kind == NodeKind::Dir));
+        assert!(sub.iter().any(|n| n.name == b"e" && n.kind == NodeKind::Dir));
         // a snapshot's id (and a prefix of it) names it as well as `latest`
         let id = engine.snapshots().unwrap().remove(0).id;
         assert_eq!(engine.list(&id, &inside(f, "")).unwrap().len(), 2);

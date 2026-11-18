@@ -14,6 +14,9 @@ use std::sync::OnceLock;
 
 use p_reserve_core::testing::make_repository;
 
+/// Names a source file system can hold: a C1 control (U+0085, U+009B), a bidirectional mark (U+202E), ESC, a newline.
+const WEIRD: [&str; 5] = ["c1\u{85}next", "csi\u{9b}31m", "rtl\u{202e}txt.exe", "esc\x1b[2Jclear", "two\nlines"];
+
 struct Fixture {
     _dir: tempfile::TempDir,
     root: PathBuf,
@@ -35,6 +38,10 @@ fn fixture() -> &'static Fixture {
         fs::create_dir_all(source.join("d")).unwrap();
         fs::write(source.join("a.txt"), "hello\n").unwrap();
         fs::write(source.join("d/b.txt"), "b").unwrap();
+        fs::create_dir(source.join("weird")).unwrap();
+        for (i, name) in WEIRD.iter().enumerate() {
+            fs::write(source.join("weird").join(name), format!("content {i}")).unwrap();
+        }
         make_repository(&root.join("repo"), "pw-for-the-test", &source);
         write_mode(&root.join("good.pw"), "pw-for-the-test\n", 0o600);
         write_mode(&root.join("bad.pw"), "another password\n", 0o600);
@@ -104,7 +111,14 @@ fn ls_lists_a_directory_and_restore_gives_the_files_back() {
         .map(|e| (e["name"].as_str().unwrap().to_owned(), e["kind"].as_str().unwrap().to_owned()))
         .collect();
     names.sort();
-    assert_eq!(names, vec![("a.txt".to_owned(), "file".to_owned()), ("d".to_owned(), "dir".to_owned())]);
+    assert_eq!(
+        names,
+        vec![
+            ("a.txt".to_owned(), "file".to_owned()),
+            ("d".to_owned(), "dir".to_owned()),
+            ("weird".to_owned(), "dir".to_owned())
+        ]
+    );
 
     let dest = f.root.join("restored");
     let out = preserve(&[
@@ -119,7 +133,10 @@ fn ls_lists_a_directory_and_restore_gives_the_files_back() {
     ]);
     assert_eq!(out.status.code(), Some(0), "{out:?}");
     let j = json(&out);
-    assert_eq!((j["type"].clone(), j["files"].clone(), j["bytes"].clone()), ("restore".into(), 2.into(), 7.into()));
+    assert_eq!(
+        (j["type"].clone(), j["files"].clone(), j["bytes"].clone()),
+        ("restore".into(), 7.into(), (7 + 5 * 9).into())
+    );
     assert_eq!(fs::read(dest.join("a.txt")).unwrap(), b"hello\n");
     assert_eq!(fs::read(dest.join("d/b.txt")).unwrap(), b"b");
 
@@ -177,4 +194,76 @@ fn restore_refuses_a_relative_destination_and_writes_nothing() {
     let out = preserve(&["restore", "good", "latest", f.source.to_str().unwrap(), "--to", "relative/out"]);
     assert_eq!(out.status.code(), Some(3));
     assert!(!Path::new("relative/out").exists());
+}
+
+/// The bytes a terminal or a log must never get from preserve: ESC, C1 controls, bidirectional marks (as UTF-8).
+fn raw_refused(bytes: &[u8]) -> bool {
+    let text = String::from_utf8_lossy(bytes);
+    text.chars().any(|c| (c.is_control() && c != '\n') || p_ermit::text::is_bidi_mark(c)) || text.contains('\u{fffd}')
+}
+
+#[test]
+fn names_with_c1_controls_a_bidi_mark_esc_and_a_newline_are_listed_escaped_and_restored_under_their_real_names() {
+    use std::os::unix::ffi::OsStrExt;
+    let f = fixture();
+    let dir = f.source.join("weird");
+    // text: every name is there, as what it is, none raw, and the lines are not split by the newline
+    let out = preserve(&["ls", "good", "latest", dir.to_str().unwrap()]);
+    assert_eq!(out.status.code(), Some(0), "{out:?}");
+    assert!(!raw_refused(&out.stdout), "raw refused characters on stdout: {:?}", out.stdout);
+    let text = String::from_utf8(out.stdout).unwrap();
+    assert_eq!(text.lines().count(), WEIRD.len(), "{text}");
+    for shown in ["c1\\u{85}next", "csi\\u{9b}31m", "rtl\\u{202e}txt.exe", "esc\\u{1b}[2Jclear", "two\\u{a}lines"] {
+        assert!(text.contains(shown), "{shown} in {text}");
+    }
+    // JSON: valid, one entry per name, flagged
+    let out = preserve(&["ls", "good", "latest", dir.to_str().unwrap(), "--format", "json"]);
+    assert!(!raw_refused(&out.stdout), "{:?}", out.stdout);
+    let j = json(&out);
+    let entries = j["entries"].as_array().unwrap();
+    assert_eq!(entries.len(), WEIRD.len());
+    assert!(entries.iter().all(|e| e["escaped"] == true), "{j}");
+    let names: Vec<String> = entries.iter().map(|e| e["name"].as_str().unwrap().to_owned()).collect();
+    for weird in WEIRD {
+        let shown = p_ermit::text::escape(weird).text;
+        assert!(names.contains(&shown), "{shown} in {names:?}");
+        // reversible: the shown name stands for exactly the real one
+        assert_eq!(p_ermit::text::unescape(&shown).as_deref(), Some(weird));
+    }
+    // an ordinary name is not flagged
+    let out = preserve(&["ls", "good", "latest", f.source.to_str().unwrap(), "--format", "json"]);
+    assert!(json(&out)["entries"].as_array().unwrap().iter().all(|e| e["escaped"] == false));
+
+    // restore: the real names on disk, only the output escaped
+    let dest = f.root.join("weird-restored");
+    let out = preserve(&["restore", "good", "latest", dir.to_str().unwrap(), "--to", dest.to_str().unwrap()]);
+    assert_eq!(out.status.code(), Some(0), "{out:?}");
+    assert!(!raw_refused(&out.stdout) && !raw_refused(&out.stderr));
+    let mut on_disk: Vec<Vec<u8>> =
+        fs::read_dir(&dest).unwrap().map(|e| e.unwrap().file_name().as_bytes().to_vec()).collect();
+    on_disk.sort();
+    let mut want: Vec<Vec<u8>> = WEIRD.iter().map(|n| n.as_bytes().to_vec()).collect();
+    want.sort();
+    assert_eq!(on_disk, want);
+    for (i, name) in WEIRD.iter().enumerate() {
+        assert_eq!(fs::read(dest.join(name)).unwrap(), format!("content {i}").as_bytes());
+    }
+}
+
+#[test]
+fn an_error_about_a_weird_path_does_not_repeat_it_raw() {
+    let f = fixture();
+    let missing = f.source.join("weird").join("nope\u{202e}\u{85}");
+    for args in [
+        &["restore", "good", "latest", missing.to_str().unwrap(), "--to", "/tmp/never-written-x"][..],
+        &["ls", "good", "latest", missing.to_str().unwrap()],
+    ] {
+        let out = preserve(args);
+        assert_eq!(out.status.code(), Some(3), "{args:?}");
+        assert!(!raw_refused(&out.stderr) && !raw_refused(&out.stdout), "{:?}", out.stderr);
+        let json = preserve(&[args, &["--format", "json"]].concat());
+        assert!(!raw_refused(&json.stdout), "{:?}", json.stdout);
+        let j = serde_json::from_slice::<serde_json::Value>(&json.stdout).unwrap();
+        assert!(j.get("detail").is_none(), "the engine's words are not forwarded to a machine reader: {j}");
+    }
 }
