@@ -22,6 +22,7 @@ pub mod agent_conn;
 pub mod agents;
 pub mod answers;
 pub mod approvals;
+pub mod broker_link;
 pub mod broker_state;
 pub mod certs;
 pub mod cli;

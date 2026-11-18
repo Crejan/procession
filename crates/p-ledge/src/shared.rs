@@ -119,6 +119,10 @@ pub struct Shared {
     /// Where private temporary directories are made (for issuing): a directory only the person can enter.
     pub work_dir: PathBuf,
     state_dir: PathBuf,
+    /// What pledge keeps of the broker: restrictions, certificates, its own withdrawals.
+    pub broker_state: crate::broker_state::BrokerState,
+    /// The connection to the broker, if one is configured and started.
+    pub link: std::sync::OnceLock<Arc<crate::broker_link::BrokerLink>>,
 }
 
 /// What a caller gives [`Shared::new`].
@@ -164,6 +168,8 @@ impl Shared {
             Delegations::open(parts.state_dir.join("delegations.json"))?,
             Answers::open(&parts.state_dir.join("answers.jsonl"), now)?,
         );
+        let broker_state =
+            crate::broker_state::BrokerState::open_unverified(parts.state_dir.join("broker-state.json"))?;
         let shared = Self {
             holder: Mutex::new(parts.holder),
             keys: RwLock::new(Vec::new()),
@@ -178,10 +184,36 @@ impl Shared {
             approvals,
             work_dir: parts.work_dir,
             state_dir: parts.state_dir.clone(),
+            broker_state,
+            link: std::sync::OnceLock::new(),
         };
         shared.load_programs()?;
         shared.reload_keys()?;
+        shared.reverify_certificates()?;
         Ok(shared)
+    }
+
+    /// Judges again the certificates kept from before: with a broker configured, each must still verify
+    /// against the site CA for its own key; without one, none is kept.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Io`] if the file cannot be rewritten.
+    pub fn reverify_certificates(&self) -> Result<()> {
+        let broker = self.approvals.config.broker.as_ref();
+        let person = self.approvals.config.person.clone();
+        let ca = broker.and_then(|b| p_act::sign::PublicKey::parse(&b.site_ca).ok());
+        let now = self.now().unix();
+        self.broker_state.reverify(&|line| {
+            let (person, ca) = (person.as_deref()?, ca.as_ref()?);
+            crate::certs::check(self, line, person, ca, now).ok().map(|good| good.role.to_owned())
+        })
+    }
+
+    /// The connection to the broker, if there is one.
+    #[must_use]
+    pub fn link(&self) -> Option<Arc<crate::broker_link::BrokerLink>> {
+        self.link.get().cloned()
     }
 
     /// The key made for `purpose` (`confirmed`, `automatic`, `delegation`), if there is one.

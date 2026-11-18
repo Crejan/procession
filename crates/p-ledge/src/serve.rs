@@ -86,6 +86,9 @@ pub fn run(config: Config) -> Result<()> {
         state_dir: config.paths.state.clone(),
         work_dir: config.paths.sockets.clone(),
     })?);
+    if let Some(broker) = settings.broker.as_ref() {
+        start_broker_link(&shared, broker)?;
+    }
     shared.settle_lost();
     shared.event("started", json!({"form": "files", "version": env!("CARGO_PKG_VERSION")}));
     if let Some(bytes) = opened.repaired_bytes {
@@ -109,6 +112,46 @@ pub fn run(config: Config) -> Result<()> {
     let for_control = Arc::clone(&shared);
     thread::spawn(move || accept_control(&for_control, &control_listener));
     accept_agent(&shared, &agent);
+    Ok(())
+}
+
+/// Starts the connection to the broker, in stage 2 (a `broker` member in `config.json`).
+fn start_broker_link(shared: &Arc<Shared>, broker: &crate::config::BrokerEntry) -> Result<()> {
+    use crate::broker_link::{self, SessionConfig, TlsTransport};
+    let person =
+        shared.approvals.config.person.clone().ok_or_else(|| {
+            Error::Refused("a broker is configured but no person is: set `person` in config.json".into())
+        })?;
+    if shared.key_with_purpose("connection").is_none() {
+        return Err(Error::Refused("a broker is configured but there is no connection key: run `pledge keys create connection` and give its public part to an administrator".into()));
+    }
+    let site_ca = p_act::sign::PublicKey::parse(&broker.site_ca).map_err(|e| Error::Refused(e.to_string()))?;
+    let tls = broker_link::client_config(&broker.tls_root).map_err(Error::Refused)?;
+    let name = rustls::pki_types::ServerName::try_from(broker.name().to_owned())
+        .map_err(|e| Error::Refused(format!("broker.server_name: {e}")))?;
+    let address = broker.address.clone();
+    let connect = Box::new(move || -> std::io::Result<Box<dyn broker_link::DynTransport>> {
+        use std::net::ToSocketAddrs as _;
+        let mut last = std::io::Error::other("the broker's address has no address");
+        for candidate in address.to_socket_addrs()? {
+            match std::net::TcpStream::connect_timeout(&candidate, std::time::Duration::from_secs(10)) {
+                Ok(stream) => {
+                    stream.set_nodelay(true)?;
+                    let transport = TlsTransport::connect(
+                        Arc::clone(&tls),
+                        name.clone(),
+                        stream,
+                        std::time::Duration::from_secs(10),
+                    )?;
+                    return Ok(Box::new(transport));
+                }
+                Err(e) => last = e,
+            }
+        }
+        Err(last)
+    });
+    let link = broker_link::start(shared, SessionConfig { person, site_ca }, connect);
+    let _ = shared.link.set(link);
     Ok(())
 }
 

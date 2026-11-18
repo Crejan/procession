@@ -87,6 +87,23 @@ pub struct Cert {
     pub line: String,
 }
 
+/// What a verified standing says, as `apply` takes it.
+#[derive(Debug, Clone, Copy)]
+pub struct Applied<'a> {
+    /// The person is blocked.
+    pub blocked: bool,
+    /// Blocked keys' fingerprints.
+    pub blocked_keys: &'a [String],
+    /// Withdrawn delegations' identifiers.
+    pub withdrawn: &'a [String],
+    /// Certificate lines.
+    pub certificates: &'a [String],
+    /// Group names.
+    pub groups: &'a [String],
+    /// When it came (Unix time).
+    pub now: i64,
+}
+
 /// What a standing changed, for the record and for what is waiting.
 #[derive(Debug, Default, PartialEq, Eq)]
 pub struct Changes {
@@ -113,19 +130,43 @@ impl BrokerState {
     /// [`Error::Corrupt`] if the file is refused: it is not read in part, and pledge does not start on it,
     /// because it could hold restrictions that cannot then be known.
     pub fn open(path: PathBuf, verify: &dyn Fn(&str) -> Option<String>) -> Result<Self> {
+        let state = Self::open_unverified(path)?;
+        state.reverify(verify)?;
+        Ok(state)
+    }
+
+    /// Reads the file without judging its certificates yet; [`reverify`](Self::reverify) does, once whatever
+    /// the judging needs (the key holder) is there.
+    ///
+    /// # Errors
+    ///
+    /// As [`open`](Self::open).
+    pub fn open_unverified(path: PathBuf) -> Result<Self> {
         let read = p_act::settings::read_optional::<Persisted>(&path)
             .map_err(|e| Error::Corrupt { path: path.clone(), problem: e.to_string() })?;
-        let mut persisted = read.unwrap_or(Persisted { v: 1, ..Persisted::default() });
+        let persisted = read.unwrap_or(Persisted { v: 1, ..Persisted::default() });
         if persisted.v != 1 {
             return Err(Error::Corrupt { path, problem: "the file's version is not 1".into() });
         }
-        let before = persisted.certificates.len();
-        persisted.certificates.retain(|cert| verify(&cert.line).as_deref() == Some(cert.role.as_str()));
-        let state = Self { path, inner: Mutex::new(persisted) };
-        if state.get().certificates.len() != before {
-            state.save()?;
+        Ok(Self { path, inner: Mutex::new(persisted) })
+    }
+
+    /// Drops every certificate that does not verify (or no longer verifies).
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Io`] if the file cannot be rewritten.
+    pub fn reverify(&self, verify: &dyn Fn(&str) -> Option<String>) -> Result<()> {
+        let changed = {
+            let mut p = self.inner.lock().map_err(|_| Error::Refused("poisoned".into()))?;
+            let before = p.certificates.len();
+            p.certificates.retain(|cert| verify(&cert.line).as_deref() == Some(cert.role.as_str()));
+            p.certificates.len() != before
+        };
+        if changed {
+            self.save()?;
         }
-        Ok(state)
+        Ok(())
     }
 
     /// A copy of what is held.
@@ -180,16 +221,8 @@ impl BrokerState {
     /// # Errors
     ///
     /// [`Error::Io`] if it cannot be saved.
-    pub fn apply(
-        &self,
-        blocked: bool,
-        blocked_keys: &[String],
-        withdrawn: &[String],
-        certificates: &[String],
-        groups: &[String],
-        now: i64,
-        verify: &dyn Fn(&str) -> Option<String>,
-    ) -> Result<Changes> {
+    pub fn apply(&self, standing: &Applied<'_>, verify: &dyn Fn(&str) -> Option<String>) -> Result<Changes> {
+        let Applied { blocked, blocked_keys, withdrawn, certificates, groups, now } = *standing;
         let kept: Vec<Cert> =
             certificates.iter().filter_map(|line| verify(line).map(|role| Cert { role, line: line.clone() })).collect();
         let changes = {
@@ -275,7 +308,17 @@ mod tests {
         let s = state(&dir);
         let strings = |a: &[&str]| a.iter().map(|x| (*x).to_owned()).collect::<Vec<_>>();
         let changes = s
-            .apply(true, &strings(&["SHA256:k"]), &strings(&["SHA256:d"]), &[], &strings(&["ops"]), 100, ALWAYS)
+            .apply(
+                &Applied {
+                    blocked: true,
+                    blocked_keys: &strings(&["SHA256:k"]),
+                    withdrawn: &strings(&["SHA256:d"]),
+                    certificates: &[],
+                    groups: &strings(&["ops"]),
+                    now: 100,
+                },
+                ALWAYS,
+            )
             .expect("apply");
         assert_eq!(
             changes,
@@ -287,10 +330,25 @@ mod tests {
         );
         assert!(s.is_blocked() && s.is_key_blocked("SHA256:k") && s.is_withdrawn("SHA256:d"));
         // The same again: no change. A newer one that no longer lists them lifts them.
-        let again =
-            s.apply(true, &strings(&["SHA256:k"]), &strings(&["SHA256:d"]), &[], &[], 101, ALWAYS).expect("apply");
+        let again = s
+            .apply(
+                &Applied {
+                    blocked: true,
+                    blocked_keys: &strings(&["SHA256:k"]),
+                    withdrawn: &strings(&["SHA256:d"]),
+                    certificates: &[],
+                    groups: &[],
+                    now: 101,
+                },
+                ALWAYS,
+            )
+            .expect("apply");
         assert_eq!(again, Changes::default());
-        s.apply(false, &[], &[], &[], &[], 102, ALWAYS).expect("apply");
+        s.apply(
+            &Applied { blocked: false, blocked_keys: &[], withdrawn: &[], certificates: &[], groups: &[], now: 102 },
+            ALWAYS,
+        )
+        .expect("apply");
         assert!(!s.is_blocked() && !s.is_key_blocked("SHA256:k") && !s.is_withdrawn("SHA256:d"));
         assert_eq!(mode(&dir), 0o600);
     }
@@ -300,8 +358,18 @@ mod tests {
         let dir = TestDir::new("bstate-restart");
         let s = state(&dir);
         let cert = "ssh-ed25519-cert-v01@openssh.com AAAA jan:confirmed".to_owned();
-        s.apply(true, &["SHA256:k".into()], &["SHA256:d".into()], &[cert.clone()], &["ops".into()], 100, ALWAYS)
-            .expect("apply");
+        s.apply(
+            &Applied {
+                blocked: true,
+                blocked_keys: &["SHA256:k".into()],
+                withdrawn: &["SHA256:d".into()],
+                certificates: std::slice::from_ref(&cert),
+                groups: &["ops".into()],
+                now: 100,
+            },
+            ALWAYS,
+        )
+        .expect("apply");
         assert_eq!(s.certificate_for("confirmed").as_deref(), Some(cert.as_str()));
         drop(s);
         let again = state(&dir);
@@ -321,8 +389,11 @@ mod tests {
         let dir = TestDir::new("bstate-cert");
         let s = state(&dir);
         let lines = ["a AAAA jan:confirmed".to_owned(), "b AAAA jan:automatic".to_owned()];
-        s.apply(false, &[], &[], &lines, &[], 1, &|line| line.starts_with('b').then(|| "automatic".to_owned()))
-            .expect("apply");
+        s.apply(
+            &Applied { blocked: false, blocked_keys: &[], withdrawn: &[], certificates: &lines, groups: &[], now: 1 },
+            &|line| line.starts_with('b').then(|| "automatic".to_owned()),
+        )
+        .expect("apply");
         assert!(s.certificate_for("confirmed").is_none());
         assert!(s.certificate_for("automatic").is_some());
     }

@@ -60,12 +60,17 @@ pub struct Responder {
     pub send: Send,
     /// Information for the record: the peer's user and process.
     pub peer: Option<crate::peer::Seen>,
+    /// The request came over the broker's connection, not `service.sock`.
+    pub via_broker: bool,
 }
 
 struct Inflight {
     responders: Vec<Responder>,
     /// When the last submitter went away (Unix time), 0 while one is still there.
     cancelled: Arc<AtomicI64>,
+    /// Set with `cancelled` when the request is refused for a reason that arrived while it waited (a block, a
+    /// withdrawal): the dialog closes and the answer is `refused` with it.
+    refused: Arc<Mutex<Option<PledgeReason>>>,
     agent: Option<String>,
 }
 
@@ -109,10 +114,10 @@ impl Approvals {
     }
 
     fn set_agent(&self, hash: &str, agent: &str) {
-        if let Ok(mut open) = self.inflight.lock() {
-            if let Some(entry) = open.get_mut(hash) {
-                entry.agent = Some(agent.to_owned());
-            }
+        if let Ok(mut open) = self.inflight.lock()
+            && let Some(entry) = open.get_mut(hash)
+        {
+            entry.agent = Some(agent.to_owned());
         }
     }
 
@@ -130,6 +135,19 @@ impl Approvals {
                 }
             }
             None => eprintln!("pledge: cancel for a request it does not hold: {key}"),
+        }
+    }
+
+    /// Refuses what is waiting (its dialog closes) for a reason that arrived while it waited: a block, a
+    /// withdrawal. `agent` is the delegation of each waiting request; `which` picks them.
+    pub fn refuse_waiting(&self, which: impl Fn(&str) -> bool, reason: PledgeReason) {
+        let Ok(open) = self.inflight.lock() else { return };
+        let now = Timestamp::now().map_or(1, Timestamp::unix);
+        for entry in open.values().filter(|e| which(e.agent.as_deref().unwrap_or(""))) {
+            if let Ok(mut refused) = entry.refused.lock() {
+                refused.get_or_insert(reason);
+            }
+            entry.cancelled.store(now.max(1), Ordering::SeqCst);
         }
     }
 
@@ -166,6 +184,7 @@ struct Facts {
     key: Option<(&'static str, String)>,
     clamped: bool,
     peer: Option<crate::peer::Seen>,
+    via_broker: bool,
 }
 
 /// Seconds from `now` that a stored entry is kept: to the call's deadline, but
@@ -220,6 +239,7 @@ pub fn submit(shared: &Shared, submit: &Submit, responder: Responder) {
         (responder.send)(&answer);
         return;
     }
+    let refused = Arc::new(Mutex::new(None));
     let cancelled = {
         let Ok(mut open) = approvals.inflight.lock() else { return };
         if let Some(entry) = open.get_mut(&key) {
@@ -232,12 +252,17 @@ pub fn submit(shared: &Shared, submit: &Submit, responder: Responder) {
         let cancelled = Arc::new(AtomicI64::new(0));
         open.insert(
             key.clone(),
-            Inflight { responders: vec![responder.clone()], cancelled: Arc::clone(&cancelled), agent: None },
+            Inflight {
+                responders: vec![responder.clone()],
+                cancelled: Arc::clone(&cancelled),
+                refused: Arc::clone(&refused),
+                agent: None,
+            },
         );
         cancelled
     };
-    let mut facts = Facts { peer: responder.peer.clone(), ..Facts::default() };
-    let ending = process(shared, submit, &key, &cancelled, &mut facts);
+    let mut facts = Facts { peer: responder.peer.clone(), via_broker: responder.via_broker, ..Facts::default() };
+    let ending = process(shared, submit, &key, &cancelled, &refused, &mut facts);
     finish(shared, hash, ending, facts);
 }
 
@@ -251,11 +276,12 @@ pub fn refuse_malformed(shared: &Shared, hash: DocumentHash, responder: &Respond
         (responder.send)(&answer);
         return;
     }
-    let facts = Facts { peer: responder.peer.clone(), ..Facts::default() };
+    let facts = Facts { peer: responder.peer.clone(), via_broker: responder.via_broker, ..Facts::default() };
     if let Ok(mut open) = shared.approvals.inflight.lock() {
         open.entry(key).or_insert_with(|| Inflight {
             responders: vec![responder.clone()],
             cancelled: Arc::new(AtomicI64::new(0)),
+            refused: Arc::new(Mutex::new(None)),
             agent: None,
         });
     }
@@ -266,10 +292,21 @@ fn refuse(reason: PledgeReason) -> Ending {
     Ending::Refused(reason)
 }
 
-fn holder_sign(shared: &Shared, key: &KeyInfo, request: &Request) -> Option<String> {
+/// The blob an approval of `role` carries as its key: the certificate the site CA made for it when a broker
+/// is configured (a service holds one CA line and nothing else), else the plain key (stage 1: the service
+/// lists the person's two keys). `Err` if a broker is configured and no certificate is held yet: not signed.
+fn approval_key_blob(shared: &Shared, key: &KeyInfo, role: &str) -> Result<Vec<u8>, ()> {
+    if shared.approvals.config.broker.is_none() {
+        return Ok(key.blob.clone());
+    }
+    let line = shared.broker_state.certificate_for(role).ok_or(())?;
+    line.split_whitespace().nth(1).and_then(|b64| STANDARD.decode(b64).ok()).ok_or(())
+}
+
+fn holder_sign(shared: &Shared, key: &KeyInfo, carried: &[u8], request: &Request) -> Option<String> {
     let data = sshsig::signed_data(APPROVAL_NAMESPACE, request.as_bytes());
     let signature = shared.holder.lock().ok()?.sign(&key.blob, &data).ok()?;
-    Some(sshsig::armour(&key.blob, APPROVAL_NAMESPACE, &signature))
+    Some(sshsig::armour(carried, APPROVAL_NAMESPACE, &signature))
 }
 
 fn description(facts: &Facts, request: &Request) -> Description {
@@ -297,7 +334,14 @@ fn description(facts: &Facts, request: &Request) -> Description {
 }
 
 #[allow(clippy::too_many_lines)]
-fn process(shared: &Shared, submit: &Submit, hash: &str, cancelled: &Arc<AtomicI64>, facts: &mut Facts) -> Ending {
+fn process(
+    shared: &Shared,
+    submit: &Submit,
+    hash: &str,
+    cancelled: &Arc<AtomicI64>,
+    refused: &Arc<Mutex<Option<PledgeReason>>>,
+    facts: &mut Facts,
+) -> Ending {
     let approvals = &shared.approvals;
     let request = submit.request();
     let call = request.call();
@@ -319,8 +363,11 @@ fn process(shared: &Shared, submit: &Submit, hash: &str, cancelled: &Arc<AtomicI
     if approvals.config.person.as_deref() != Some(agent.person.as_str()) || delegation.person != agent.person {
         return refuse(PledgeReason::UnknownDelegation);
     }
-    if delegation.withdrawn.is_some() {
+    if delegation.withdrawn.is_some() || shared.broker_state.is_withdrawn(agent.delegation.as_str()) {
         return refuse(PledgeReason::DelegationWithdrawn);
+    }
+    if shared.broker_state.is_blocked() {
+        return refuse(PledgeReason::Blocked); // a passing condition: not kept
     }
     if now.unix() >= delegation.valid_until {
         return refuse(PledgeReason::DelegationEnded);
@@ -402,14 +449,27 @@ fn process(shared: &Shared, submit: &Submit, hash: &str, cancelled: &Arc<AtomicI
         Mode::Refuse => refuse(PledgeReason::Ceiling),
         Mode::Automatic => {
             let Some(key) = shared.key_with_purpose("automatic") else { return refuse(PledgeReason::Unavailable) };
+            if shared.broker_state.is_key_blocked(&key.fingerprint) {
+                return refuse(PledgeReason::Blocked);
+            }
+            let Ok(carried) = approval_key_blob(shared, &key, "automatic") else {
+                return refuse(PledgeReason::Unavailable);
+            };
             if !reserve() {
                 return refuse(PledgeReason::Unavailable);
             }
             facts.key = Some(("automatic", key.fingerprint.clone()));
-            holder_sign(shared, &key, request).map_or_else(|| refuse(PledgeReason::Unavailable), Ending::Approved)
+            holder_sign(shared, &key, &carried, request)
+                .map_or_else(|| refuse(PledgeReason::Unavailable), Ending::Approved)
         }
         Mode::Ask => {
             let Some(key) = shared.key_with_purpose("confirmed") else { return refuse(PledgeReason::Unavailable) };
+            if shared.broker_state.is_key_blocked(&key.fingerprint) {
+                return refuse(PledgeReason::Blocked);
+            }
+            let Ok(carried) = approval_key_blob(shared, &key, "confirmed") else {
+                return refuse(PledgeReason::Unavailable);
+            };
             // A request that waits is recorded when it arrives, before it is queued or shown: no record, no dialog.
             if shared.append(received_entry(hash, facts)).is_err() {
                 return refuse(PledgeReason::Unavailable);
@@ -432,7 +492,7 @@ fn process(shared: &Shared, submit: &Submit, hash: &str, cancelled: &Arc<AtomicI
                         return refuse(PledgeReason::Unavailable);
                     }
                     facts.key = Some(("confirmed", key.fingerprint.clone()));
-                    holder_sign(shared, &key, request)
+                    holder_sign(shared, &key, &carried, request)
                         .map_or_else(|| refuse(PledgeReason::Unavailable), Ending::Approved)
                 }
                 Dialog::Answer(false) => {
@@ -447,6 +507,10 @@ fn process(shared: &Shared, submit: &Submit, hash: &str, cancelled: &Arc<AtomicI
                     Ending::Declined
                 }
                 Dialog::Timeout => Ending::Expired,
+                Dialog::Cancelled if refused.lock().is_ok_and(|r| r.is_some()) => {
+                    // A block or a withdrawal arrived while it waited.
+                    refuse(refused.lock().ok().and_then(|r| *r).unwrap_or(PledgeReason::Blocked))
+                }
                 Dialog::Cancelled => {
                     // A submitter that goes away at or within 2 seconds before the deadline is a request
                     // that expired; earlier, one that was cancelled.
@@ -486,6 +550,7 @@ fn received_entry(hash: &str, facts: &Facts) -> Value {
         ("rating", facts.rating.map(|r| json!(RatingWords::of(r)))),
         ("mode", facts.mode.map(Value::from)),
         ("peer", facts.peer.as_ref().map(peer_json)),
+        ("via", facts.via_broker.then(|| Value::from("broker"))),
     ] {
         if let Some(value) = value {
             entry.insert(name.into(), value);
@@ -542,6 +607,7 @@ fn entry(hash: &str, ending: &Ending, facts: &Facts) -> Value {
         put("automatic_ceiling_clamped", Some(true.into()));
     }
     put("peer", facts.peer.as_ref().map(peer_json));
+    put("via", facts.via_broker.then(|| Value::from("broker")));
     Value::Object(entry)
 }
 
@@ -565,10 +631,10 @@ fn finish(shared: &Shared, hash: DocumentHash, mut ending: Ending, facts: Facts)
     };
     if let Some(stored) = stored {
         let expires = expiry(now, facts.deadline);
-        if expires > now {
-            if let Err(e) = approvals.answers.keep(&key, stored, expires) {
-                eprintln!("pledge: the answer could not be stored: {e}");
-            }
+        if expires > now
+            && let Err(e) = approvals.answers.keep(&key, stored, expires)
+        {
+            eprintln!("pledge: the answer could not be stored: {e}");
         }
     }
     let responders = approvals
