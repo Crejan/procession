@@ -336,7 +336,8 @@ fn connection(stream: UnixStream, plan: &Plan, events: &Mutex<Vec<String>>, host
         }
         Plan::OverOther(path) => {
             let other =
-                p_act::Request::compose(submit.request().call(), submit.request().call_sig(), Rating::WORST).unwrap();
+                p_act::Request::compose(submit.request().call(), submit.request().call_sig(), Rating::WORST, false)
+                    .unwrap();
             answer(&stream, hash, Answered::Approved(approve(path, &other)), POLICY);
         }
         Plan::Decline => answer(&stream, hash, Answered::Declined, POLICY),
@@ -355,7 +356,8 @@ fn connection(stream: UnixStream, plan: &Plan, events: &Mutex<Vec<String>>, host
         }
         Plan::Foreign { key, then_own } => {
             let other =
-                p_act::Request::compose(submit.request().call(), submit.request().call_sig(), Rating::WORST).unwrap();
+                p_act::Request::compose(submit.request().call(), submit.request().call_sig(), Rating::WORST, false)
+                    .unwrap();
             answer(&stream, other.hash(), Answered::Approved(approve(key, &other)), POLICY);
             if *then_own {
                 std::thread::sleep(Duration::from_millis(200));
@@ -364,7 +366,8 @@ fn connection(stream: UnixStream, plan: &Plan, events: &Mutex<Vec<String>>, host
         }
         Plan::ApproveWithClearance(path) => {
             let signed = sign_approval(&Signer::plain(path), submit.request()).unwrap();
-            let clearance = Clearance::compose(hash, Timestamp::now().unwrap()).unwrap();
+            let clearance =
+                Clearance::compose(hash, p_act::clearance::approval_hash(&signed), Timestamp::now().unwrap()).unwrap();
             let with = Approved::new(&signed, Some(ClearanceAnswer::new(clearance, &signed).unwrap())).unwrap();
             answer(&stream, hash, Answered::Approved(with), ClearancePolicy::Required);
         }

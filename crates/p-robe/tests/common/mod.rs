@@ -443,7 +443,16 @@ pub fn told(result: &Value) -> Told {
         outcome: line["outcome"].as_str().unwrap().to_owned(),
         reason: line["reason"].as_str().map(str::to_owned),
         rc: line["rc"].as_i64(),
-        rest: texts[1..].iter().map(|t| (*t).to_owned()).collect(),
+        // `pact` frames the records in `structuredContent`; the text blocks after the outcome line are only for a
+        // service that answers in the older text shape.
+        rest: match result["structuredContent"]["records"].as_array() {
+            // One block, the records as lines, as the text shape had them.
+            Some(records) if !records.is_empty() => {
+                vec![records.iter().map(Value::to_string).collect::<Vec<_>>().join("\n")]
+            }
+            Some(_) => Vec::new(),
+            None => texts[1..].iter().map(|t| (*t).to_owned()).collect(),
+        },
     }
 }
 
@@ -456,7 +465,11 @@ pub fn request_of(sent: &Value, rating: Rating) -> Request {
     let meta = &sent["params"]["_meta"];
     let call_bytes = STANDARD.decode(meta["procession/call"].as_str().unwrap()).unwrap();
     let call_sig = signature_from_base64(meta["procession/call_sig"].as_str().unwrap()).unwrap();
-    Request::compose(&Call::parse(call_bytes).unwrap(), &call_sig, rating).unwrap()
+    let call = Call::parse(call_bytes).unwrap();
+    // The row's own mark, as the service signs it.
+    let (noun, verb) = call.action().split_once(' ').unwrap();
+    let host_text = p_robe::table::find(noun, verb).is_some_and(|row| row.host_text);
+    Request::compose(&call, &call_sig, rating, host_text).unwrap()
 }
 
 /// Submits `request` on `service.sock` as the service would, and returns pledge's answer.
