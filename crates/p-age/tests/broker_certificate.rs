@@ -83,6 +83,8 @@ async fn each_way_a_certificate_can_be_wrong_is_a_broker_without_a_certificate_a
     recheck(&w).await;
     assert_eq!(status(&w).await.failure, Some("missing"));
     std::fs::write(cert_file(&w), saved).unwrap();
+    // (whatever the umask: a certificate file others can write is refused, like any file of the settings rule)
+    std::fs::set_permissions(cert_file(&w), std::fs::Permissions::from_mode(0o644)).unwrap();
     recheck(&w).await;
     assert!(status(&w).await.valid);
 }
