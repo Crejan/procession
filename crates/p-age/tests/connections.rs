@@ -141,7 +141,12 @@ async fn the_first_message_says_which_exchange_this_is() {
     assert_eq!(c.recv().await["error"], "malformed-line");
     let mut c = open_service(&w);
     c.send_json(serde_json::json!({"schema_version":2,"type":"hello"})).await;
-    assert_eq!(c.recv().await["error"], "malformed-line", "nothing more is said than that this is no beginning");
+    assert_eq!(c.recv().await["error"], "unsupported-version", "a well-formed hello of a version not spoken");
+    c.expect_closed().await;
+    let mut c = open_service(&w);
+    c.send_json(serde_json::json!({"schema_version":2,"type":"submit","request":"","request_sig":""})).await;
+    assert_eq!(c.recv().await["error"], "unsupported-version");
+    c.expect_closed().await;
     // a line that is not JSON
     let mut c = open_service(&w);
     c.send(b"hello\n").await;
@@ -816,4 +821,46 @@ async fn a_hello_after_the_first_message_is_an_unexpected_message() {
     assert_eq!(pledge.recv_type().await, "submit");
     assert_eq!(pledge.recv().await["error"], "unknown-type");
     pledge.expect_closed().await;
+}
+
+#[tokio::test]
+async fn a_withdrawal_of_an_unknown_delegation_and_of_another_persons_cannot_be_told_apart() {
+    let w = World::new();
+    let mut jan = open_pledge(&w).await;
+    jan.connect_as("jan", &w.jan_connection).await;
+    register(&w, &mut jan).await;
+    let mut eva = open_pledge(&w).await;
+    eva.connect_as("eva", &w.eva_connection).await;
+    let jans = p_act::sign::agent_certificate(&w.keys.cert_line(&w.agent)).unwrap().delegation.to_string();
+    let unknown = "SHA256:ZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZ".to_owned();
+    let before = std::fs::read(&w.state).unwrap();
+    let mtime = std::fs::metadata(&w.state).unwrap().modified().unwrap();
+    let locked = lock_state_dir(&w); // a write attempt would now fail and make the broker degraded
+
+    let ask = |fp: &str| serde_json::json!({"schema_version":1,"type":"withdraw","delegation":fp});
+    eva.send(&[serde_json::to_vec(&ask(&jans)).unwrap(), b"\n".to_vec()].concat()).await;
+    let foreign = eva.recv_raw().await.unwrap();
+    eva.send(&[serde_json::to_vec(&ask(&unknown)).unwrap(), b"\n".to_vec()].concat()).await;
+    let none = eva.recv_raw().await.unwrap();
+    // the same bytes but for the identifier asked about
+    let shape = |line: &[u8], fp: &str| String::from_utf8(line.to_vec()).unwrap().replace(fp, "<fp>");
+    assert_eq!(shape(&foreign, &jans), shape(&none, &unknown));
+    assert_eq!(
+        shape(&none, &unknown),
+        "{\"delegation\":\"<fp>\",\"schema_version\":1,\"stored\":true,\"type\":\"withdrawn\"}\n"
+    );
+    // neither wrote anything: the register is as it was, and (if a write could have failed) not degraded
+    if locked {
+        assert_eq!(w.broker.degraded(), None);
+    }
+    unlock_state_dir(&w);
+    assert_eq!(std::fs::read(&w.state).unwrap(), before);
+    assert_eq!(std::fs::metadata(&w.state).unwrap().modified().unwrap(), mtime);
+    // jan's delegation is untouched: a request under it is still held for jan's pledge
+    let mut s = open_service(&w);
+    s.send(&submit_line(&w.submit(1, 120))).await;
+    assert_eq!(jan.recv_type().await, "submit");
+    // and the administrator can see the foreign one, and only that one
+    let log: Vec<_> = w.log.entries().into_iter().map(|e| (e.result, e.person, e.delegation)).collect();
+    assert_eq!(log, [("foreign-withdrawal".to_owned(), Some("eva".to_owned()), Some(jans))]);
 }

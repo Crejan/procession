@@ -150,7 +150,11 @@ pub fn first_kind(line: &[u8]) -> First {
         // p-act's parse is the one rule for what a `hello` is.
         Ok("hello") => match exchange(line) {
             Ok(Message::Hello) => First::Pledge,
-            // Nothing more is said than that this is not a beginning.
+            // A well-formed `hello` of a version the broker does not speak: that, and nothing more.
+            Err(ParseFailure::Close(Some(ErrorCode::UnsupportedVersion))) => {
+                First::Refuse(ErrorCode::UnsupportedVersion)
+            }
+            // Anything else is no beginning; nothing more is said than that.
             _ => First::Refuse(ErrorCode::MalformedLine),
         },
         _ => First::Refuse(ErrorCode::MalformedLine),

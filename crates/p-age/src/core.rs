@@ -303,7 +303,21 @@ impl Core {
             host: h.host.clone(),
             service: h.service.clone(),
             person: h.person.clone(),
-            request: h.hash,
+            request: Some(h.hash),
+            delegation: None,
+            result: result.to_owned(),
+        });
+    }
+
+    /// An entry about a delegation, for the administrator: what a pledge did that an honest one does not.
+    fn log_delegation(&mut self, now: SystemTime, person: &str, delegation: &Fingerprint, result: &str) {
+        self.log.write(&LogEntry {
+            at: stamp(now),
+            host: "-".to_owned(),
+            service: "-".to_owned(),
+            person: Some(person.to_owned()),
+            request: None,
+            delegation: Some(delegation.to_string()),
             result: result.to_owned(),
         });
     }
@@ -608,12 +622,16 @@ impl Core {
     /// The person withdraws one of their own delegations. Requests waiting under it are refused. The answer says
     /// whether the withdrawal is stored; a repeated one changes nothing and is answered with the current truth
     /// (the write is tried again). A delegation the broker does not know has nothing to stop: answered `stored`.
-    /// Another person's delegation is not answered at all.
+    /// Another person's is answered **exactly alike**, so that the answer cannot tell the two apart, and nothing
+    /// changes (no write is attempted); it is logged for the administrator, since an honest pledge never sends one.
     pub fn withdraw(&mut self, person: &str, conn: ConnId, delegation: &Fingerprint, now: SystemTime) -> Vec<Effect> {
         let answer = |stored| Effect::Pledge(conn, PledgeOut::Withdrawn(delegation.clone(), stored));
         match self.register.person_of(delegation.as_str()) {
             None => return vec![answer(true)],
-            Some(owner) if owner != person => return Vec::new(),
+            Some(owner) if owner != person => {
+                self.log_delegation(now, person, delegation, "foreign-withdrawal");
+                return vec![answer(true)];
+            }
             Some(_) => {}
         }
         self.register.withdraw(delegation.as_str());
