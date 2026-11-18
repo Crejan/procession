@@ -24,8 +24,9 @@ use std::time::{Duration, Instant};
 
 use p_act::Document;
 use p_act::broker::{ConnectionDocument, FromPledge, NotRegisteredReason, Secret32, Signed, Standing, ToPledge};
+use p_act::broker::{TLS_EXPORTER_CONTEXT, TLS_EXPORTER_LABEL, TLS_EXPORTER_LENGTH};
 use p_act::exchange::{Answer, ClearancePolicy, ExchangeError, LineBuffer, Message, PledgeReason};
-use p_act::limits::{PING_INTERVAL_SECONDS, SIGNIN_SECONDS, TLS_EXPORTER_LABEL};
+use p_act::limits::{PING_INTERVAL_SECONDS, SIGNIN_SECONDS};
 use p_act::sign::{Fingerprint, Namespace, PublicKey};
 use rustls::pki_types::{CertificateDer, ServerName};
 use rustls::{ClientConfig, ClientConnection, RootCertStore, StreamOwned};
@@ -146,10 +147,10 @@ impl<W: Wire> TlsTransport<W> {
 
 impl<W: Wire> Transport for TlsTransport<W> {
     fn binding(&mut self) -> io::Result<Secret32> {
-        let mut out = [0_u8; 32];
+        let mut out = [0_u8; TLS_EXPORTER_LENGTH];
         self.stream
             .conn
-            .export_keying_material(&mut out, TLS_EXPORTER_LABEL.as_bytes(), None)
+            .export_keying_material(&mut out, TLS_EXPORTER_LABEL, TLS_EXPORTER_CONTEXT)
             .map_err(io::Error::other)?;
         Ok(out)
     }
