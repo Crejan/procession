@@ -393,11 +393,10 @@ pub fn tool_result(outcome: &Outcome, call_id: &str) -> Value {
     })
 }
 
-/// Whether the records are also in the text blocks of a result (one block, the lines). The design: structured
-/// content carries them and the text block only the outcome line with the counts. `pact` (p-act) reads text blocks
-/// only until its change lands, so they stay until then; **set this to `false` when `pact` reads
-/// `structuredContent`**.
-pub const RECORDS_IN_TEXT: bool = true;
+/// Whether the records are also in the text blocks of a result. They are not: structured content carries them,
+/// and the text block only the outcome line with the counts. (`pact` reads `structuredContent`, and frames the
+/// records itself; the text shape would be escaped by it as a whole.)
+pub const RECORDS_IN_TEXT: bool = false;
 
 /// One line of text, no control character, the worst-case rating first.
 fn description(row: &Verb) -> String {
@@ -520,7 +519,8 @@ mod tests {
             done["structuredContent"],
             json!({"outcome": "done", "rc": 0, "id": "i", "records": [{"type": "header"}], "escaped_records": 0, "clipped_records": 0})
         );
-        assert_eq!(done["content"][1]["text"], "{\"type\":\"header\"}");
+        // The records are in the structured content only; the text is the outcome line and the counts.
+        assert_eq!(done["content"].as_array().unwrap().len(), 1);
         let refused = tool_result(&Outcome::Refused(crate::outcome::Why::TryLater), "i");
         assert_eq!(refused["isError"], true);
         assert_eq!(
