@@ -7,88 +7,14 @@
   "cost": "light",
   "unreadable": [],
   "records": [
-    {
-      "type": "grub_assignment",
-      "file": "/etc/default/grub",
-      "key": "GRUB_CMDLINE_LINUX_DEFAULT",
-      "value": "quiet"
-    },
-    {
-      "type": "grub_assignment",
-      "file": "/etc/default/grub",
-      "key": "GRUB_CMDLINE_LINUX",
-      "value": "isolcpus=managed_irq,domain,2-3 nohz_full=2-3 rcu_nocbs=2-3 irqaffinity=0-1"
-    },
-    {
-      "type": "grub_assignment",
-      "file": "/etc/default/grub.d/50-rt.cfg",
-      "key": "GRUB_CMDLINE_LINUX",
-      "value": "isolcpus=managed_irq,domain,2-3 nohz_full=2-3 rcu_nocbs=2-3 irqaffinity=0-1 threadirqs skew_tick=1"
-    },
-    {
-      "type": "live",
-      "cmdline": "BOOT_IMAGE=/vmlinuz-6.8.0-rt root=/dev/sda1 ro isolcpus=managed_irq,domain,2-3 nohz_full=2-3 rcu_nocbs=2-3 irqaffinity=0-1 quiet console=ttyS0,115200",
-      "rt": {
-        "isolcpus": "managed_irq,domain,2-3",
-        "nohz_full": "2-3",
-        "rcu_nocbs": "2-3",
-        "irqaffinity": "0-1",
-        "console": "ttyS0,115200"
-      }
-    },
-    {
-      "type": "declared",
-      "source": "grub",
-      "files": [
-        "/etc/default/grub",
-        "/etc/default/grub.d/50-rt.cfg"
-      ],
-      "cmdline": "isolcpus=managed_irq,domain,2-3 nohz_full=2-3 rcu_nocbs=2-3 irqaffinity=0-1 threadirqs skew_tick=1 quiet",
-      "rt": {
-        "isolcpus": "managed_irq,domain,2-3",
-        "nohz_full": "2-3",
-        "rcu_nocbs": "2-3",
-        "irqaffinity": "0-1",
-        "threadirqs": true,
-        "skew_tick": "1"
-      }
-    },
-    {
-      "type": "diff",
-      "declared_not_live": [
-        "threadirqs",
-        "skew_tick=1"
-      ],
-      "live_not_declared": [
-        "console=ttyS0,115200"
-      ],
-      "rt_value_differs": [],
-      "in_sync": false,
-      "isolated_live": "2-3",
-      "isolated_declared": "2-3"
-    },
-    {
-      "type": "kernel",
-      "release": "6.8.0-rt",
-      "version": "#1 SMP PREEMPT_RT Mon Oct 6 2025",
-      "preempt_rt": true
-    },
-    {
-      "type": "sysctl",
-      "values": {
-        "kernel.hung_task_timeout_secs": "0",
-        "kernel.nmi_watchdog": "1",
-        "kernel.perf_event_paranoid": "2",
-        "kernel.sched_rt_runtime_us": "-1",
-        "kernel.soft_watchdog": "0",
-        "kernel.timer_migration": "0",
-        "kernel.watchdog": "1",
-        "kernel.watchdog_cpumask": "0-1",
-        "net.core.busy_poll": "0",
-        "net.core.busy_read": null,
-        "vm.stat_interval": "100"
-      }
-    }
+    {"type":"grub_assignment","file":"/etc/default/grub","key":"GRUB_CMDLINE_LINUX_DEFAULT","value":"quiet"},
+    {"type":"grub_assignment","file":"/etc/default/grub","key":"GRUB_CMDLINE_LINUX","value":"isolcpus=managed_irq,domain,2-3 nohz_full=2-3 rcu_nocbs=2-3 irqaffinity=0-1"},
+    {"type":"grub_assignment","file":"/etc/default/grub.d/50-rt.cfg","key":"GRUB_CMDLINE_LINUX","value":"isolcpus=managed_irq,domain,2-3 nohz_full=2-3 rcu_nocbs=2-3 irqaffinity=0-1 threadirqs skew_tick=1"},
+    {"type":"live","cmdline":"BOOT_IMAGE=/vmlinuz-6.8.0-rt root=/dev/sda1 ro isolcpus=managed_irq,domain,2-3 nohz_full=2-3 rcu_nocbs=2-3 irqaffinity=0-1 quiet console=ttyS0,115200","rt":{"console":"ttyS0,115200","irqaffinity":"0-1","isolcpus":"managed_irq,domain,2-3","nohz_full":"2-3","rcu_nocbs":"2-3"}},
+    {"type":"declared","source":"grub","files":["/etc/default/grub","/etc/default/grub.d/50-rt.cfg"],"cmdline":"isolcpus=managed_irq,domain,2-3 nohz_full=2-3 rcu_nocbs=2-3 irqaffinity=0-1 threadirqs skew_tick=1 quiet","rt":{"irqaffinity":"0-1","isolcpus":"managed_irq,domain,2-3","nohz_full":"2-3","rcu_nocbs":"2-3","skew_tick":"1","threadirqs":true}},
+    {"type":"diff","declared_not_live":["threadirqs","skew_tick=1"],"live_not_declared":["console=ttyS0,115200"],"rt_value_differs":[],"in_sync":false,"isolated_live":"2-3","isolated_declared":"2-3"},
+    {"type":"kernel","release":"6.8.0-rt","version":"#1 SMP PREEMPT_RT Mon Oct 6 2025","preempt_rt":true},
+    {"type":"sysctl","values":{"kernel.hung_task_timeout_secs":"0","kernel.nmi_watchdog":"1","kernel.perf_event_paranoid":"2","kernel.sched_rt_runtime_us":"-1","kernel.soft_watchdog":"0","kernel.timer_migration":"0","kernel.watchdog":"1","kernel.watchdog_cpumask":"0-1","net.core.busy_poll":"0","net.core.busy_read":null,"vm.stat_interval":"100"}}
   ],
   "restored": [],
   "findings": [

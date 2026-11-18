@@ -2,6 +2,7 @@
 //! subcommand, each taking an [`Env`] (roots, config, clock) and returning a
 //! [`Report`]; the `prover` binary only parses arguments and prints.
 
+pub mod analyze;
 pub mod config;
 pub mod env;
 pub mod error;
@@ -14,5 +15,5 @@ pub mod runner;
 pub use config::Config;
 pub use env::{Clock, Env, FakeClock, SystemClock};
 pub use error::Error;
-pub use runner::Runner;
 pub use report::{Cost, Finding, Metric, Report, Severity, Subject};
+pub use runner::Runner;

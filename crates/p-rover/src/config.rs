@@ -123,7 +123,10 @@ mod tests {
         let c = load("").unwrap();
         assert!(c.fieldbus_interfaces.is_empty());
         assert_eq!(c.probe.ledger_dir, PathBuf::from("/run/p-rover/probe"));
-        let c = load("fieldbus_interfaces=[\"lab*\"]\n[irq]\nexpected={\"lan0-TxRx-*\"=\"4-7\"}\n[probe.jitter]\npriority=80\n").unwrap();
+        let c = load(
+            "fieldbus_interfaces=[\"lab*\"]\n[irq]\nexpected={\"lan0-TxRx-*\"=\"4-7\"}\n[probe.jitter]\npriority=80\n",
+        )
+        .unwrap();
         let e = c.irq_expectations().unwrap();
         assert!(e[0].matches("lan0-TxRx-3") && !e[0].matches("lan1-TxRx-3"));
         assert_eq!(e[0].cpus.to_string(), "4-7");

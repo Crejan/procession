@@ -24,7 +24,7 @@ pub fn text(r: &Report) -> String {
     for u in &r.unreadable {
         let _ = writeln!(o, "unreadable {}: {}", u.source, u.reason);
     }
-    for rec in &r.records {
+    for rec in &r.values {
         let Some(obj) = rec.as_object() else { continue };
         let kind = obj.get("type").and_then(Value::as_str).unwrap_or("record");
         let _ = write!(o, "{kind}");

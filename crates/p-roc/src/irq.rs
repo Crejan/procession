@@ -43,7 +43,8 @@ impl Interrupts {
 }
 
 fn looks_like_hwirq(t: &str) -> bool {
-    t.split_once('-').is_some_and(|(n, kind)| !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit()) && !kind.is_empty())
+    t.split_once('-')
+        .is_some_and(|(n, kind)| !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit()) && !kind.is_empty())
 }
 
 /// Parses `/proc/interrupts`.
@@ -90,10 +91,7 @@ pub fn read_interrupts(root: &Root) -> Result<Interrupts, Error> {
 /// `(cpu, delta)`; a counter that went backwards counts as zero.
 #[must_use]
 pub fn delta(cpus: &[u32], before: &Row, after: &Row) -> Vec<(u32, u64)> {
-    cpus.iter()
-        .zip(before.counts.iter().zip(&after.counts))
-        .map(|(c, (b, a))| (*c, a.saturating_sub(*b)))
-        .collect()
+    cpus.iter().zip(before.counts.iter().zip(&after.counts)).map(|(c, (b, a))| (*c, a.saturating_sub(*b))).collect()
 }
 
 /// One IRQ under `/proc/irq/<n>`.
@@ -111,9 +109,9 @@ pub struct Irq {
 
 fn cpu_file(path: &std::path::Path) -> Result<Option<CpuSet>, Error> {
     match fs::read_to_string(path) {
-        Ok(s) => CpuSet::parse_list(&s)
-            .map(Some)
-            .map_err(|source| Error::Cpus { what: path.display().to_string(), source }),
+        Ok(s) => {
+            CpuSet::parse_list(&s).map(Some).map_err(|source| Error::Cpus { what: path.display().to_string(), source })
+        }
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
         Err(e) => Err(Error::io(path, e)),
     }

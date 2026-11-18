@@ -5,8 +5,8 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use p_rover::{Config, Env, FakeClock, Report};
 use p_roc::Root;
+use p_rover::{Config, Env, FakeClock, Report};
 use tempfile::TempDir;
 
 pub fn fixtures() -> PathBuf {
@@ -58,6 +58,7 @@ impl Host {
             clock: Box::new(FakeClock::new(1_794_000_000, on_pause)),
             ethtool: Box::new(p_rover::ethtool::Fixed::default()),
             runner: Box::new(p_rover::runner::Scripted::default()),
+            arch: "x86_64",
         }
     }
 }
@@ -72,6 +73,7 @@ pub fn golden(name: &str, report: &Report) {
         fs::write(&path, &got).unwrap();
         return;
     }
-    let want = fs::read_to_string(&path).unwrap_or_else(|_| panic!("missing golden {}; run with UPDATE_GOLDEN=1", path.display()));
+    let want = fs::read_to_string(&path)
+        .unwrap_or_else(|_| panic!("missing golden {}; run with UPDATE_GOLDEN=1", path.display()));
     assert_eq!(got, want, "golden {name} differs; rerun with UPDATE_GOLDEN=1 to accept");
 }

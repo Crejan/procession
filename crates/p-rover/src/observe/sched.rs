@@ -3,8 +3,8 @@
 use std::collections::BTreeMap;
 use std::time::Duration;
 
-use p_roc::{CpuSet, Policy, task};
 use p_roc::Unreadable;
+use p_roc::{CpuSet, Policy, task};
 use serde::Serialize;
 
 use crate::env::Env;

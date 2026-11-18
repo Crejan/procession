@@ -28,7 +28,7 @@ fn managed_irq_that_did_not_move_is_not_flagged() {
     let host = Host::new("host1");
     let report = run_with_delta(&host, &Args::default()).unwrap();
     // nvme0q1 (127): effective on isolated CPU 3 but its count never moved.
-    let nvme = report.records.iter().find(|r| r["irq"] == 127);
+    let nvme = report.values.iter().find(|r| r["irq"] == 127);
     assert!(nvme.is_none(), "an idle unflagged IRQ is not listed: {nvme:?}");
 }
 

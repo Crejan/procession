@@ -7,11 +7,13 @@
 
 pub mod change;
 pub mod cmdline;
-pub mod cpuset;
 pub mod cpus;
+pub mod cpuset;
 pub mod error;
+pub mod fd;
 pub mod irq;
 pub mod net;
+pub mod pci;
 pub mod root;
 pub mod sys;
 pub mod task;

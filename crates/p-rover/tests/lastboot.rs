@@ -58,7 +58,12 @@ fn no_journalctl_or_no_persistent_journal_is_unreadable_not_a_verdict() {
     assert!(report.unreadable.iter().any(|u| u.source == "journalctl"));
     let (a, b, c) = journal("-1");
     let mut env = host.env(|_| {});
-    env.runner = Box::new(Scripted::default().answer(&a, "").fail(&b, 1, "Specifying boot ID has no effect, no persistent journal was found.").fail(&c, 1, "no persistent journal"));
+    env.runner = Box::new(
+        Scripted::default()
+            .answer(&a, "")
+            .fail(&b, 1, "Specifying boot ID has no effect, no persistent journal was found.")
+            .fail(&c, 1, "no persistent journal"),
+    );
     let report = lastboot::run(&env, &Args::default()).unwrap();
     assert!(report.findings.is_empty());
     assert_eq!(report.unreadable.len(), 2);

@@ -14,7 +14,8 @@ use crate::report::{Cost, Finding, Metric, Report, Severity, Subject};
 use crate::runner::Output;
 
 /// What `journalctl --grep` filters the kernel log for.
-pub const PATTERN: &str = "rcu|watchdog|stall|hung|blocked for more|oom|lockup|panic|BUG:|Oops|NMI|Call Trace|thermal|throttl";
+pub const PATTERN: &str =
+    "rcu|watchdog|stall|hung|blocked for more|oom|lockup|panic|BUG:|Oops|NMI|Call Trace|thermal|throttl";
 /// Matching lines kept.
 pub const LOG_LINES: usize = 120;
 /// Last lines of the boot kept, to see how it ended.
@@ -37,11 +38,27 @@ impl Default for Args {
 #[derive(Serialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 enum Record {
-    Boots { known: usize, last: Vec<String> },
-    Detectors { values: BTreeMap<String, Option<String>>, nosoftlockup_on_cmdline: bool, nmi_watchdog_cmdline: Option<String> },
-    KernelLog { source: String, lines: Vec<String> },
-    Signature { categories: BTreeMap<&'static str, usize> },
-    BootTail { source: String, lines: Vec<String>, ends_in_orderly_shutdown: bool },
+    Boots {
+        known: usize,
+        last: Vec<String>,
+    },
+    Detectors {
+        values: BTreeMap<String, Option<String>>,
+        nosoftlockup_on_cmdline: bool,
+        nmi_watchdog_cmdline: Option<String>,
+    },
+    KernelLog {
+        source: String,
+        lines: Vec<String>,
+    },
+    Signature {
+        categories: BTreeMap<&'static str, usize>,
+    },
+    BootTail {
+        source: String,
+        lines: Vec<String>,
+        ends_in_orderly_shutdown: bool,
+    },
 }
 
 /// The category of a kernel log line that matters to a freeze, if any.
@@ -98,7 +115,8 @@ pub fn run(env: &Env, args: &Args) -> Result<Report, Error> {
     let journal = |report: &mut Report, what: &str, a: &[&str]| match env.runner.run("journalctl", a, JOURNAL_TIMEOUT) {
         Ok(o) if o.code == Some(0) || (o.code == Some(1) && o.stderr.trim().is_empty()) => Some(o),
         Ok(o) => {
-            report.unreadable([Unreadable { source: format!("journalctl {what}"), reason: o.stderr.trim().to_string() }]);
+            report
+                .unreadable([Unreadable { source: format!("journalctl {what}"), reason: o.stderr.trim().to_string() }]);
             None
         }
         Err(e) => {
@@ -112,7 +130,8 @@ pub fn run(env: &Env, args: &Args) -> Result<Report, Error> {
         report.push(&Record::Boots { known: all.len(), last: all[all.len().saturating_sub(4)..].to_vec() });
     }
 
-    let sysctl = |n: &str| std::fs::read_to_string(env.root.proc.join("sys/kernel").join(n)).ok().map(|s| s.trim().to_string());
+    let sysctl =
+        |n: &str| std::fs::read_to_string(env.root.proc.join("sys/kernel").join(n)).ok().map(|s| s.trim().to_string());
     let cmd = Cmdline::read(&env.root).unwrap_or_default();
     report.push(&Record::Detectors {
         values: ["nmi_watchdog", "soft_watchdog", "watchdog", "hung_task_timeout_secs", "panic"]
@@ -124,7 +143,11 @@ pub fn run(env: &Env, args: &Args) -> Result<Report, Error> {
     });
 
     let n = LOG_LINES.to_string();
-    let kernel = journal(&mut report, "-k --grep", &["-b", boot, "-k", "--no-pager", "-o", "short-iso", "--grep", PATTERN, "-n", &n]);
+    let kernel = journal(
+        &mut report,
+        "-k --grep",
+        &["-b", boot, "-k", "--no-pager", "-o", "short-iso", "--grep", PATTERN, "-n", &n],
+    );
     let mut categories: BTreeMap<&'static str, usize> = BTreeMap::new();
     if let Some(o) = kernel {
         let l = lines(&o);
@@ -141,7 +164,10 @@ pub fn run(env: &Env, args: &Args) -> Result<Report, Error> {
     if let Some(o) = tail {
         let l = lines(&o);
         if l.is_empty() {
-            report.unreadable([Unreadable { source: format!("journalctl -b {boot}"), reason: "no entries for that boot".into() }]);
+            report.unreadable([Unreadable {
+                source: format!("journalctl -b {boot}"),
+                reason: "no entries for that boot".into(),
+            }]);
         } else {
             clean = Some(orderly(&l));
             report.push(&Record::BootTail {

@@ -20,11 +20,33 @@ const CHRONYC_TIMEOUT: Duration = Duration::from_secs(10);
 #[derive(Serialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 enum Record {
-    ChronyTracking { fields: BTreeMap<String, String> },
-    ChronySource { state: String, source: String, stratum: String, poll: String, reach: String, last_rx: String, offset: String },
-    Service { name: String, disciplines_realtime: bool, pids: Vec<i32>, cmdlines: Vec<String> },
-    PtpClock { name: String, device: bool, clock_name: Option<String> },
-    Summary { disciplining: Vec<String>, conflict: bool },
+    ChronyTracking {
+        fields: BTreeMap<String, String>,
+    },
+    ChronySource {
+        state: String,
+        source: String,
+        stratum: String,
+        poll: String,
+        reach: String,
+        last_rx: String,
+        offset: String,
+    },
+    Service {
+        name: String,
+        disciplines_realtime: bool,
+        pids: Vec<i32>,
+        cmdlines: Vec<String>,
+    },
+    PtpClock {
+        name: String,
+        device: bool,
+        clock_name: Option<String>,
+    },
+    Summary {
+        disciplining: Vec<String>,
+        conflict: bool,
+    },
 }
 
 /// `Reference ID    : A9FEA97B (x)` to `("reference_id", "A9FEA97B (x)")`.
@@ -71,7 +93,9 @@ pub fn run(env: &Env) -> Result<Report, Error> {
                 Err(e) => report.unreadable([Unreadable::new("chronyc sources", &e)]),
             }
         }
-        Ok(o) => report.unreadable([Unreadable { source: "chronyc tracking".into(), reason: o.stderr.trim().to_string() }]),
+        Ok(o) => {
+            report.unreadable([Unreadable { source: "chronyc tracking".into(), reason: o.stderr.trim().to_string() }])
+        }
         Err(e) => report.unreadable([Unreadable::new("chronyc", &e)]),
     }
 
@@ -113,7 +137,9 @@ pub fn run(env: &Env) -> Result<Report, Error> {
             severity: Severity::Warn,
             subject: Subject::Host,
             evidence: vec![Metric::new("disciplining", &disciplining)],
-            recommendation: "two services steer CLOCK_REALTIME at once and fight each other; one of them must be the only writer".into(),
+            recommendation:
+                "two services steer CLOCK_REALTIME at once and fight each other; one of them must be the only writer"
+                    .into(),
             changes: Vec::new(),
         });
     }
@@ -128,10 +154,14 @@ mod tests {
 
     #[test]
     fn tracking_and_sources() {
-        let t = parse_tracking("Reference ID    : A9FEA97B (169.254.169.123)\nStratum         : 4\nSystem time     : 0.000012 seconds fast of NTP time\n");
+        let t = parse_tracking(
+            "Reference ID    : A9FEA97B (169.254.169.123)\nStratum         : 4\nSystem time     : 0.000012 seconds fast of NTP time\n",
+        );
         assert_eq!(t["reference_id"], "A9FEA97B (169.254.169.123)");
         assert_eq!(t["stratum"], "4");
-        let s = parse_sources("MS Name/IP address         Stratum Poll Reach LastRx Last sample\n===\n^* 10.0.0.1  2   6   377    33  +12us[  +15us] +/-  1ms\n");
+        let s = parse_sources(
+            "MS Name/IP address         Stratum Poll Reach LastRx Last sample\n===\n^* 10.0.0.1  2   6   377    33  +12us[  +15us] +/-  1ms\n",
+        );
         assert_eq!(s.len(), 1);
     }
 }

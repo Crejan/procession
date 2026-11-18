@@ -8,12 +8,12 @@ fn serial_ports_console_and_getty() {
     let host = Host::new("host1");
     let report = serial::run(&host.env(|_| {})).unwrap();
     golden("serial", &report);
-    let port = report.records.iter().find(|r| r["type"] == "port").unwrap();
+    let port = report.values.iter().find(|r| r["type"] == "port").unwrap();
     assert_eq!((port["tty_s"].as_u64(), port["rx"].as_u64(), port["irq"].as_u64()), (Some(0), Some(3456), Some(4)));
     assert_eq!(port["errors"]["oe"], 2);
-    let getty = report.records.iter().find(|r| r["type"] == "getty").unwrap();
+    let getty = report.values.iter().find(|r| r["type"] == "getty").unwrap();
     assert_eq!(getty["tty"], "ttyS0");
-    let sysfs = report.records.iter().find(|r| r["type"] == "sysfs").unwrap();
+    let sysfs = report.values.iter().find(|r| r["type"] == "sysfs").unwrap();
     assert_eq!(sysfs["pci"], "0000:00:16.3");
 }
 

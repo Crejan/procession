@@ -61,7 +61,8 @@ pub fn finish(env: &Env, report: &mut Report) {
             severity: Severity::Warn,
             subject: Subject::Host,
             evidence: vec![Metric::new("ledgers", &stale), Metric::new("ledger_dir", dir.display().to_string())],
-            recommendation: "a probe left knobs changed; run `prover probe status`, then `prover probe restore --all`".into(),
+            recommendation: "a probe left knobs changed; run `prover probe status`, then `prover probe restore --all`"
+                .into(),
             changes: Vec::new(),
         });
     }

@@ -13,8 +13,12 @@ use crate::report::{Cost, Report};
 #[derive(Serialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 enum Record {
-    Cmdline { console: Vec<String> },
-    ActiveConsole { ttys: Vec<String> },
+    Cmdline {
+        console: Vec<String>,
+    },
+    ActiveConsole {
+        ttys: Vec<String>,
+    },
     Port {
         tty_s: u32,
         uart: String,
@@ -25,8 +29,18 @@ enum Record {
         modem_lines: Vec<String>,
         errors: std::collections::BTreeMap<String, u64>,
     },
-    Sysfs { tty: String, pci: Option<String>, port: Option<String>, irq: Option<String>, kind: Option<String> },
-    Getty { pid: i32, tty: Option<String>, cmdline: String },
+    Sysfs {
+        tty: String,
+        pci: Option<String>,
+        port: Option<String>,
+        irq: Option<String>,
+        kind: Option<String>,
+    },
+    Getty {
+        pid: i32,
+        tty: Option<String>,
+        cmdline: String,
+    },
 }
 
 /// One line of `/proc/tty/driver/serial`:
@@ -85,7 +99,11 @@ pub fn run(env: &Env) -> Result<Report, Error> {
         let Ok(link) = std::fs::read_link(dir.join("device")) else { continue };
         let read = |f: &str| std::fs::read_to_string(dir.join(f)).ok().map(|s| s.trim().to_string());
         report.push(&Record::Sysfs {
-            pci: link.components().filter_map(|c| c.as_os_str().to_str()).find(|c| is_pci_address(c)).map(str::to_string),
+            pci: link
+                .components()
+                .filter_map(|c| c.as_os_str().to_str())
+                .find(|c| is_pci_address(c))
+                .map(str::to_string),
             port: read("port"),
             irq: read("irq"),
             kind: read("type"),
@@ -97,7 +115,10 @@ pub fn run(env: &Env) -> Result<Report, Error> {
         let args = task::cmdline(&env.root, pid).unwrap_or_default();
         report.push(&Record::Getty {
             pid,
-            tty: args.iter().find(|a| a.starts_with("ttyS") || a.starts_with("ttyUSB") || a.starts_with("ttyAMA")).cloned(),
+            tty: args
+                .iter()
+                .find(|a| a.starts_with("ttyS") || a.starts_with("ttyUSB") || a.starts_with("ttyAMA"))
+                .cloned(),
             cmdline: args.join(" "),
         });
     }

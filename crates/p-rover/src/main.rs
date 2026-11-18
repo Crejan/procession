@@ -6,9 +6,10 @@ use std::process::ExitCode;
 use std::time::Duration;
 
 use clap::{Args, Parser, Subcommand, ValueEnum};
+use p_roc::{CpuSet, Root};
+use p_rover::analyze;
 use p_rover::observe::{clock, cmdline, hung, irq, lastboot, nic, procs, sched, serial};
 use p_rover::{Config, Env, Error, Report, render};
-use p_roc::{CpuSet, Root};
 
 #[derive(Copy, Clone, Debug, ValueEnum)]
 enum Format {
@@ -113,6 +114,18 @@ enum Cmd {
         #[arg(long, default_value_t = hung::DEFAULT_MAX)]
         max: usize,
     },
+    /// Explore one process: placement, memory, endpoints, interfaces, kernel bypass, host settings.
+    Analyze {
+        /// The process.
+        #[arg(long)]
+        pid: i32,
+        /// Threads declared critical (repeatable): always listed.
+        #[arg(long = "tid")]
+        tids: Vec<i32>,
+        /// Procfs and sysfs only, no tracing (the only mode in this version).
+        #[arg(long = "static")]
+        static_only: bool,
+    },
     /// Live kernel command line against the declared one, kernel flavour, sysctls (cost: light).
     Cmdline,
     /// IRQ affinity, /proc/interrupts delta, timer ticks (cost: light).
@@ -154,6 +167,9 @@ fn run(cli: &Cli) -> Result<Report, Error> {
         Cmd::Lastboot { boot } => lastboot::run(&env, &lastboot::Args { boot: boot.clone() }),
         Cmd::Hung { all, duration, stack_lines, max } => {
             hung::run(&env, &hung::Args { all: *all, duration: *duration, stack_lines: *stack_lines, max: *max })
+        }
+        Cmd::Analyze { pid, tids, static_only } => {
+            analyze::run(&env, &analyze::Args { pid: *pid, tids: tids.clone(), static_only: *static_only })
         }
         Cmd::Cmdline => cmdline::run(&env),
         Cmd::Irq { duration, top } => irq::run(&env, &irq::Args { duration: *duration, top: *top }),

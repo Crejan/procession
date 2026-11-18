@@ -16,7 +16,8 @@ use crate::observe::{self, finish};
 use crate::report::{Cost, Finding, Metric, Report, Severity, Subject, round2};
 
 /// Counter names that mean errors or drops.
-const TRIAGE: [&str; 10] = ["missed", "fifo", "crc", "no_buffer", "drop", "error", "over", "length", "timeout", "restart"];
+const TRIAGE: [&str; 10] =
+    ["missed", "fifo", "crc", "no_buffer", "drop", "error", "over", "length", "timeout", "restart"];
 /// Names that also count in the static view (not in the delta: pause frames move with healthy traffic).
 const TRIAGE_STATIC_EXTRA: [&str; 3] = ["collision", "pause", "flow"];
 /// Window limits of `--delta`.
@@ -120,6 +121,44 @@ enum Record {
     },
 }
 
+/// The findings an interface earns from its settings: coalescing, EEE, queue count.
+/// The caller decides whether the interface is one of concern.
+pub(crate) fn interface_findings(interface: &Interface, data: &crate::ethtool::EthtoolData) -> Vec<Finding> {
+    let subject = Subject::Interface { name: interface.name.clone() };
+    let mut out = Vec::new();
+    if let Some(c) = data.coalesce.as_ref().filter(|c| c.rx_usecs.is_some_and(|u| u > 0)) {
+        out.push(Finding {
+            id: "coalescing-on",
+            severity: Severity::Warn,
+            subject: subject.clone(),
+            evidence: vec![Metric::new("rx_usecs", c.rx_usecs), Metric::new("rx_frames", c.rx_frames)],
+            recommendation: "receive interrupt coalescing delays every frame by up to rx-usecs; set rx-usecs 0 on a cyclic interface".into(),
+            changes: Vec::new(),
+        });
+    }
+    if let Some(e) = data.eee.as_ref().filter(|e| e.enabled) {
+        out.push(Finding {
+            id: "eee-on",
+            severity: Severity::Warn,
+            subject: subject.clone(),
+            evidence: vec![Metric::new("eee_enabled", true), Metric::new("eee_active", e.active)],
+            recommendation: "Energy-Efficient Ethernet puts the link to sleep between frames and adds wake latency; disable it on a cyclic interface".into(),
+            changes: Vec::new(),
+        });
+    }
+    if interface.rx_queues > 1 {
+        out.push(Finding {
+            id: "multi-queue",
+            severity: Severity::Warn,
+            subject,
+            evidence: vec![Metric::new("rx_queues", interface.rx_queues), Metric::new("tx_queues", interface.tx_queues)],
+            recommendation: "the interface has several queues, so a frame's IRQ may land on any CPU the hash picks; reduce channels to 1 for a cyclic flow".into(),
+            changes: Vec::new(),
+        });
+    }
+    out
+}
+
 fn valid_name(n: &str) -> bool {
     !n.is_empty() && n.len() <= 15 && n.bytes().all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'-'))
 }
@@ -188,7 +227,8 @@ fn delta(env: &Env, iface: &str, window: Duration, report: &mut Report) {
             (*a > b).then_some((k, a - b, b))
         })
         .collect();
-    let (mut errors, mut traffic): (Vec<&Moved<'_>>, Vec<&Moved<'_>>) = moved.iter().partition(|(k, ..)| is_triage(k, false));
+    let (mut errors, mut traffic): (Vec<&Moved<'_>>, Vec<&Moved<'_>>) =
+        moved.iter().partition(|(k, ..)| is_triage(k, false));
     errors.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(b.0)));
     traffic.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(b.0)));
     let rec = |(k, d, b): &Moved<'_>, triage: bool| Record::Counter {
@@ -227,7 +267,6 @@ fn delta(env: &Env, iface: &str, window: Duration, report: &mut Report) {
 
 fn statics(env: &Env, args: &Args, interface: &Interface, report: &mut Report) -> Result<(), Error> {
     let iface = args.iface.clone();
-    let subject = Subject::Interface { name: iface.clone() };
     let concern = of_concern(env, &iface);
     let cpus = observe::cpus(env, report);
     report.push(&Record::Link { interface: interface.clone() });
@@ -259,45 +298,18 @@ fn statics(env: &Env, args: &Args, interface: &Interface, report: &mut Report) -
     }
     if let Some(c) = &data.coalesce {
         report.push(&Record::Coalesce { iface: iface.clone(), coalesce: c.clone() });
-        if concern && c.rx_usecs.is_some_and(|u| u > 0) {
-            report.findings.push(Finding {
-                id: "coalescing-on",
-                severity: Severity::Warn,
-                subject: subject.clone(),
-                evidence: vec![Metric::new("rx_usecs", c.rx_usecs), Metric::new("rx_frames", c.rx_frames)],
-                recommendation: "receive interrupt coalescing delays every frame by up to rx-usecs; set rx-usecs 0 on a cyclic interface".into(),
-                changes: Vec::new(),
-            });
-        }
     }
     if let Some(c) = &data.channels {
         report.push(&Record::Channels { iface: iface.clone(), channels: c.clone() });
     }
     if let Some(e) = &data.eee {
         report.push(&Record::Eee { iface: iface.clone(), eee: e.clone() });
-        if concern && e.enabled {
-            report.findings.push(Finding {
-                id: "eee-on",
-                severity: Severity::Warn,
-                subject: subject.clone(),
-                evidence: vec![Metric::new("eee_enabled", true), Metric::new("eee_active", e.active)],
-                recommendation: "Energy-Efficient Ethernet puts the link to sleep between frames and adds wake latency; disable it on a cyclic interface".into(),
-                changes: Vec::new(),
-            });
-        }
     }
     if !data.features.is_empty() {
         report.push(&Record::Features { iface: iface.clone(), features: data.features.clone() });
     }
-    if concern && interface.rx_queues > 1 {
-        report.findings.push(Finding {
-            id: "multi-queue",
-            severity: Severity::Warn,
-            subject: subject.clone(),
-            evidence: vec![Metric::new("rx_queues", interface.rx_queues), Metric::new("tx_queues", interface.tx_queues)],
-            recommendation: "the interface has several queues, so a frame's IRQ may land on any CPU the hash picks; reduce channels to 1 for a cyclic flow".into(),
-            changes: Vec::new(),
-        });
+    if concern {
+        report.findings.extend(interface_findings(interface, &data));
     }
 
     // IRQs: the device's MSI vectors, else the rows of /proc/interrupts that carry the interface name.
@@ -314,11 +326,11 @@ fn statics(env: &Env, args: &Args, interface: &Interface, report: &mut Report) -
         let info = scan.items.iter().find(|i| i.irq == n);
         let row_name = interrupts.as_ref().ok().and_then(|i| i.row(&n.to_string())).map(|r| r.name.clone());
         let effective = info.and_then(|i| i.effective.clone().or_else(|| i.affinity.clone()));
-        let thread = threads.items.iter().find(|t| task::irq_thread(&t.stat.comm).is_some_and(|(i, _)| i == n)).map(|t| IrqThread {
-            tid: t.tid,
-            policy: t.stat.policy.short(),
-            rtprio: t.stat.rt_priority,
-        });
+        let thread = threads
+            .items
+            .iter()
+            .find(|t| task::irq_thread(&t.stat.comm).is_some_and(|(i, _)| i == n))
+            .map(|t| IrqThread { tid: t.tid, policy: t.stat.policy.short(), rtprio: t.stat.rt_priority });
         report.push(&Record::Irq {
             iface: iface.clone(),
             irq: n,

@@ -1,0 +1,9 @@
+Name:	master
+Tgid:	100
+Pid:	100
+Uid:	1000	1000	1000	1000
+Gid:	1000	1000	1000	1000
+Groups:	1000
+Cpus_allowed_list:	2
+voluntary_ctxt_switches:	100
+nonvoluntary_ctxt_switches:	5

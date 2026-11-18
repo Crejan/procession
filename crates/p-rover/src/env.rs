@@ -79,6 +79,8 @@ pub struct Env {
     pub ethtool: Box<dyn Ethtool>,
     /// External tools (`chronyc`, `journalctl`).
     pub runner: Box<dyn Runner>,
+    /// The architecture whose syscall numbers `/proc/<pid>/task/<tid>/syscall` shows.
+    pub arch: &'static str,
 }
 
 impl Env {
@@ -94,6 +96,7 @@ impl Env {
             clock: Box::new(SystemClock),
             ethtool: Box::new(Unavailable),
             runner: Box::new(SystemRunner),
+            arch: std::env::consts::ARCH,
         }
     }
 }

@@ -17,7 +17,12 @@ fn lan0_data() -> EthtoolData {
         }),
         stats: [("rx_no_buffer_count".to_string(), 7), ("rx_packets".to_string(), 1000)].into(),
         ring: Some(Ring { rx_max: Some(4096), rx: Some(256), tx_max: Some(4096), tx: Some(256) }),
-        coalesce: Some(Coalesce { adaptive_rx: Some(false), rx_usecs: Some(3), rx_frames: Some(0), ..Coalesce::default() }),
+        coalesce: Some(Coalesce {
+            adaptive_rx: Some(false),
+            rx_usecs: Some(3),
+            rx_frames: Some(0),
+            ..Coalesce::default()
+        }),
         channels: Some(Channels { max_combined: Some(4), combined: Some(2), rx: None, tx: None }),
         eee: Some(Eee { enabled: true, active: false }),
         features: [("generic-receive-offload".to_string(), true), ("large-receive-offload".to_string(), false)].into(),
@@ -37,7 +42,7 @@ fn nic_static_with_ethtool_data() {
     golden("nic", &report);
     let ids: Vec<_> = report.findings.iter().map(|f| f.id).collect();
     assert_eq!(ids, ["coalescing-on", "eee-on", "multi-queue"]);
-    let irq = report.records.iter().find(|r| r["type"] == "irq" && r["irq"] == 126).unwrap();
+    let irq = report.values.iter().find(|r| r["type"] == "irq" && r["irq"] == 126).unwrap();
     assert_eq!(irq["thread"]["tid"], 12);
     assert_eq!(irq["thread"]["policy"], "fifo");
 }
@@ -48,8 +53,11 @@ fn nic_without_an_ethtool_transport_still_reports_sysfs_and_says_what_is_missing
     let report = nic::run(&host.env(|_| {}), &args("lan0")).unwrap();
     golden("nic-sysfs-only", &report);
     assert!(report.unreadable.iter().any(|u| u.source == "ethtool lan0"));
-    let link = &report.records[0];
-    assert_eq!((link["name"].as_str(), link["driver"].as_str(), link["pci"].as_str()), (Some("lan0"), Some("igb"), Some("0000:04:00.0")));
+    let link = &report.values[0];
+    assert_eq!(
+        (link["name"].as_str(), link["driver"].as_str(), link["pci"].as_str()),
+        (Some("lan0"), Some("igb"), Some("0000:04:00.0"))
+    );
     assert_eq!(link["speed_mbps"], 1000);
     assert_eq!(link["admin_up"], true);
     assert_eq!(link["rx_queues"], 2);
@@ -69,7 +77,7 @@ fn nic_delta_lists_errors_first_and_flags_drops() {
     a.delta = Some(Duration::from_secs(10));
     let report = nic::run(&env, &a).unwrap();
     golden("nic-delta", &report);
-    let names: Vec<_> = report.records.iter().map(|r| r["name"].as_str().unwrap_or("-")).collect();
+    let names: Vec<_> = report.values.iter().map(|r| r["name"].as_str().unwrap_or("-")).collect();
     assert_eq!(names, ["rx_fifo_errors", "rx_missed_errors", "rx_packets", "tx_packets", "-"]);
     assert_eq!(report.findings[0].id, "nic-drops");
 }
@@ -81,7 +89,7 @@ fn nic_delta_on_a_quiet_interface_is_clean() {
     a.delta = Some(Duration::from_secs(2));
     let report = nic::run(&host.env(|_| {}), &a).unwrap();
     assert!(report.findings.is_empty());
-    assert_eq!(report.records.last().unwrap()["clean"], true);
+    assert_eq!(report.values.last().unwrap()["clean"], true);
 }
 
 #[test]

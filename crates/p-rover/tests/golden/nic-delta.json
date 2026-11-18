@@ -12,54 +12,11 @@
     }
   ],
   "records": [
-    {
-      "type": "counter",
-      "iface": "lan0",
-      "name": "rx_fifo_errors",
-      "delta": 120,
-      "per_s": 12.0,
-      "before": 0,
-      "after": 120,
-      "triage": true
-    },
-    {
-      "type": "counter",
-      "iface": "lan0",
-      "name": "rx_missed_errors",
-      "delta": 120,
-      "per_s": 12.0,
-      "before": 0,
-      "after": 120,
-      "triage": true
-    },
-    {
-      "type": "counter",
-      "iface": "lan0",
-      "name": "rx_packets",
-      "delta": 5000,
-      "per_s": 500.0,
-      "before": 1000,
-      "after": 6000,
-      "triage": false
-    },
-    {
-      "type": "counter",
-      "iface": "lan0",
-      "name": "tx_packets",
-      "delta": 5,
-      "per_s": 0.5,
-      "before": 900,
-      "after": 905,
-      "triage": false
-    },
-    {
-      "type": "summary",
-      "iface": "lan0",
-      "window_s": 10,
-      "counters_moved": 4,
-      "error_counters_moved": 2,
-      "clean": false
-    }
+    {"type":"counter","iface":"lan0","name":"rx_fifo_errors","delta":120,"per_s":12.0,"before":0,"after":120,"triage":true},
+    {"type":"counter","iface":"lan0","name":"rx_missed_errors","delta":120,"per_s":12.0,"before":0,"after":120,"triage":true},
+    {"type":"counter","iface":"lan0","name":"rx_packets","delta":5000,"per_s":500.0,"before":1000,"after":6000,"triage":false},
+    {"type":"counter","iface":"lan0","name":"tx_packets","delta":5,"per_s":0.5,"before":900,"after":905,"triage":false},
+    {"type":"summary","iface":"lan0","window_s":10,"counters_moved":4,"error_counters_moved":2,"clean":false}
   ],
   "restored": [],
   "findings": [

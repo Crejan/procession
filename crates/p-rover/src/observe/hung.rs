@@ -84,7 +84,10 @@ struct Sample {
 #[derive(Serialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 enum Record {
-    Detector { hung_task_timeout_secs: Option<String>, hung_task_warnings: Option<String> },
+    Detector {
+        hung_task_timeout_secs: Option<String>,
+        hung_task_warnings: Option<String>,
+    },
     Task {
         pid: i32,
         tid: i32,
@@ -99,7 +102,14 @@ enum Record {
         mount: Option<String>,
         samples: Vec<Sample>,
     },
-    Summary { d_state_first: usize, hung: usize, nfs_waiters: usize, shown: usize, truncated: bool, by_class: BTreeMap<WaitClass, usize> },
+    Summary {
+        d_state_first: usize,
+        hung: usize,
+        nfs_waiters: usize,
+        shown: usize,
+        truncated: bool,
+        by_class: BTreeMap<WaitClass, usize>,
+    },
 }
 
 struct Snap {
@@ -140,7 +150,16 @@ fn sample(env: &Env, args: &Args, report: &mut Report) -> Result<BTreeMap<i32, S
         let run_ns = task::read_counters(&env.root, t.tgid, t.tid).ok().map(|c| c.schedstat.run_ns);
         out.insert(
             t.tid,
-            Snap { tgid: t.tgid, comm: t.stat.comm, state: t.stat.state, uid: t.status.uid, ppid: t.stat.ppid, wchan: w, run_ns, stack },
+            Snap {
+                tgid: t.tgid,
+                comm: t.stat.comm,
+                state: t.stat.state,
+                uid: t.status.uid,
+                ppid: t.stat.ppid,
+                wchan: w,
+                run_ns,
+                stack,
+            },
         );
     }
     if denied > 0 {
@@ -189,7 +208,8 @@ pub fn run(env: &Env, args: &Args) -> Result<Report, Error> {
         )));
     }
     let mut report = Report::new(env, "hung", Cost::Light);
-    let sysctl = |n: &str| std::fs::read_to_string(env.root.proc.join("sys/kernel").join(n)).ok().map(|s| s.trim().to_string());
+    let sysctl =
+        |n: &str| std::fs::read_to_string(env.root.proc.join("sys/kernel").join(n)).ok().map(|s| s.trim().to_string());
     report.push(&Record::Detector {
         hung_task_timeout_secs: sysctl("hung_task_timeout_secs"),
         hung_task_warnings: sysctl("hung_task_warnings"),
@@ -247,7 +267,10 @@ pub fn run(env: &Env, args: &Args) -> Result<Report, Error> {
                 cwd: cwd.map(|p| p.display().to_string()),
                 mount,
                 samples: vec![
-                    Sample { wchan: before.map(|b| b.wchan.clone()).unwrap_or_default(), stack: before.and_then(|b| b.stack.clone()) },
+                    Sample {
+                        wchan: before.map(|b| b.wchan.clone()).unwrap_or_default(),
+                        stack: before.and_then(|b| b.stack.clone()),
+                    },
                     Sample { wchan: s.wchan.clone(), stack: s.stack.clone() },
                 ],
             });
@@ -263,8 +286,17 @@ pub fn run(env: &Env, args: &Args) -> Result<Report, Error> {
     });
     if hung_n > 0 {
         let crit = hung_n >= CRIT_TASKS || full_window_nfs;
-        let mut evidence = vec![Metric::new("tasks_in_d_both_samples", hung_n), Metric::new("window_s", args.duration.as_secs())];
-        evidence.extend(by_class.iter().filter(|(_, n)| **n > 0).map(|(c, n)| Metric::new(&format!("class_{}", serde_json::to_value(c).ok().and_then(|v| v.as_str().map(String::from)).unwrap_or_default()), n)));
+        let mut evidence =
+            vec![Metric::new("tasks_in_d_both_samples", hung_n), Metric::new("window_s", args.duration.as_secs())];
+        evidence.extend(by_class.iter().filter(|(_, n)| **n > 0).map(|(c, n)| {
+            Metric::new(
+                &format!(
+                    "class_{}",
+                    serde_json::to_value(c).ok().and_then(|v| v.as_str().map(String::from)).unwrap_or_default()
+                ),
+                n,
+            )
+        }));
         evidence.extend(mounts_hit.iter().map(|m| Metric::new("nfs_mount", m)));
         report.findings.push(Finding {
             id: "hung-tasks",

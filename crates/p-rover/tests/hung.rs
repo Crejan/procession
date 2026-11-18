@@ -22,7 +22,7 @@ fn tasks_in_d_across_both_samples_with_class_and_mount() {
     let host = Host::new("host2");
     let report = run(&host, &Args::default());
     golden("hung", &report);
-    let tasks: Vec<_> = report.records.iter().filter(|r| r["type"] == "task").collect();
+    let tasks: Vec<_> = report.values.iter().filter(|r| r["type"] == "task").collect();
     let tids: Vec<_> = tasks.iter().map(|t| t["tid"].as_i64().unwrap()).collect();
     assert_eq!(tids, [50, 51], "the passing D (52) is not reported");
     assert_eq!(tasks[0]["wait_class"], "nfs_rpc");
@@ -38,9 +38,10 @@ fn tasks_in_d_across_both_samples_with_class_and_mount() {
 fn all_adds_sleepers_waiting_on_nfs() {
     let host = Host::new("host2");
     let report = run(&host, &Args { all: true, ..Args::default() });
-    let tids: Vec<_> = report.records.iter().filter(|r| r["type"] == "task").map(|t| t["tid"].as_i64().unwrap()).collect();
+    let tids: Vec<_> =
+        report.values.iter().filter(|r| r["type"] == "task").map(|t| t["tid"].as_i64().unwrap()).collect();
     assert_eq!(tids, [50, 51, 53]);
-    let summary = report.records.last().unwrap();
+    let summary = report.values.last().unwrap();
     assert_eq!(summary["hung"], 2);
     assert_eq!(summary["nfs_waiters"], 2);
 }
@@ -51,7 +52,7 @@ fn unreadable_stacks_are_reported_and_the_class_falls_back_to_wchan() {
     fs::remove_file(host.path("proc/50/task/50/stack")).unwrap();
     let report = run(&host, &Args::default());
     assert!(report.unreadable.iter().any(|u| u.source.ends_with("/stack")));
-    let t = report.records.iter().find(|r| r["tid"] == 50).unwrap();
+    let t = report.values.iter().find(|r| r["tid"] == 50).unwrap();
     assert_eq!(t["wait_class"], "nfs_rpc");
     assert!(t["samples"][1]["stack"].is_null());
 }
@@ -60,8 +61,8 @@ fn unreadable_stacks_are_reported_and_the_class_falls_back_to_wchan() {
 fn nothing_in_d_is_clean_and_the_cap_is_applied() {
     let host = Host::new("host2");
     let report = run(&host, &Args { max: 1, ..Args::default() });
-    assert_eq!(report.records.iter().filter(|r| r["type"] == "task").count(), 1);
-    assert_eq!(report.records.last().unwrap()["truncated"], true);
+    assert_eq!(report.values.iter().filter(|r| r["type"] == "task").count(), 1);
+    assert_eq!(report.values.last().unwrap()["truncated"], true);
     let quiet = Host::new("host2");
     for pid in [50, 51, 52] {
         let d = quiet.path(&format!("proc/{pid}/task/{pid}/stat"));

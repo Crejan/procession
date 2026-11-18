@@ -128,7 +128,9 @@ mod tests {
 
     #[test]
     fn tokens_values_and_flags() {
-        let c = Cmdline::parse("BOOT_IMAGE=/vmlinuz root=\"/dev/x y\" ro isolcpus=managed_irq,domain,2-3 nohz_full=2-3 quiet isolcpus=4");
+        let c = Cmdline::parse(
+            "BOOT_IMAGE=/vmlinuz root=\"/dev/x y\" ro isolcpus=managed_irq,domain,2-3 nohz_full=2-3 quiet isolcpus=4",
+        );
         assert_eq!(c.tokens().len(), 7);
         assert_eq!(c.get("root"), Some(Some("/dev/x y")));
         assert_eq!(c.get("quiet"), Some(None));
@@ -136,10 +138,16 @@ mod tests {
         assert_eq!(c.cpu_list("nohz_full").unwrap().unwrap().to_string(), "2-3");
         assert_eq!(c.cpu_list("isolcpus").unwrap().unwrap().to_string(), "4"); // last wins
         assert!(Cmdline::parse("isolcpus=2-").cpu_list("isolcpus").is_err());
-        let c = Cmdline::parse("quiet intel_pstate=disable processor.max_cstate=1 tsc=reliable tsc=nowatchdog threadirqs");
+        let c =
+            Cmdline::parse("quiet intel_pstate=disable processor.max_cstate=1 tsc=reliable tsc=nowatchdog threadirqs");
         assert_eq!(
             c.rt_keys(),
-            [("intel_pstate", Some("disable")), ("processor.max_cstate", Some("1")), ("tsc", Some("nowatchdog")), ("threadirqs", None)]
+            [
+                ("intel_pstate", Some("disable")),
+                ("processor.max_cstate", Some("1")),
+                ("tsc", Some("nowatchdog")),
+                ("threadirqs", None)
+            ]
         );
     }
 }

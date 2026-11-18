@@ -80,7 +80,12 @@ fn kernel_hz(env: &Env) -> Option<u32> {
 }
 
 /// Per-second rates of the named rows on the isolated CPUs.
-fn named_rates(before: &Interrupts, after: &Interrupts, isolated: &CpuSet, secs: f64) -> BTreeMap<String, BTreeMap<u32, f64>> {
+fn named_rates(
+    before: &Interrupts,
+    after: &Interrupts,
+    isolated: &CpuSet,
+    secs: f64,
+) -> BTreeMap<String, BTreeMap<u32, f64>> {
     NAMED_ROWS
         .iter()
         .filter_map(|name| {
@@ -120,7 +125,8 @@ pub fn run(env: &Env, args: &Args) -> Result<Report, Error> {
             args.duration, DURATION_RANGE.0, DURATION_RANGE.1
         )));
     }
-    let expectations = env.config.irq_expectations().map_err(|detail| Error::Config { path: "config".into(), detail })?;
+    let expectations =
+        env.config.irq_expectations().map_err(|detail| Error::Config { path: "config".into(), detail })?;
     let mut report = Report::new(env, "irq", Cost::Light);
     let cpus = observe::cpus(env, &mut report);
     let secs = args.duration.as_secs();
@@ -141,7 +147,8 @@ pub fn run(env: &Env, args: &Args) -> Result<Report, Error> {
             severity: Severity::Warn,
             subject: Subject::Host,
             evidence: vec![Metric::new("pids", &irqbalance)],
-            recommendation: "irqbalance is running and moves IRQs at will; disable it on a realtime host and pin IRQs".into(),
+            recommendation: "irqbalance is running and moves IRQs at will; disable it on a realtime host and pin IRQs"
+                .into(),
             changes: Vec::new(),
         });
     }
@@ -191,13 +198,11 @@ pub fn run(env: &Env, args: &Args) -> Result<Report, Error> {
         let delta_on_isolated: u64 = moved.iter().filter(|(c, _)| cpus.isolated.contains(*c)).map(|(_, d)| d).sum();
         let desc = a.map(|r| r.name.clone()).unwrap_or_default();
         let all_names = names(&i.actions, &desc);
-        let name = if i.actions.is_empty() { all_names.last().cloned().unwrap_or_default() } else { i.actions.join(",") };
+        let name =
+            if i.actions.is_empty() { all_names.last().cloned().unwrap_or_default() } else { i.actions.join(",") };
         let effective_or_affinity = i.effective.as_ref().or(i.affinity.as_ref());
         let touches = effective_or_affinity.is_some_and(|e| e.intersects(&cpus.isolated));
-        let expected = expectations
-            .iter()
-            .find(|e| all_names.iter().any(|n| e.matches(n)))
-            .map(|e| e.cpus.clone());
+        let expected = expectations.iter().find(|e| all_names.iter().any(|n| e.matches(n))).map(|e| e.cpus.clone());
         let deviates = matches!((&expected, &i.affinity), (Some(e), Some(a)) if e != a);
         let off_core = touches && delta_on_isolated > 0;
         let subject = Subject::Irq { irq: i.irq, name: name.clone() };
@@ -245,7 +250,8 @@ pub fn run(env: &Env, args: &Args) -> Result<Report, Error> {
     }
 
     let total = rows.len();
-    let (flagged, mut rest): (Vec<_>, Vec<_>) = rows.into_iter().partition(|r| matches!(r, Record::Irq { flag: true, .. }));
+    let (flagged, mut rest): (Vec<_>, Vec<_>) =
+        rows.into_iter().partition(|r| matches!(r, Record::Irq { flag: true, .. }));
     let key = |r: &Record| match r {
         Record::Irq { delta, irq, .. } => (std::cmp::Reverse(*delta), *irq),
         _ => (std::cmp::Reverse(0), 0),

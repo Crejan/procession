@@ -86,7 +86,9 @@ pub fn interfaces(root: &Root) -> Result<Vec<String>, Error> {
 }
 
 fn count_queues(dir: &std::path::Path, prefix: &str) -> usize {
-    fs::read_dir(dir).map_or(0, |rd| rd.filter_map(Result::ok).filter(|e| e.file_name().to_string_lossy().starts_with(prefix)).count())
+    fs::read_dir(dir).map_or(0, |rd| {
+        rd.filter_map(Result::ok).filter(|e| e.file_name().to_string_lossy().starts_with(prefix)).count()
+    })
 }
 
 /// Reads one interface.
@@ -99,7 +101,8 @@ pub fn interface(root: &Root, name: &str) -> Result<Interface, Error> {
         return Err(Error::io(&base, std::io::ErrorKind::NotFound.into()));
     }
     let dev = base.join("device");
-    let flags: Option<u32> = opt(&base.join("flags")).and_then(|f| u32::from_str_radix(f.trim_start_matches("0x"), 16).ok());
+    let flags: Option<u32> =
+        opt(&base.join("flags")).and_then(|f| u32::from_str_radix(f.trim_start_matches("0x"), 16).ok());
     let mut irqs: Vec<u32> = fs::read_dir(dev.join("msi_irqs"))
         .map(|rd| rd.filter_map(|e| e.ok()?.file_name().to_str()?.parse().ok()).collect())
         .unwrap_or_default();
@@ -120,7 +123,9 @@ pub fn interface(root: &Root, name: &str) -> Result<Interface, Error> {
             carrier_changes: num(&base.join("carrier_changes")),
             admin_up: flags.map(|f| f & 1 != 0),
         },
-        driver: fs::read_link(dev.join("driver")).ok().and_then(|p| Some(p.file_name()?.to_string_lossy().into_owned())),
+        driver: fs::read_link(dev.join("driver"))
+            .ok()
+            .and_then(|p| Some(p.file_name()?.to_string_lossy().into_owned())),
         pci: fs::read_link(&dev)
             .ok()
             .and_then(|p| Some(p.file_name()?.to_string_lossy().into_owned()))
@@ -156,5 +161,130 @@ mod tests {
         assert!(is_pci_address("0000:04:00.0"));
         assert!(!is_pci_address("platform"));
         assert!(!is_pci_address("0000:04:00:0"));
+    }
+}
+
+/// A socket found in `/proc/net/*`.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum SocketKind {
+    /// `AF_PACKET`.
+    Packet {
+        /// The ethertype it is bound to (`0x88a4` for EtherCAT); 0 for all.
+        ethertype: u16,
+        /// The interface index; 0 when unbound.
+        ifindex: u32,
+    },
+    /// UDP over IPv4 or IPv6.
+    Udp {
+        /// The local port.
+        port: u16,
+    },
+    /// TCP over IPv4 or IPv6.
+    Tcp {
+        /// The local port.
+        port: u16,
+    },
+    /// `AF_XDP`.
+    Xdp,
+}
+
+fn inet_port(local: &str) -> Option<u16> {
+    u16::from_str_radix(local.rsplit_once(':')?.1, 16).ok()
+}
+
+/// `/proc/net/packet`: `sk RefCnt Type Proto Iface R Rmem User Inode`.
+#[must_use]
+pub fn parse_packet(text: &str) -> Vec<(u64, SocketKind)> {
+    text.lines()
+        .skip(1)
+        .filter_map(|l| {
+            let f: Vec<&str> = l.split_whitespace().collect();
+            let ethertype = u16::from_str_radix(f.get(3)?, 16).ok()?;
+            Some((f.get(8)?.parse().ok()?, SocketKind::Packet { ethertype, ifindex: f.get(4)?.parse().ok()? }))
+        })
+        .collect()
+}
+
+/// `/proc/net/{udp,udp6,tcp,tcp6}`: the inode is the tenth column.
+#[must_use]
+pub fn parse_inet(text: &str, udp: bool) -> Vec<(u64, SocketKind)> {
+    text.lines()
+        .skip(1)
+        .filter_map(|l| {
+            let f: Vec<&str> = l.split_whitespace().collect();
+            let port = inet_port(f.get(1)?)?;
+            Some((f.get(9)?.parse().ok()?, if udp { SocketKind::Udp { port } } else { SocketKind::Tcp { port } }))
+        })
+        .collect()
+}
+
+/// `/proc/net/xdp`: the column layout varies, so every numeric token of a row is a candidate inode.
+#[must_use]
+pub fn parse_xdp(text: &str, inodes: &[u64]) -> Vec<(u64, SocketKind)> {
+    text.lines()
+        .skip(1)
+        .flat_map(|l| {
+            l.split_whitespace()
+                .filter_map(|t| t.parse::<u64>().ok())
+                .filter(|i| inodes.contains(i))
+                .collect::<Vec<_>>()
+        })
+        .map(|i| (i, SocketKind::Xdp))
+        .collect()
+}
+
+/// Every packet, UDP, TCP and XDP socket by inode. A file that does not
+/// exist (IPv6 off, no `CONFIG_XDP_SOCKETS`) is skipped; one that cannot be
+/// read is listed.
+///
+/// # Errors
+/// Never fails as a whole: see [`crate::root::Scan`].
+pub fn sockets(root: &Root, wanted_xdp: &[u64]) -> Result<crate::root::Scan<(u64, SocketKind)>, Error> {
+    let mut out = crate::root::Scan::default();
+    let mut add = |name: &str, parse: &dyn Fn(&str) -> Vec<(u64, SocketKind)>| {
+        let p = root.proc.join("net").join(name);
+        match fs::read_to_string(&p) {
+            Ok(t) => out.items.extend(parse(&t)),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => out.unreadable.push(crate::root::Unreadable::new(p.display().to_string(), &e)),
+        }
+    };
+    add("packet", &parse_packet);
+    for (n, udp) in [("udp", true), ("udp6", true), ("tcp", false), ("tcp6", false)] {
+        add(n, &move |t| parse_inet(t, udp));
+    }
+    add("xdp", &|t| parse_xdp(t, wanted_xdp));
+    Ok(out)
+}
+
+/// Interface index to name, from `/sys/class/net/*/ifindex`.
+///
+/// # Errors
+/// When `/sys/class/net` cannot be listed.
+pub fn ifindex_map(root: &Root) -> Result<BTreeMap<u32, String>, Error> {
+    Ok(interfaces(root)?
+        .into_iter()
+        .filter_map(|n| Some((num::<u32>(&root.sys.join("class/net").join(&n).join("ifindex"))?, n)))
+        .collect())
+}
+
+#[cfg(test)]
+mod socket_tests {
+    use super::*;
+
+    #[test]
+    fn tables() {
+        let p = parse_packet(
+            "sk       RefCnt Type Proto  Iface R Rmem   User   Inode\nffff 3 3 88a4 3 1 0 0 5001\nffff 3 3 0003 0 1 0 0 5002\n",
+        );
+        assert_eq!(p[0], (5001, SocketKind::Packet { ethertype: 0x88a4, ifindex: 3 }));
+        assert_eq!(p[1].1, SocketKind::Packet { ethertype: 3, ifindex: 0 });
+        let u = parse_inet(
+            "  sl  local_address rem_address   st tx_queue rx_queue tr tm->when retrnsmt   uid  timeout inode ref pointer drops\n  1: 0100007F:1F90 00000000:0000 07 00000000:00000000 00:00000000 00000000  1000        0 6001 2 ffff 0\n",
+            true,
+        );
+        assert_eq!(u, vec![(6001, SocketKind::Udp { port: 8080 })]);
+        assert_eq!(parse_xdp("sk Rmem\nffff 0 7001 0\n", &[7001, 1]), vec![(7001, SocketKind::Xdp)]);
     }
 }
