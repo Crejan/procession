@@ -96,6 +96,9 @@ pub fn run(env: &Env, _args: &[String], answer: &mut Answer<'_>) -> Result<u8, F
     let certificate = look_at_certificate(&cert_path, Timestamp::now().map_or(0, Timestamp::unix));
     let prover = crate::prover::program(env);
     let prover_problem = prover.check().err().map(|failure| failure.code());
+    let keygen = p_act::keygen::Keygen::system();
+    let keygen_version = keygen.as_ref().ok().and_then(|k| k.check_version().ok()).map(|(a, b)| format!("{a}.{b}"));
+    let keygen_problem = keygen.as_ref().err().map(ToString::to_string);
     let executable = std::env::current_exe().ok().map(|path| path.display().to_string());
     answer.record(&header("sys", "kit", &hostname(), &clock::now()))?;
     answer.record(
@@ -110,6 +113,10 @@ pub fn run(env: &Env, _args: &[String], answer: &mut Answer<'_>) -> Result<u8, F
             .str("audit", &env.audit)
             .str("lock_dir", &env.lock_dir.display().to_string())
             .opt_str("lock_dir_problem", lock_problem.as_deref())
+            .str("ssh_keygen", p_act::keygen::KEYGEN_PATH)
+            .opt_str("ssh_keygen_version", keygen_version.as_deref())
+            .bool("ssh_keygen_usable", keygen_problem.is_none())
+            .opt_str("ssh_keygen_problem", keygen_problem.as_deref())
             .str("prover", &prover.path.display().to_string())
             .opt_str("prover_problem", prover_problem.as_deref())
             .opt_str(
@@ -137,6 +144,11 @@ pub fn run(env: &Env, _args: &[String], answer: &mut Answer<'_>) -> Result<u8, F
         )?;
     }
     let mut found = judge(lock_problem.as_deref(), env.euid, test_verbs, &certificate);
+    if let Some(problem) = &keygen_problem {
+        found.warnings.push(format!(
+            "ssh-keygen cannot be used: {problem}: `probe setup` and the service's signatures refuse until it can"
+        ));
+    }
     if let Some(problem) = &prover_problem {
         found.warnings.push(format!(
             "prover ({}) cannot be used: rt irq and rt procs fail until it can: {problem}",
