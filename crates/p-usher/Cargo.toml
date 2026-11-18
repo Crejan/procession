@@ -19,6 +19,7 @@ anyhow = "1"
 humantime = "2"
 libc = "0.2"
 p-roc = { path = "../p-roc" }
+p-ermit = { path = "../p-ermit", version = "0.1.0", features = ["toml"] }
 nix = { version = "0.30", features = ["user", "hostname"] }
 regex = "1"
 serde = { version = "1", features = ["derive"] }

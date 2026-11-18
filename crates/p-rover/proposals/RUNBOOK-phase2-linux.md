@@ -12,6 +12,20 @@ written is the one you name with `--output`. No probe, no `--arm`, no sysctl,
 no affinity or priority is touched; the proposed `changes` in a finding are
 printed, never applied.
 
+## The short sequence (Debian container)
+
+    cargo build --release -p p-rover
+    target/release/prover procs
+    target/release/prover irq --duration 3s
+    target/release/prover cmdline
+    target/release/prover nic eth0
+    target/release/prover hung
+    target/release/prover analyze --pid 1 --static
+
+Each prints a header line, record lines and findings (none expected on a
+container); `echo $?` should give 0. The sections below say what each line
+should show and what a container cannot show.
+
 ## Build
 
 On the container (needs Rust 1.91 or newer and the crates for this workspace;
@@ -99,28 +113,21 @@ before `_DEFAULT` as grub does.
 ## Captures I need from a real host (ethtool)
 
 The ethtool parsers were written from ethtool's documented layout, not from
-real output. On a host with a real NIC (an Intel igb/ixgbe/i40e one if
-possible, plus a second driver if one is around), run these and keep the
-output as files (the container's veth is no use). `eth0` is the NIC; these
-only read:
+real output. On a host with a real NIC (Intel igb/ixgbe/i40e if possible; a
+second driver if there is one), as any user (these only read), with `eth0`
+the NIC. The files go to `crates/p-rover/tests/captures/<ethtool version>/`,
+where `tests/ethtool_captures.rs` picks them up (its README there names the
+files). Exactly:
 
     ethtool --version
-    ethtool -i eth0
-    ethtool -S eth0
-    ethtool --json -S eth0
-    ethtool -g eth0
-    ethtool --json -g eth0
-    ethtool -c eth0
-    ethtool --json -c eth0
-    ethtool -l eth0
-    ethtool --json -l eth0
-    ethtool --show-eee eth0
-    ethtool --json --show-eee eth0
-    ethtool -k eth0
-    ethtool --json -k eth0
+    mkdir cap
+    cd cap
+    for opt in -i -S -g -c -l --show-eee -k; do ethtool $opt eth0 > "$opt.txt" 2> "$opt.err"; echo $? > "$opt.code"; ethtool --json $opt eth0 > "--json_$opt.txt" 2> "--json_$opt.err"; echo $? > "--json_$opt.code"; done
+    ls
 
-Each with its exit code (`echo $?` after it) and stderr, since a refused
-option is part of what the code handles. Put them in
-`crates/p-rover/tests/captures/<ethtool version>/` (one file per command);
-I turn them into parser tests. Until then every ethtool parser is marked
-"not yet checked against a capture".
+Then copy the folder `cap` into the repository as
+`crates/p-rover/tests/captures/6.7/` (use the version `ethtool --version`
+printed instead of 6.7). A command the NIC or the ethtool version refuses
+leaves a nonzero `.code` and a message in `.err`; that is wanted, the parser
+must handle it. Until the files are there the test prints `SKIPPED` and counts
+as not run, and every ethtool parser stays "not yet checked against a capture".

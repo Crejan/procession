@@ -1,8 +1,6 @@
 //! `/etc/p-usher.toml`. Every key is optional.
 
 use std::collections::HashMap;
-use std::fs;
-use std::io;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
@@ -129,12 +127,23 @@ impl Config {
         Ok(cfg)
     }
 
-    /// Loads `path`. A missing file is fine unless it was named explicitly.
+    /// Loads `path`. A missing file is fine unless it was named explicitly. The file is read by
+    /// `p_ermit`: a regular file, owned by root or the running user, not writable by group or others,
+    /// at most 1 MiB, no byte order mark; errors never print a line of the file.
     pub fn load(path: &Path, explicit: bool) -> Result<Self> {
-        match fs::read_to_string(path) {
-            Ok(s) => Self::parse(&s).with_context(|| format!("in {}", path.display())),
-            Err(e) if e.kind() == io::ErrorKind::NotFound && !explicit => Ok(Self::default()),
-            Err(e) => Err(e).with_context(|| format!("reading {}", path.display())),
+        let cfg: Option<Self> = if explicit {
+            Some(p_ermit::settings::read_toml(path))
+        } else {
+            p_ermit::settings::read_toml_optional(path).transpose()
+        }
+        .transpose()
+        .with_context(|| format!("reading {}", path.display()))?;
+        match cfg {
+            Some(cfg) => {
+                cfg.validate().with_context(|| format!("in {}", path.display()))?;
+                Ok(cfg)
+            }
+            None => Ok(Self::default()),
         }
     }
 
@@ -211,6 +220,49 @@ fn email_notifier(_: &EmailConfig, _: &dyn Accounts) -> Result<Box<dyn Notifier>
 mod tests {
     use super::*;
     use crate::accounts::StaticAccounts;
+
+    fn file(mode: u32, text: &str) -> (tempfile::TempDir, std::path::PathBuf) {
+        let d = tempfile::tempdir().unwrap();
+        let p = d.path().join("p-usher.toml");
+        std::fs::write(&p, text).unwrap();
+        // Set the mode, do not lean on the umask.
+        std::fs::set_permissions(&p, std::os::unix::fs::PermissionsExt::from_mode(mode)).unwrap();
+        (d, p)
+    }
+
+    #[test]
+    fn load_reads_a_checked_file_and_treats_a_missing_default_as_defaults() {
+        let (_d, p) = file(0o644, "interval = \"5s\"\n");
+        assert_eq!(Config::load(&p, true).unwrap().interval, std::time::Duration::from_secs(5));
+        let missing = p.with_file_name("none.toml");
+        assert!(Config::load(&missing, false).is_ok(), "a missing default file is fine");
+        assert!(Config::load(&missing, true).is_err(), "a missing named file is not");
+    }
+
+    #[test]
+    fn load_refuses_what_was_read_before() {
+        for (mode, text, why) in [
+            (0o664, "", "group-writable"),
+            (0o666, "", "world-writable"),
+            (0o644, "\u{feff}interval = \"5s\"\n", "byte order mark"),
+            (0o644, "unknown_key = 1\n", "unknown key"),
+            (0o644, "interval = \"0s\"\n", "invalid value"),
+        ] {
+            let (_d, p) = file(mode, text);
+            assert!(Config::load(&p, true).is_err(), "{why}");
+        }
+        let d = tempfile::tempdir().unwrap();
+        assert!(Config::load(d.path(), true).is_err(), "a directory");
+        let (_d, big) = file(0o644, &format!("# {}\n", "x".repeat(1 << 20)));
+        assert!(Config::load(&big, true).is_err(), "over 1 MiB");
+    }
+
+    #[test]
+    fn an_error_does_not_print_the_offending_line() {
+        let (_d, p) = file(0o644, "interval = \"secret-value-xyz\"\n");
+        let e = format!("{:#}", Config::load(&p, true).unwrap_err());
+        assert!(!e.contains("secret-value-xyz"), "{e}");
+    }
 
     #[test]
     fn empty_file_gives_defaults() {
