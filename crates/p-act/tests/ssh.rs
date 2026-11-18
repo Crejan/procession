@@ -7,7 +7,9 @@ use p_act::broker::{
 };
 use p_act::exchange::{ErrorCode, ExchangeError};
 use p_act::rating::{Damage, Disruption, Exposure, Rating};
-use p_act::sign::{ApprovalCertificate, verify_approval_certificate};
+use p_act::sign::{
+    ApprovalCertificate, check_approval_certificate, verify_approval_certificate, verify_approval_certificate_for,
+};
 use p_act::sign::{
     ApprovalKind, ApprovalTrust, Fingerprint, Namespace, PublicKey, SignError, Signer, agent_certificate,
     is_reserved_namespace, request_person, sign_approval, sign_call, sign_clearance, sign_request, signature_agent,
@@ -1908,4 +1910,61 @@ fn a_tampered_approval_certificate_is_never_accepted() {
         }
         assert!(accepted.is_empty(), "{label}: a flipped bit in byte(s) {accepted:?} was accepted");
     }
+}
+
+#[test]
+fn an_approval_certificate_for_a_given_person_and_role_and_without_the_time() {
+    let keys = Keys::new();
+    let ca = keys.key("ca");
+    let ca_pub = keys.public(&ca);
+    let now = at("2026-11-11T15:00:00Z");
+    let (line, key) = approval_cert(&keys, &ca, "k", true, "jan:confirmed", VALID, &[]);
+    // For exactly this person and role.
+    let cert = verify_approval_certificate_for(&line, &ca_pub, "jan", ApprovalKind::Confirmed, now).unwrap();
+    assert!(cert.certifies(&key));
+    for (person, kind) in [
+        ("jan", ApprovalKind::Automatic),
+        ("eva", ApprovalKind::Confirmed),
+        ("ja", ApprovalKind::Confirmed),
+        ("jan:confirmed", ApprovalKind::Confirmed),
+    ] {
+        assert!(
+            matches!(
+                verify_approval_certificate_for(&line, &ca_pub, person, kind, now),
+                Err(SignError::NotTheExpectedName)
+            ),
+            "{person} {kind:?}"
+        );
+    }
+    // The time is the caller's: the check without it accepts an ended certificate, and says when it ended.
+    let (ended, _) = approval_cert(&keys, &ca, "ended", false, "jan:automatic", "20200101Z:20200102Z", &[]);
+    let cert = check_approval_certificate(&ended, &ca_pub).unwrap();
+    assert_eq!((cert.valid_after, cert.valid_before), (1_577_836_800, 1_577_923_200));
+    assert!(matches!(cert.valid_at(now), Err(SignError::CertificateExpired)));
+    assert!(matches!(cert.valid_at(at("2019-12-31T23:59:59Z")), Err(SignError::CertificateNotYetValid)));
+    assert!(cert.valid_at(at("2020-01-01T12:00:00Z")).is_ok());
+    // But everything else is still judged without the time: the name, the issuer and the signature.
+    let other = keys.public(&keys.key("other-ca"));
+    assert!(matches!(check_approval_certificate(&ended, &other), Err(SignError::WrongIssuer)));
+    let (bad_name, _) = approval_cert(&keys, &ca, "bad", false, "jan", "20200101Z:20200102Z", &[]);
+    assert!(matches!(check_approval_certificate(&bad_name, &ca_pub), Err(SignError::NotAnApprovalName(_))));
+}
+
+#[test]
+fn bytes_after_a_certificates_signature_are_refused_because_the_signature_does_not_cover_them() {
+    use base64::Engine as _;
+    let keys = Keys::new();
+    let ca = keys.key("ca");
+    let ca_pub = keys.public(&ca);
+    let (line, _) = approval_cert(&keys, &ca, "k", true, "jan:confirmed", VALID, &[]);
+    let mut parts = line.splitn(3, ' ');
+    let (kind, b64) = (parts.next().unwrap(), parts.next().unwrap());
+    let mut blob = base64::engine::general_purpose::STANDARD.decode(b64).unwrap();
+    blob.push(0);
+    let with_trailer = format!("{kind} {}", base64::engine::general_purpose::STANDARD.encode(&blob));
+    assert!(matches!(check_approval_certificate(&with_trailer, &ca_pub), Err(SignError::CertificateTrailingData)));
+    assert!(matches!(agent_certificate(&with_trailer), Err(SignError::CertificateTrailingData)));
+    assert!(matches!(certificate_issuer(&with_trailer), Err(SignError::CertificateTrailingData)));
+    // And the same certificate without it is accepted.
+    assert!(check_approval_certificate(&line, &ca_pub).is_ok());
 }
