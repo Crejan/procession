@@ -502,7 +502,9 @@ mod tests {
 
     #[test]
     fn the_mode_is_explicit_whatever_the_umask() {
-        for mask in [0o002, 0o022, 0o077, 0o000, 0o277] {
+        // no mask that takes the owner's own permissions away (0277 did): the umask is process-wide, and a mask like
+        // that, set while another test creates files, makes that test fail with "permission denied"
+        for mask in [0o002, 0o022, 0o077, 0o000, 0o007] {
             assert_eq!(mode_under_umask(mask), FILE_MODE, "umask {mask:04o}");
         }
     }

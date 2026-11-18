@@ -129,3 +129,29 @@ no `dump` verb (the engine has it, the verb list is unchanged). Open for the des
 - The marker is not wired to a `backup` yet: no backup exists (it was not built in unit 4, which stayed read-only). It is the primitive the backup, prune and
   check jobs call; wiring and the one-shot CLI's use are tests-with-the-job later.
 - Merged `integration` again; `Cargo.lock` conflicted and was taken from `integration`, then my dependencies were re-added by the build.
+
+## Item 4: SHA-256 restore test, a repository written by restic, switch to p-ermit (done)
+- **p-ermit switch**: `p_reserve_core::text::for_display` now asks `p_ermit::text::check` per character (my copy of the character set is gone). Behaviour: same set; mine still *replaces*
+  a refused character with a space (a `detail` for a log must still be written), p-ermit's `check` only refuses, so no difference in what is refused. I also moved the
+  configuration file and the password file onto `p_ermit::settings` (`read_toml_optional` with the `toml` feature, `read_secret_checked`): my `read_checked`, `read_secret` checks
+  and TOML error scrubbing are deleted; `p-act` is no longer a dependency of p-reserve. Error text differs only in wording (p-ermit's). 
+- **Engine tests** in `crates/p-reserve-core/tests/engine.rs` (feature `testing`, so out of the default run). All 5 pass, none skipped (`restic` 0.19.0 is on this machine, local repository in a
+  temp dir, no network):
+  - restore of a whole tree and of every file one by one, SHA-256 of each restored file against the source file (small, empty, symlink as its target, nested, a 3 MiB file of
+    several chunks, a compressible one), from a repository written by rustic AND from one written by `restic` 0.19.0 (repository v2, compression on);
+  - the engine lists (kinds included), dumps and restores what restic wrote; opening and reading takes no lock and changes no file (`locks/`, `snapshots/`, `index/`, `keys/`
+    listings identical);
+  - **a restic that is writing** (`restic backup --stdin` holds its lock until its input closes): the repository opens and reads normally while the lock is held; rustic neither
+    waits nor refuses and takes no lock of its own (lock count stays 1, then 0 when restic finishes). A snapshot restic wrote after the open is **listed at once** (the list is read
+    from the repository each time) but **its data is not in the loaded index**: reading it fails with outcome `failed`, detail "Tree ID ... not found in index", never wrong bytes;
+    a new open reads it. So the daemon has to reopen, when that failure comes or when it learns of a new snapshot.
+  - Not tested: a repository **exclusively** locked by restic (prune, forget, rewrite hold one briefly; nothing here could hold one open). rustic takes no locks, so it would not notice it:
+    reading while restic prunes is the unsafe case the SPEC already names.
+- **A flaky test found and fixed**: `textfile::tests` set a umask of `0277` (no owner write) process-wide; a test creating a file at the same moment failed with "permission denied"
+  (it hit the engine fixture once). The mask list no longer has `0277` (`0007` instead) and `umask.rs` says why.
+- **Commands and times, here (a macOS machine, load average lower than before):**
+  default, as the orchestrator's sweep: `cargo test --workspace --offline` 2 min 34 s, all pass, no rustic compiled (62 result lines, one `ignored` is in another crate's doctests);
+  the engine tests: `cargo test -p p-reserve-core -p p-reserve --features p-reserve/engine-rustic --offline` 5 min 51 s in all (builds already warm; of which the new
+  `--test engine` file 76 s and the lib's engine tests 107 s, the CLI process tests 140 s, run in parallel with each other), all pass. Faster with
+  `--config 'profile.dev.package."*".opt-level=2'` (once built), much slower on a cold build.
+- Three-umask sweep of my two crates (022, 002, 077) before the engine tests: same counts, 0 failed.
