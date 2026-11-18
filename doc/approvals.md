@@ -580,6 +580,13 @@ specifications:
   arrives when the broker's host is converged, and stopping someone at once
   is `page block` (for a leaver: block, then a limited converge of the
   broker's host, then the rest). Stages 1 and 2 need no issuer.
+- Settings files are JSON for all three programs (`pledge`, `probe`,
+  `page`): one object, an unknown member refused, the file refused if anyone
+  but its owner or root can write it. A person cannot comment in them; a
+  site's roll-out renders them.
+- The broker listens for services and pledges on one address; the first
+  message says which exchange a connection carries
+  (`approval-connections.md`, section 4).
 - The broker is built on tokio and rustls; `pact` uses an HTTP client crate
   instead of one written here.
 

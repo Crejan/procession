@@ -194,7 +194,9 @@ own, on its transports: `signin`, `blocked`, `superseded`, `busy`, `timeout`
   answer is `expired`.
 - **A `submit` whose request does not parse** is answered `refused` with
   pledge's reason `malformed` (or the broker's `bad-request`) for the hash of
-  the bytes received, and the connection stays open. A `submit` whose
+  the bytes received. Between a service and the broker the connection is then
+  closed, as after every answer there (section 4: one request per connection).
+  A `submit` whose
   `request` is not base64 has no hash and is an `error`.
 - **An `answer` whose `result` the receiver does not know** is no answer: a
   service acts on nothing and goes on waiting until the deadline.
@@ -271,6 +273,16 @@ client certificate and no sign-in: the request's signature is what identifies
 the service. The broker treats the connection as nobody's until the request on
 it verifies.
 
+**One address, and the first message says which exchange this is.** The broker
+listens for services and for pledges on the same address. A connection whose
+first message is `submit` is a service's; one whose first message is `hello`
+(section 5) is a pledge's; any other first message is an `error`
+`malformed-line` and the connection is closed. Where a connection arrived
+means nothing: what authenticates it is the signature inside, the signed
+request here and the sign-in there. A site may let the broker listen on
+several addresses; all behave the same. Limits per address are per peer
+address.
+
 **One request per connection**, in this order:
 
 1. The service sends `submit` within 10 s of connecting. A second `submit` on the
@@ -322,6 +334,15 @@ person's connection key, with an SSHSIG over a document, so that the key is
 used as every other key in the system is and the broker needs no second
 mechanism (a client certificate would need a second form of key and a second
 CA).
+
+pledge speaks first, within 10 s of connecting, so that the broker can tell
+this connection from a service's (section 4):
+
+```json
+{"schema_version":1,"type":"hello"}
+```
+
+The broker answers with a challenge:
 
 ```json
 {"schema_version":1,"type":"challenge","nonce":"q3V0w9h1..."}
@@ -518,6 +539,11 @@ second signature. The answer is
 `{"schema_version":1,"type":"not-registered","delegation":"SHA256:...","reason":"..."}`
 (reasons, a closed list: `bad-certificate`, `too-long`, `not-yours`, `blocked`).
 
+A certificate that breaks `approval-formats.md` section 3.1 in its form has no
+fingerprint to answer under, so the answer to it is `error` `malformed-line`.
+`not-registered` is the answer to a well-formed certificate that the broker
+does not take into the register.
+
 **Withdrawals.**
 
 ```json
@@ -572,7 +598,7 @@ In the manner of `approval-formats.md` section 7. `<person>`, `<service>`,
 | `notice` (`doc`, `doc_sig`: the standing) | the broker's key, certified by the site CA | `broker-v1@procession` | pledge | `broker` | the site CA's key |
 | a certificate in the standing | the site CA | (a certificate) | pledge | its own key and `<person>:confirmed` / `:automatic` | the site CA's key |
 | `delegation`'s `cert` (a certificate, not a signature) | the person's delegation key | (a certificate) | the broker, with `p-act` | the person, as its only principal | the person's delegation key, site project |
-| the messages themselves, and `answer` without approval (`declined`, `refused`, `expired`), `cancel`, `withdraw`, `ping`, `ack`, `registered`, `not-registered`, `challenge`, `ready`, `error` | nobody | none | nobody | none | TLS and, on pledge's connection, the sign-in |
+| the messages themselves, and `answer` without approval (`declined`, `refused`, `expired`), `cancel`, `withdraw`, `ping`, `ack`, `registered`, `not-registered`, `hello`, `challenge`, `ready`, `error` | nobody | none | nobody | none | TLS and, on pledge's connection, the sign-in |
 
 Allowed-signers lines (`namespaces` are what keeps one document from
 verifying as another):
