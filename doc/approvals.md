@@ -508,7 +508,7 @@ certificates for every enabled person's approval keys that have fewer than
 | dialogs on screen | one | pledge |
 | requests waiting per agent | a setting, 5 by default; further ones are refused | pledge (its own setting, per person); the broker (the site's setting) |
 | declines before an agent is muted | 3 within 10 minutes; then its requests are refused without a dialog for 10 minutes and the person is told | pledge |
-| what a dialog shows | a field whole, up to the formats' limit for it (a parameter 512 bytes, the claim 200 characters); the parameters of a call together at most 2000 characters; longer is refused | pledge |
+| what a dialog shows | a field whole, up to the formats' limit for it (a parameter 512 bytes, the claim 200 characters); the parameters of a call together at most 2000 characters; service, host and action together at most 240 characters (`approval-formats.md`, section 3); longer is refused, never cut | pledge, and the service before it asks |
 | a command's run (U6) | 60 seconds by default, 10 minutes at most; 1 MiB of output | service |
 | the record on the person's machine | kept one year | pledge |
 | group memberships at the broker | read again every 5 minutes | the job beside the broker |

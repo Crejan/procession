@@ -91,6 +91,14 @@ What an agent asks for. Signed by the agent.
 - The identifier is what makes a call single-use. pledge signs for an
   identifier once, and the service acts on one once; both keep it until the
   deadline, after which the call is void anyway.
+- `service.name`, `service.host` and `action` are together at most 240
+  characters. The host is bounded by itself; the service's name and the
+  action are not, so this bound is what holds them. They are the words a
+  person's machine shows where space is fixed (the prompt of a presence
+  check), and what does not fit there is refused, never cut: a call over the
+  bound cannot be shown and is refused as `not-showable`, by the service
+  before anybody is asked and by pledge. The bound is the same on every
+  platform, so that a call one person's machine can show every person's can.
 
 The person the agent acts for is not a member: it is the name in the agent's
 certificate, which is inside the signature.
