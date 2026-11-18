@@ -217,6 +217,17 @@ There is nothing else to sign. "No" has no signature: a decline, a refusal
 and an expiry are reported (in the answer, whose format belongs to the
 connections) and recorded, and a service acts on none of them.
 
+An approval carries no signed time. When the person decided is in pledge's
+record and nowhere else that is signed. What bounds an approval's use is the
+call's deadline and the identifier being single-use, not the time of
+signing.
+
+**The bundle** an agent is given (its key, its certificate and one line of
+configuration; `crates/p-act/proposals/pact.md`) is under no signature. It
+is a file pledge writes with mode 0600 for one agent; whoever can alter it
+has the agent's key beside it, so a signature over the configuration line
+would protect nothing the key does not already need protected.
+
 ## 6. The clearance
 
 The broker saying a request passed its checks. Signed by the broker.
