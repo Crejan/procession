@@ -405,6 +405,8 @@ impl<'a> Dispatcher<'a> {
         // A verb that stops because the answer is full ends cleanly (the answer says `truncated`); one
         // whose reader is gone, or whose code is not 0, did not give a usable result.
         let result = run(&env, &call.args, &mut answer);
+        // A verb without a closing record still says what the cap dropped.
+        let _ = answer.finish();
         let cause = match result {
             _ if answer.lost() => Some("answer-lost".to_string()),
             _ if answer.failure().is_some() => answer.failure().map(String::from),
@@ -420,8 +422,10 @@ impl<'a> Dispatcher<'a> {
         if let Some(cause) = cause.as_deref() {
             done.push(("cause", cause));
         }
+        let dropped = answer.dropped_lines().to_string();
         if answer.truncated() {
             done.push(("truncated", "true"));
+            done.push(("dropped_lines", dropped.as_str()));
         }
         self.log("done", &done)?;
         Ok(rc)
@@ -733,18 +737,32 @@ mod tests {
     }
 
     #[test]
-    fn every_answer_is_capped() {
+    fn every_answer_is_capped_and_a_cut_one_still_ends_with_its_closing_record() {
         let sink = Memory::default();
         let dir = crate::testdir::new("locks");
         let (mut out, mut err) = (Vec::new(), Vec::new());
         let mut dispatcher = Dispatcher::new(&sink, dir);
-        dispatcher.cap = 600;
+        let cap = crate::answer::TRUNCATED_MAX + crate::answer::CLOSING_MAX + 700;
+        dispatcher.cap = cap;
         let rc = dispatcher.run(&sudo("jan"), &words(&["sys", "kit"]), &mut out, &mut err);
         let text = String::from_utf8(out).unwrap();
-        assert_eq!(rc, 0);
-        assert!(text.len() <= 600, "{}", text.len());
-        assert!(text.lines().last().unwrap().starts_with("{\"type\":\"truncated\""), "{text}");
-        assert!(sink.lines.borrow().last().unwrap().contains("truncated=true"));
+        assert_eq!(rc, 0, "a cut answer is a result");
+        assert!(text.len() <= cap, "{}", text.len());
+        let lines: Vec<&str> = text.lines().collect();
+        let cut: serde_json::Value = serde_json::from_str(lines[lines.len() - 2]).unwrap();
+        assert_eq!(cut["type"], "truncated", "{text}");
+        assert!(cut["dropped_lines"].as_u64().unwrap() >= 1 && cut["dropped"]["verb"].as_u64().unwrap() >= 1, "{cut}");
+        // The closing record is the verb's own, with the counts of what it found, not of what was sent.
+        let summary: serde_json::Value = serde_json::from_str(lines.last().unwrap()).unwrap();
+        assert_eq!(summary["type"], "summary");
+        let verbs = crate::table::verbs().count() as u64;
+        assert_eq!(
+            summary["verbs_ready"].as_u64().unwrap() + summary["verbs_unavailable"].as_u64().unwrap() + 1, /* service-only */
+            verbs
+        );
+        assert!(lines.last().unwrap().len() < crate::answer::CLOSING_MAX);
+        let done = sink.lines.borrow().last().unwrap().clone();
+        assert!(done.contains("truncated=true") && done.contains("dropped_lines="), "{done}");
     }
 
     // -- a verb that was started and gave no usable result: 70 ---------------------------------------

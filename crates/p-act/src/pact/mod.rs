@@ -12,6 +12,7 @@ pub mod canon;
 pub mod catalogue;
 pub mod cli;
 pub mod compose;
+pub mod guard;
 pub mod http;
 pub mod mcp;
 pub mod outcome;

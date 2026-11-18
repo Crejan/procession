@@ -6,6 +6,9 @@ What may be trusted on a Unix system, checked the same way by every program that
   runs the program, not writable by its group or by others, within a size limit. The checks are made **on the open
   file** (no gap between check and read). The errors say what to do (`run chmod 600 <path>`), never hold a value from
   the file, and tell a missing file (`SettingsError::NotFound`) from every other problem.
+- **a secret file**, such as a password file (`read_secret_checked`, `read_secret_optional`, `check_open_secret`): the same, but
+  with no permission bit at all for group or others (reading is as bad as writing). The refusal gives the exact
+  `chmod 600 <path>` or `chown` for the caller's path; the content is never in an error.
 - **a TOML settings file** (feature `toml`, off by default; brings `toml` 0.9 and `serde`): `read_toml`,
   `read_toml_optional`, `parse_toml`, with the same checks, and errors that name the offending *key* and its line and
   column but never print a *value*. Unknown keys are refused by the caller's own `#[serde(deny_unknown_fields)]`;

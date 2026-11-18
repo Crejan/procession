@@ -394,7 +394,47 @@ service's log and the audit line are checked either way). Stage A scripts are un
   (`prover::tests`, and in the dispatcher with a script as `prover`): code 4/5/127, a signal, the timeout, not JSON / an array / two objects / not UTF-8 / empty, one byte over 4 MiB, another
   `subcommand` or `schema_version`, a missing member, a record of a reserved type: each is exit 70 with its cause, and the output is a header, one `error` record and a trailer.
 - **Records are the tool's, as it wrote them** (`serde_json` `raw_value`, no new crate): the member order is kept; the whitespace between tokens is removed so that a record is one line.
-- **When the answer is cut at the cap** the output ends with the `truncated` record and has no trailer (the writer refuses all after it); the trailer's `truncated` is always false. SPEC says so now.
+- **When the answer is cut at the cap:** superseded, see the next update (the trailer is always written).
 - **Parameters** are checked by the rating rule (`rate.rs`) in the service and again in the dispatcher: `max` 1..10000, `duration` 1..30, `top` 1..1000, each once, digits only; others are refused (64) before anything starts. They add nothing to the rating.
 - `sys kit`'s `verbs_ready` is now 3 plus the test verbs.
 - **Also, three timing-dependent tests were made independent of the machine** (earlier commit) and `with_no_answer_the_call_expires_at_its_deadline…` had a lower bound of one second that a whole-second deadline can undercut (0.977 s seen): it is 500 ms now.
+
+## Update: the closing record is never cut; the path's directories are checked (designer's decisions)
+
+**Path.** `PROVER_PATH` is one constant (packaging may change it at build time; no setting). For root the file where the name leads and every directory above it down to `/` must be
+owned by root and not writable by group or others, else `tool-unusable` (failed). `unsafe_chain` is tested without root by naming another uid as the trusted one and writable bits per level.
+**The cap**, for every verb (`answer.rs`): the cap holds for everything before the closing record; later lines are counted, not written (the verb is not stopped, so counts are complete); then the
+`truncated` record (`limit_bytes`, `dropped_lines`, `dropped_bytes`, `dropped` by type for the eight most numerous, `others`) and then the closing record, always: `prover`'s trailer (`rc`, `result`, the tool's counts,
+`truncated: true`) and `sys kit`'s `summary`. Reserved out of the cap: 1024 B and 2048 B. The `done` audit line says `truncated=true dropped_lines=N`.
+**Tests:** `answer` (a cut answer: counts by type and bytes exact, closing record present and within its bound; the `truncated` record within its bound for 300 long type names; an answer that fits is unmarked), a cut `sys kit` through the dispatcher
+(summary present, counts the tool's), a cut `prover` answer (12 000 records and 300 findings: trailer `rc` 2/`critical`/`truncated` true, `records` 12 000, `findings` 300, written + dropped = what the tool gave).
+
+| What an agent saw for an answer over the cap | Before (up to `057774c`) | Now |
+|---|---|---|
+| `sys kit`-like (no row has one that long) | `done`, lines, then `{"type":"truncated","limit_bytes":N}` last; no `summary`, so no `usable`, no problems or warnings | `done`, lines, `truncated` with the drop counts, then the `summary` with its full content |
+| a `prover` row (new in `dc5685b`, never in a release) | `done`, lines, `truncated`, no trailer (`rc`, `result` missing) | `done`, lines, `truncated` with counts, trailer with `rc`, `result` and the tool's counts |
+The service and MCP did not change: both pass the dispatcher's lines on (`done`, `rc` 0, the lines as the answer); the message limit (4 MiB) holds as the cap did not grow.
+
+## The owner's Stage A run at `2a38839` (2026-11-18, Debian 13 container, after `undo.sh`, scripts unedited; writer: p-act)
+
+**a1** passed ("parsed OK", visudo accepts the rule before anything is changed, account made, `/etc/sudoers.d/probe-svc` installed and the whole sudoers configuration checks, "PASS: prepared"). **a2: all 23 PASS lines and "ALL PASSED":**
+a verb runs as root through the rule (0); `sys kit` says euid 0; above the approved rating refused (64); at the rating runs (0); `run command` refused (64); the same flag twice refused (64); the form without `--within` and the one
+without `--until` are not in the rule (1); a deadline more than ten minutes ahead refused (64); a deadline already past, verb not started (76); a call waits for the lock and then runs (0); the deadline passes while waiting, expired (76); another
+program not in the rule (1); syslog has start/done for `…0a11`, refused for `…0a12`, start for `…0a13`, refused for `…0a14`, expired for `…0a15`, start for `…0a16`, expired for `…0a17`; the waiting call's line says `waited=`; the refusal says
+`above-approved`. So the lock wait, `--until` and the audit lines are shown on Linux through real sudo.
+**a3 failed, and says nothing about `2a38839`:** "pledge serve did not start: agent.sock does not answer" at `tests/common/mod.rs:120` after 10.04 s is the message of the OLD harness: the instruction took the newest `target/debug/deps/stage1_sudo-*`, the binary of `967b64c`,
+while his cargo (1.97) printed the test executable at `target/debug/build/p-robe/0db5897be5b28c37/out/stage1_sudo-0db5897be5b28c37`. **Fix (this commit):** `a3-run-cross.sh CHECKOUT` builds the test and `pledge` itself (as the checkout's owner) and takes both paths from
+cargo's JSON with `find-artifact.sh` (grep and sed; tested against canned messages in cargo 1.97's shape, and against this machine's real output); refuses if cargo does not name exactly one; no `ls -t`, no `deps/` anywhere (a test checks that). The harness takes `pledge`
+(and `pact`) from `PROBE_PLEDGE_BIN` / `PROBE_PACT_BIN`, which the script sets, and only without them from next to `deps/`. **Staleness:** I chose the commit compiled in (`option_env!("PROBE_BUILT_FROM")`, set on the build line, which makes cargo rebuild when it changes) and
+checked against `PROBE_EXPECT_BUILT_FROM`, over comparing mtimes: it shows what ran, and a dirty tree is `<commit>-dirty`. Shown here: a binary built with `aaa111` run expecting `bbb222` stops with "stale test binary: it was built from aaa111, the checkout is at bbb222". **Layout on this machine with cargo 1.97:**
+`target/debug/probe`, `pledge`, `pact` are where the scripts and harness expect them (final binaries are uplifted); only the test executables were seen elsewhere on the owner's, which is why none of them is guessed now. Stage A scripts a1 and a2 are untouched; the owner's repeat of a3 at `2a38839` counts for `2a38839` once he uses this script from the same checkout.
+
+### a3 repeated (same run, 2026-11-18): passed
+
+With the executable cargo named, `target/debug/build/p-robe/0db5897be5b28c37/out/stage1_sudo-0db5897be5b28c37`: "PASSED (exit 0)", test ok in 1.13 s. The runbook's section 7 and status table say what it shows and what it does not (not: HTTP, a service apart from the person, a person at the dialog). The eight `peer:` lines
+(`uid=999 pid=8858 program=/var/tmp/probe-stage1-run/debug/deps/stage1_sudo`) and the journal lines by call identifier are in section 7 as the owner sent them. Automatic approvals have a single `request/approved` entry and no `received`
+(pledge appends `received` only when the request waits for a person), which is why the first two calls show none and the three asked ones do.
+**Stage B needs from the owner**, now that `probe serve` over HTTP (`hyper`), `pact`'s client and the bundle check exist: the Debian host with the Stage A state (or `undo.sh` and a1 again); a build with `cargo build --workspace --features p-robe/test-verbs,p-act/pact` by the checkout's owner, and
+`probe`, `pledge` taken from cargo's own output (a3's `find-artifact.sh` does it for the test; the install lines of B should take `target/debug/probe` and `pledge` as they are, which this cargo does uplift); a person at a terminal for pledge's dialogs (B1, B5); `/etc/probe.json` (B3, JSON, mode 0644, root-owned); the unit with its hardening files (B4); a bundle for the agent
+that its user owns with mode 0600 (`pact` refuses otherwise); a free TCP port (default 8765) on the loopback. The first TCP run of the HTTP layer, the first systemd run of the units and the first `pact call` over `ureq` are **all new**: expect that a first failure there is more likely than not, and send the `journalctl -u probe-serve` and `pact`'s own error. `prover` is not needed (`rt irq` and `rt procs` use it, from `/usr/local/bin/prover`, and `sys kit` warns while it is missing).
+**Commit to name:** the head of `integration` after this unit is merged (it holds `ac1fcba`'s a3 and p-act's bundle check); I name it when you tell me it is in.

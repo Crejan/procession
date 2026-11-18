@@ -161,10 +161,16 @@ row's). It then writes the output convention, one JSON object per line:
 
 The types `header`, `unreadable`, `restored`, `finding`, `trailer` and `error` are the
 dispatcher's: a record of the tool with one of them is a disagreement (below). The
-cap of 1 MiB on the answer (`ANSWER_CAP`) applies to these lines as to any answer: past it
-the output ends with the `truncated` record and has **no trailer** (the writer refuses everything after
-that record; a trailer's `truncated` is therefore always `false`): an agent that finds no trailer knows the
-answer was cut. (`prover`'s own estimates, about 115 KB for `procs` and 150 KB for `irq`, are far below.)
+cap of 1 MiB on the answer (`ANSWER_CAP`) is part of the line convention of **every** verb, not of
+these rows only: it applies to everything before the verb's **closing record** (a `prover` row's trailer, `sys kit`'s
+`summary`). A line that would pass it, and every line after, is not written but counted. Then comes the
+`truncated` record (`limit_bytes`, `dropped_lines`, `dropped_bytes`, `dropped`: the counts by record `type` for
+the eight most numerous types, `others`: the rest) and then the closing record, **always**: it carries the tool's
+`rc` and `result` and the counts of what the tool reported (`records`, `findings`, `unreadable`), not of what was
+sent, and `truncated: true`. So a cut answer cannot be read as "no findings". Out of the cap 1024 bytes are kept
+for the `truncated` record and 2048 for the closing record (`TRUNCATED_MAX`, `CLOSING_MAX`); a verb that goes on
+writing after the cut is not stopped, which is how the counts are complete. (`prover`'s own estimates, about 115 KB
+for `procs` and 150 KB for `irq`, are far below.)
 
 **Exit codes.** The dispatcher's own exit code says only what the dispatcher did: 0 it
 ran, 64 refused, 75 busy, 76 expired, 3 no audit line could be written. **The tool's
@@ -187,10 +193,10 @@ only for a verb that certainly did not start) and logs the cause under the call'
 
 **Built** (`src/prover.rs`): `rt procs` (`max`) and `rt irq` (`duration`, `top`); the limit on the object is
 4 MiB, the tool's run is killed after 30 s (`procs`) or 60 s (`irq`: the longest window and then some), and
-the tool is not run at all unless, for root, it is a file that root owns and no one else can write
-(`tool-unusable`). **Where `prover` is:** the fixed `/usr/local/bin/prover` (`PROVER_PATH`), installed beside
-`probe` by the roll-out; not a setting (the dispatcher runs it as root, so nothing an account can edit may
-name it). `sys kit` reports the path and, if it cannot be run, a warning. `rt jitter` stays unbuilt.
+the tool is not run at all unless, for root, the file where its name leads (links resolved) **and every directory above it**
+are owned by root and cannot be written by group or others (`tool-unusable`). **Where `prover` is:** the fixed `/usr/local/bin/prover` (`PROVER_PATH`, one constant, which packaging may change
+at build time; never a setting: the dispatcher runs it as root, so nothing an account can edit may name it),
+installed beside `probe` by the roll-out. `sys kit` reports the path and, if it cannot be run, a warning. `rt jitter` stays unbuilt.
 
 The first table (`src/main.rs`); the ratings are proposals:
 

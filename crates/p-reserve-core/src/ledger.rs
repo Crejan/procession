@@ -25,6 +25,28 @@ impl Pair {
     }
 }
 
+/// Why a run ended as it did, when the outcome alone does not say. Closed
+/// list; the name is what is written to the ledger.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum Cause {
+    /// The run began and never ended: the program died, or the machine did.
+    /// Found at the next start from a start marker with no end.
+    Interrupted,
+}
+
+impl Cause {
+    pub fn name(self) -> &'static str {
+        match self {
+            Cause::Interrupted => "interrupted",
+        }
+    }
+
+    pub fn from_name(name: &str) -> Option<Cause> {
+        [Cause::Interrupted].into_iter().find(|cause| cause.name() == name)
+    }
+}
+
 /// How one run of one pair ended.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Run {
@@ -34,6 +56,7 @@ pub struct Run {
     /// How many source files could not be read; counts only if it stored a
     /// snapshot.
     pub unreadable: u64,
+    pub cause: Option<Cause>,
 }
 
 impl Run {
@@ -41,13 +64,18 @@ impl Run {
     /// `Incomplete`, never `Ok`: this is the one place that says so.
     pub fn stored(added_bytes: u64, unreadable: u64) -> Run {
         let outcome = if unreadable == 0 { Outcome::Ok } else { Outcome::Incomplete };
-        Run { outcome, added_bytes, unreadable }
+        Run { outcome, added_bytes, unreadable, cause: None }
     }
 
     /// A run that ended as `outcome` without a count of its own: a failure, a
     /// deferral, or a snapshot whose unreadable files were not counted.
     pub fn ended(outcome: Outcome) -> Run {
-        Run { outcome, added_bytes: 0, unreadable: 0 }
+        Run { outcome, added_bytes: 0, unreadable: 0, cause: None }
+    }
+
+    /// A run that began and never ended: `failed`, because `interrupted`.
+    pub fn interrupted() -> Run {
+        Run { cause: Some(Cause::Interrupted), ..Run::ended(Outcome::Failed) }
     }
 
     /// The run over several sources: the worst of its sources' outcomes, with
@@ -60,6 +88,7 @@ impl Run {
                     outcome: Outcome::worst([sum.outcome, run.outcome]).unwrap_or(run.outcome),
                     added_bytes: sum.added_bytes.saturating_add(run.added_bytes),
                     unreadable: sum.unreadable.saturating_add(run.unreadable),
+                    cause: sum.cause.or(run.cause),
                 },
             })
         })
@@ -79,6 +108,11 @@ pub struct Entry {
     /// deferred.
     pub first_attempt: Option<SystemTime>,
     pub last_outcome: Option<Outcome>,
+    /// Why the last run ended so, where the outcome does not say.
+    pub last_cause: Option<Cause>,
+    /// When the last run of any outcome was recorded (for a run found
+    /// interrupted: when it began).
+    pub last_attempt: Option<SystemTime>,
 }
 
 /// The pairs and what happened to them. Persistence is the caller's: the
@@ -94,6 +128,8 @@ impl Ledger {
     pub fn record(&mut self, pair: Pair, run: Run, at: SystemTime) {
         let entry = self.entries.entry(pair).or_default();
         entry.last_outcome = Some(run.outcome);
+        entry.last_cause = run.cause;
+        entry.last_attempt = Some(at);
         if run.outcome.stored_snapshot() {
             entry.last_success = Some(at);
             entry.last_added_bytes = run.added_bytes;
@@ -216,7 +252,7 @@ mod tests {
     #[test]
     fn a_run_over_several_sources_is_the_worst_of_them_with_the_counts_summed() {
         let run = Run::combine([Run::stored(10, 0), Run::stored(20, 4), Run::stored(1, 1)]).unwrap();
-        assert_eq!(run, Run { outcome: Outcome::Incomplete, added_bytes: 31, unreadable: 5 });
+        assert_eq!(run, Run { outcome: Outcome::Incomplete, added_bytes: 31, unreadable: 5, cause: None });
         let run = Run::combine([Run::stored(10, 2), Run::ended(Outcome::Failed)]).unwrap();
         assert_eq!(run.outcome, Outcome::Failed);
         assert_eq!(Run::combine([]), None);

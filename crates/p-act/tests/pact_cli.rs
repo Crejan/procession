@@ -10,6 +10,16 @@ use std::path::Path;
 use std::process::{Child, Command, Stdio};
 use std::time::Duration;
 
+/// A fresh directory under which a test may bind a Unix socket: under `PACT_TEST_DIR` if set, else `/tmp/claude` if it
+/// is there (some sandboxes allow sockets only under one directory), else the system's temporary directory.
+fn socket_tempdir() -> tempfile::TempDir {
+    let base = std::env::var_os("PACT_TEST_DIR").map(std::path::PathBuf::from).unwrap_or_else(|| {
+        let sandbox = std::path::PathBuf::from("/tmp/claude");
+        if sandbox.is_dir() { sandbox } else { std::env::temp_dir() }
+    });
+    tempfile::Builder::new().prefix("pact-").tempdir_in(base).unwrap()
+}
+
 fn pact() -> Command {
     Command::new(env!("CARGO_BIN_EXE_pact"))
 }
@@ -128,7 +138,7 @@ fn wait_for_socket(path: &Path, child: &mut Child) {
 
 #[test]
 fn serve_speaks_mcp_on_its_socket_and_stdio_is_a_shim_to_it() {
-    let dir = tempfile::tempdir().unwrap();
+    let dir = socket_tempdir();
     // Some sandboxes do not let a process bind a Unix socket; then there is nothing here to test, and it is said.
     if let Err(e) = std::os::unix::net::UnixListener::bind(dir.path().join("probe.sock")) {
         // Under PACT_REQUIRE_TCP=1 (which also covers this Unix socket) not being able to bind is a failure.
@@ -192,7 +202,7 @@ fn serve_speaks_mcp_on_its_socket_and_stdio_is_a_shim_to_it() {
 
 #[test]
 fn serve_refuses_to_replace_a_socket_and_needs_one() {
-    let dir = tempfile::tempdir().unwrap();
+    let dir = socket_tempdir();
     let (good, _) = bundle(dir.path(), "20200101Z:20990101Z");
     let (code, _, stderr) = run(&["serve"], &good);
     assert_eq!(code, 1);
@@ -222,4 +232,168 @@ fn an_https_bundle_is_refused_at_start_by_a_build_without_tls() {
     assert_eq!(code, 1, "{stderr}");
     assert!(stdout.is_empty());
     assert!(stderr.contains("without TLS") && stderr.contains("pact-tls"), "{stderr}");
+}
+
+/// `pact ARGS` with standard input redirected from the file `path`, as `pact call TOOL < bundle` is.
+fn run_from_file(args: &[&str], path: &Path) -> (i32, String, String) {
+    let out = pact()
+        .args(args)
+        .stdin(std::fs::File::open(path).unwrap())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .output()
+        .unwrap();
+    (out.status.code().unwrap(), String::from_utf8(out.stdout).unwrap(), String::from_utf8(out.stderr).unwrap())
+}
+
+fn sockets_allowed(dir: &Path) -> bool {
+    let probe = dir.join("probe.sock");
+    let ok = std::os::unix::net::UnixListener::bind(&probe).is_ok();
+    let _ = std::fs::remove_file(&probe);
+    if !ok {
+        assert!(
+            std::env::var_os("PACT_REQUIRE_TCP").is_none_or(|v| v.is_empty() || v == "0"),
+            "PACT_REQUIRE_TCP is set and this environment does not allow binding a Unix socket"
+        );
+        eprintln!("SKIPPED: this environment does not allow binding a Unix socket");
+    }
+    ok
+}
+
+#[test]
+fn a_bundle_in_a_file_that_group_or_others_can_access_is_refused_before_a_byte_is_read() {
+    let dir = tempfile::tempdir().unwrap();
+    let (good, body) = bundle(dir.path(), "20200101Z:20990101Z");
+    let file = dir.path().join("bundle");
+    for mode in [0o644, 0o640, 0o604, 0o660, 0o606, 0o666, 0o610, 0o601, 0o744] {
+        // The content is garbage: if a byte were read first, the error would be about the bundle's form.
+        std::fs::write(&file, b"garbage\n").unwrap();
+        std::fs::set_permissions(&file, std::fs::Permissions::from_mode(mode)).unwrap();
+        let (code, stdout, stderr) = run_from_file(&["tools"], &file);
+        assert_eq!(code, 1, "{mode:o}: {stderr}");
+        assert!(stdout.is_empty());
+        assert!(
+            stderr.contains(&format!("{mode:04o}"))
+                && stderr.contains("chmod 600")
+                && stderr.contains("standard input"),
+            "{mode:o}: {stderr}"
+        );
+        assert!(!stderr.contains("garbage"));
+    }
+    // The real bundle, readable by others, is refused too, and its key does not appear.
+    std::fs::write(&file, &good).unwrap();
+    std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o644)).unwrap();
+    for command in [&["tools"][..], &["call", "x"], &["serve", "--socket", "/nonexistent/s"]] {
+        let (code, _, stderr) = run_from_file(command, &file);
+        assert_eq!(code, 1, "{stderr}");
+        assert!(stderr.contains("chmod 600") && !stderr.contains(&body[30..50]), "{stderr}");
+    }
+}
+
+#[test]
+fn a_bundle_in_a_private_file_or_on_a_pipe_is_read() {
+    let dir = tempfile::tempdir().unwrap();
+    let (good, _) = bundle(dir.path(), "20200101Z:20990101Z");
+    let file = dir.path().join("bundle");
+    for mode in [0o600, 0o400] {
+        let _ = std::fs::remove_file(&file);
+        std::fs::write(&file, &good).unwrap();
+        std::fs::set_permissions(&file, std::fs::Permissions::from_mode(mode)).unwrap();
+        let (code, stdout, stderr) = run_from_file(&["tools", "--min-wait", "1"], &file);
+        assert_eq!(code, 0, "{mode:o}: {stderr}");
+        assert_eq!(stdout.trim(), "[]");
+    }
+    // A pipe has nothing to check, whatever its writer's mode.
+    let (code, ..) = run(&["tools", "--min-wait", "1"], &good);
+    assert_eq!(code, 0);
+    // A file that is garbage and private is refused as a bundle, not for its mode.
+    std::fs::remove_file(&file).unwrap();
+    std::fs::write(&file, b"garbage\n").unwrap();
+    std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o600)).unwrap();
+    let (code, _, stderr) = run_from_file(&["tools"], &file);
+    assert_eq!(code, 1);
+    assert!(!stderr.contains("chmod"), "{stderr}");
+}
+
+#[test]
+fn the_options_for_who_may_connect_are_checked_at_start() {
+    let dir = tempfile::tempdir().unwrap();
+    let (good, _) = bundle(dir.path(), "20200101Z:20990101Z");
+    let socket = dir.path().join("never.sock");
+    let socket = socket.to_str().unwrap();
+    let (code, _, stderr) = run(&["serve", "--socket", socket, "--refuse-own-user"], &good);
+    assert_eq!(code, 1);
+    assert!(stderr.contains("--client-uid"), "{stderr}");
+    let own = unsafe { libc::geteuid() }.to_string();
+    let (code, _, stderr) = run(&["serve", "--socket", socket, "--refuse-own-user", "--client-uid", &own], &good);
+    assert_eq!(code, 1);
+    assert!(stderr.contains("own user"), "{stderr}");
+    let (code, _, _) = run(&["serve", "--socket", socket, "--client-uid", "x"], &good);
+    assert_eq!(code, 2);
+    assert!(!Path::new(socket).exists());
+}
+
+#[test]
+fn serve_admits_the_running_user_only_and_says_so_and_drops_other_clients_in_silence() {
+    let dir = socket_tempdir();
+    if !sockets_allowed(dir.path()) {
+        return;
+    }
+    let (good, _) = bundle(dir.path(), "20200101Z:20990101Z");
+    let own: u32 = unsafe { libc::geteuid() };
+    let wide = dir.path().join("wide");
+    std::fs::create_dir(&wide).unwrap();
+    std::fs::set_permissions(&wide, std::fs::Permissions::from_mode(0o777)).unwrap();
+    let start = |args: &[&str], socket: &Path| {
+        let mut server = pact()
+            .args(["serve", "--socket", socket.to_str().unwrap()])
+            .args(args)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::null())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        server.stdin.take().unwrap().write_all(&good).unwrap();
+        wait_for_socket(socket, &mut server);
+        server
+    };
+    let ping = |socket: &Path| -> String {
+        let mut s = UnixStream::connect(socket).unwrap();
+        s.set_read_timeout(Some(Duration::from_secs(20))).unwrap();
+        let _ = writeln!(s, "{}", json!({"jsonrpc": "2.0", "id": 1, "method": "ping"}));
+        let mut line = String::new();
+        let _ = BufReader::new(s).read_line(&mut line);
+        line
+    };
+    let finish = |mut server: Child| {
+        server.kill().unwrap();
+        let mut stderr = String::new();
+        server.stderr.take().unwrap().read_to_string(&mut stderr).unwrap();
+        server.wait().unwrap();
+        stderr
+    };
+
+    // Stage 1: the running user is admitted, and the start says that this means the model can read what pact can; the
+    // socket's directory is warned about; the socket's mode is 0600 whatever the umask.
+    let socket = wide.join("stage1.sock");
+    let server = start(&[], &socket);
+    assert_eq!(std::fs::metadata(&socket).unwrap().permissions().mode() & 0o777, 0o600);
+    assert!(ping(&socket).contains(r#""result":{}"#));
+    let stderr = finish(server);
+    assert!(stderr.contains("same user as pact"), "{stderr}");
+    assert!(stderr.contains("directory of the socket") && stderr.contains("0777"), "{stderr}");
+
+    // Stage 2: somebody else is the client and the running user is refused, with one line and nothing told to it.
+    let other = (own + 1).to_string();
+    let socket = dir.path().join("stage2.sock");
+    let server = start(&["--client-uid", &other, "--refuse-own-user"], &socket);
+    assert_eq!(ping(&socket), "", "the connection is closed without a word");
+    for _ in 0..3 {
+        assert_eq!(ping(&socket), "");
+    }
+    let stderr = finish(server);
+    assert!(!stderr.contains("same user as pact"), "{stderr}");
+    let refused: Vec<_> = stderr.lines().filter(|l| l.contains("a client was refused")).collect();
+    assert_eq!(refused.len(), 1, "throttled to one line: {stderr}");
+    assert!(refused[0].contains(&own.to_string()), "{stderr}");
 }

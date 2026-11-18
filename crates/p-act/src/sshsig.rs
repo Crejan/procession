@@ -471,7 +471,8 @@ mod tests {
             .stderr(Stdio::null())
             .spawn()
             .unwrap();
-        child.stdin.take().unwrap().write_all(data).unwrap();
+        // A child that exits first (it failed) makes this write fail with `Broken pipe`: the status is the answer.
+        let _ = child.stdin.take().unwrap().write_all(data);
         child.wait().unwrap().success()
     }
 

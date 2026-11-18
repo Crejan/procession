@@ -149,8 +149,25 @@ pub trait Tool {
 /// The program at an absolute path, with a cleared environment and no standard input.
 pub struct Program {
     pub path: PathBuf,
-    /// Whether to insist that root owns it and nobody else can write it (as root does, for the real one).
-    pub check_owner: bool,
+    /// The uid that must own the file and every directory above it, none of which may be writable by group or
+    /// others: root (0) for the real one, as root's dispatcher runs it. `None` for a test build's stand-in.
+    pub trusted: Option<u32>,
+}
+
+/// Why `path` (resolved) is not safe for `trusted` to run: it, or a directory above it down from `from`,
+/// is not owned by `trusted` or can be written by group or others. `None` if it is safe.
+#[must_use]
+pub fn unsafe_chain(path: &Path, trusted: u32, from: &Path) -> Option<String> {
+    for step in path.ancestors().take_while(|step| step.starts_with(from)) {
+        let Ok(meta) = std::fs::metadata(step) else { return Some(format!("{} cannot be examined", step.display())) };
+        if meta.uid() != trusted {
+            return Some(format!("{} is not owned by uid {trusted}", step.display()));
+        }
+        if meta.mode() & 0o022 != 0 {
+            return Some(format!("{} can be written by group or others", step.display()));
+        }
+    }
+    None
 }
 
 impl Program {
@@ -164,8 +181,12 @@ impl Program {
         if !meta.is_file() || meta.mode() & 0o111 == 0 {
             return Err(unusable("not an executable file"));
         }
-        if self.check_owner && (meta.uid() != 0 || meta.mode() & 0o022 != 0) {
-            return Err(unusable("not owned by root or writable by others"));
+        if let Some(trusted) = self.trusted {
+            // Where the name leads, not the name: a link could lead out of the directories that are safe.
+            let resolved = std::fs::canonicalize(&self.path).map_err(|_| unusable("not found"))?;
+            if let Some(why) = unsafe_chain(&resolved, trusted, Path::new("/")) {
+                return Err(Failure::Tool(why));
+            }
         }
         Ok(())
     }
@@ -349,14 +370,14 @@ fn result_word(code: i32) -> Option<&'static str> {
     }
 }
 
-fn trailer(rc: Option<i32>, result: &str, lines: &Lines) -> Record {
+fn trailer(rc: Option<i32>, result: &str, lines: &Lines, truncated: bool) -> Record {
     Record::new("trailer")
         .opt_int("rc", rc.map(i64::from))
         .str("result", result)
         .num("records", lines.records)
         .num("findings", lines.findings)
         .num("unreadable", lines.unreadable)
-        .bool("truncated", false)
+        .bool("truncated", truncated)
 }
 
 /// Judges what the tool did: the lines of the output and the trailer's code, or why it is not a result.
@@ -404,7 +425,7 @@ pub fn run_with(row: &Row, tool: &dyn Tool, args: &[String], answer: &mut Answer
                 answer.record_line(line)?;
             }
             let result = result_word(code).unwrap_or("failed");
-            answer.record(&trailer(Some(code), result, &lines))?;
+            answer.close(|cut| trailer(Some(code), result, &lines, cut))?;
             Ok(0)
         }
         Err(failure) => fail(answer, head, &failure, None),
@@ -415,7 +436,7 @@ fn fail(answer: &mut Answer<'_>, head: Record, failure: &Failure, detail: Option
     answer.record(&head)?;
     answer.record(&Record::new("error").str("code", failure.record_code()).opt_str("detail", detail))?;
     let empty = Lines { header_extra: Vec::new(), lines: Vec::new(), records: 0, findings: 0, unreadable: 0 };
-    answer.record(&trailer(None, "failed", &empty))?;
+    answer.close(|cut| trailer(None, "failed", &empty, cut))?;
     answer.fail(&failure.code());
     Ok(0)
 }
@@ -424,8 +445,8 @@ fn fail(answer: &mut Answer<'_>, head: Record, failure: &Failure, detail: Option
 #[must_use]
 pub fn program(env: &Env) -> Program {
     match &env.prover {
-        Some(path) => Program { path: path.clone(), check_owner: false },
-        None => Program { path: Path::new(PROVER_PATH).to_path_buf(), check_owner: env.euid == 0 },
+        Some(path) => Program { path: path.clone(), trusted: None },
+        None => Program { path: Path::new(PROVER_PATH).to_path_buf(), trusted: (env.euid == 0).then_some(0) },
     }
 }
 
@@ -657,6 +678,51 @@ mod tests {
     }
 
     #[test]
+    fn an_answer_cut_at_the_cap_still_ends_with_the_trailer_and_the_counts_are_the_tools() {
+        // About 1.4 MB of records and 300 findings from the tool: more than the cap lets through.
+        let object = golden("procs");
+        let thread = "{\"type\":\"thread\",\"pid\":1,\"tid\":1,\"comm\":\"cyclic\",\"pad\":\"".to_string()
+            + &"x".repeat(80)
+            + "\"}";
+        let records = vec![thread; 12_000].join(",");
+        let finding = "{\"id\":\"f\",\"severity\":\"warn\",\"subject\":{},\"evidence\":[],\"recommendation\":\"r\",\"changes\":[]}";
+        let huge = format!(
+            "{{\"schema_version\":1,\"subcommand\":\"procs\",\"host\":\"h\",\"started_at\":\"t\",\"mode\":\"observe\",\"cost\":\"light\",\"unreadable\":[],\"records\":[{records}],\"restored\":[],\"findings\":[{}]}}",
+            vec![finding; 300].join(",")
+        );
+        assert!(huge.len() > 1 << 20 && (huge.len() as u64) < OBJECT_LIMIT && !object.is_empty());
+        let mut out = Vec::new();
+        let mut answer = Answer::new(&mut out, crate::answer::ANSWER_CAP);
+        assert_eq!(run_with(&PROCS, &Fake::code(2, &huge), &[], &mut answer), Ok(0));
+        assert!(answer.truncated() && answer.failure().is_none());
+        let text = String::from_utf8(out).unwrap();
+        assert!(text.len() <= crate::answer::ANSWER_CAP, "{}", text.len());
+        let lines: Vec<&str> = text.lines().collect();
+        let cut: serde_json::Value = serde_json::from_str(lines[lines.len() - 2]).unwrap();
+        let trailer: serde_json::Value = serde_json::from_str(lines[lines.len() - 1]).unwrap();
+        assert_eq!(cut["type"], "truncated");
+        // The trailer: the tool's code and result, and the counts of what the tool reported, not of what was sent.
+        assert_eq!(
+            (
+                trailer["type"].as_str(),
+                trailer["rc"].as_i64(),
+                trailer["result"].as_str(),
+                trailer["truncated"].as_bool()
+            ),
+            (Some("trailer"), Some(2), Some("critical"), Some(true))
+        );
+        assert_eq!((trailer["records"].as_u64(), trailer["findings"].as_u64()), (Some(12_000), Some(300)));
+        assert!(lines.last().unwrap().len() < crate::answer::CLOSING_MAX);
+        // What was written and what was dropped add up to what the tool gave (header, records, findings).
+        let sent = lines.len() as u64 - 2;
+        assert_eq!(sent + cut["dropped_lines"].as_u64().unwrap(), 1 + 12_000 + 300);
+        assert!(
+            cut["dropped"]["thread"].as_u64().unwrap() > 0 && cut["dropped"]["finding"].as_u64().unwrap() > 0,
+            "{cut}"
+        );
+    }
+
+    #[test]
     fn compacting_keeps_strings_and_order() {
         assert_eq!(compact("{ \"a b\": [1, 2 ],\n \"c\": \"x \\\" y\" }"), "{\"a b\":[1,2],\"c\":\"x \\\" y\"}");
     }
@@ -668,7 +734,7 @@ mod tests {
         let path = dir.join("prover");
         std::fs::write(&path, format!("#!/bin/sh\n{body}\n")).unwrap();
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
-        Program { path, check_owner: false }
+        Program { path, trusted: None }
     }
 
     fn argv() -> Vec<String> {
@@ -701,18 +767,47 @@ mod tests {
 
     #[test]
     fn a_tool_that_is_missing_or_not_executable_or_unsafe_is_not_run() {
-        let missing = Program { path: "/no/such/prover".into(), check_owner: false };
+        let missing = Program { path: "/no/such/prover".into(), trusted: None };
         assert!(matches!(missing.run(&argv(), Duration::from_secs(1)), Err(Failure::Tool(_))));
-        let mut plain = script("plain", "exit 0");
+        let plain = script("plain", "exit 0");
         std::fs::set_permissions(&plain.path, std::fs::Permissions::from_mode(0o644)).unwrap();
         assert!(matches!(plain.run(&argv(), Duration::from_secs(1)), Err(Failure::Tool(_))));
         std::fs::set_permissions(&plain.path, std::fs::Permissions::from_mode(0o755)).unwrap();
-        // As root's dispatcher would: a file of an ordinary user is not run (this test is not root).
-        plain.check_owner = true;
-        if std::fs::metadata(&plain.path).unwrap().uid() != 0 {
-            assert!(
-                matches!(plain.run(&argv(), Duration::from_secs(1)), Err(Failure::Tool(ref why)) if why.contains("root"))
-            );
+    }
+
+    #[test]
+    fn a_tool_is_run_only_if_it_and_every_directory_above_it_are_the_trusted_uids_and_not_writable_by_others() {
+        let dir = crate::testdir::new("chain");
+        let (base, sub) = (dir.join("base"), dir.join("base/bin"));
+        std::fs::create_dir_all(&sub).unwrap();
+        let tool = sub.join("prover");
+        std::fs::write(&tool, "#!/bin/sh\nexit 0\n").unwrap();
+        let mode =
+            |path: &Path, bits: u32| std::fs::set_permissions(path, std::fs::Permissions::from_mode(bits)).unwrap();
+        let me = std::fs::metadata(&tool).unwrap().uid();
+        for (path, bits) in [(&base, 0o755), (&sub, 0o755), (&tool, 0o755)] {
+            mode(path, bits);
         }
+        assert_eq!(unsafe_chain(&tool, me, &base), None);
+        // Someone else is the trusted one: nothing here is theirs.
+        assert!(unsafe_chain(&tool, me + 1, &base).unwrap().contains("not owned"));
+        // Writable by group, by others: the file, the directory it is in, the directory above that.
+        for (path, bits) in [(&tool, 0o775), (&sub, 0o775), (&base, 0o757)] {
+            mode(path, bits);
+            let why = unsafe_chain(&tool, me, &base).unwrap_or_else(|| panic!("{} {bits:o}", path.display()));
+            assert!(why.contains(&path.display().to_string()) && why.contains("written"), "{why}");
+            mode(path, 0o755);
+        }
+        // The program as a whole, with the check on and the root of the check being this machine's: the
+        // chain above the test directory is not under test control, so only the verdict's kind is checked.
+        let program = Program { path: tool.clone(), trusted: Some(me + 1) };
+        assert!(matches!(program.run(&argv(), Duration::from_secs(1)), Err(Failure::Tool(_))));
+        // A link is judged by where it leads.
+        let link = dir.join("link-to-prover");
+        std::os::unix::fs::symlink(&tool, &link).unwrap();
+        let program = Program { path: link, trusted: Some(me + 1) };
+        assert!(
+            matches!(program.run(&argv(), Duration::from_secs(1)), Err(Failure::Tool(ref why)) if why.contains("not owned"))
+        );
     }
 }

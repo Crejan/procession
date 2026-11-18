@@ -168,6 +168,7 @@ The agent never sees the exact code.
 | `limit`, `muted` | `refused` / `try-later` |
 | `service-mismatch` (this service's key or certificate is wrong: an operator must act), `approval-invalid` (what came back did not verify; nothing ran), pledge's `unavailable`, no route to pledge or the broker | `unavailable` |
 | the dispatcher's 70, a signal, the run limit, a result that was lost, a code nobody defined (the verb may have started) | `failed` |
+| the broker's `not-ready` (stage 2; designer's decision: a broker without a valid certificate of its own refuses a request, also when a person's approval came back while it was in that state: no clearance). The service **does not send the same request again in a loop**; it logs the exact code (`broker:not-ready`) | `unavailable` |
 | pledge's `declined` | `declined` |
 | `expired`, the service's own deadline | `expired` |
 

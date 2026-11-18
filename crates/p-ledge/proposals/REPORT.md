@@ -852,3 +852,17 @@ needs a key file, so pledge signs through its key holder and builds the SSHSIG i
   refuses with `error blocked` is its own ending (`End::Blocked`): event `broker-signin-refused` and a line on
   stderr once, then a retry every 10 minutes, not the 1 s to 60 s backoff.
 - `control-sock.md` section 8: the note on `stage2-mac.md` 8.5 (no protocol change).
+
+## Stage A on Linux with p-act's writer (the owner's run, relayed 2026-11-18)
+
+Debian 13, unprivileged LXC, commit 2a38839, scripts unedited: **passed**. **Writer: p-act** (`p_act::sshsig`) and the
+shared peer lookup (`p_act::peer`): the first recorded run with both; every earlier run used pledge's own. Shown:
+`pledge serve` with keys in files came up and served the cross run; approvals signed through the seam were verified by
+the service with `ssh-keygen -Y verify` (approved: two automatic, one confirmed twice over two calls; one declined);
+the peer of `service.sock` was read on Linux (SO_PEERCRED, `/proc/<pid>/exe`) for every entry: eight `peer:` lines,
+uid 999 (the test account `probe-svc`), the test binary as program. Not shown: a person at the dialog (stdin was a
+pipe), a service under an account apart from the person, the broker connection over TCP.
+
+`received` is written only for a request that waits for a person (mode `ask`), before it is queued or shown. An
+automatic request is answered at once and has one entry, `request`; so the first two calls (automatic) have no
+`received`, the later ones (confirmed) have it first.

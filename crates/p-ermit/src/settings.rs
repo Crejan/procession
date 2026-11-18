@@ -47,6 +47,11 @@ pub enum SettingsError {
         path: String,
         mode: u32,
     },
+    /// A secret file that its group or others can read or write at all (any bit in `0o077`).
+    ReadableByOthers {
+        path: String,
+        mode: u32,
+    },
     WrongOwner {
         path: String,
         uid: u32,
@@ -69,6 +74,11 @@ impl fmt::Display for SettingsError {
             SettingsError::WritableByOthers { path, mode } => write!(
                 f,
                 "{path} can be written by someone other than its owner (mode {mode:04o}); a settings file must not be writable by its group or by others: run `chmod 600 {}`",
+                shell_quote(path)
+            ),
+            SettingsError::ReadableByOthers { path, mode } => write!(
+                f,
+                "{path} can be read or written by someone other than its owner (mode {mode:04o}); a secret file must not have any permission for its group or for others: run `chmod 600 {}`",
                 shell_quote(path)
             ),
             SettingsError::WrongOwner { path, uid } => write!(
@@ -121,6 +131,18 @@ pub fn check_owner_and_mode(path: &str, uid: u32, mode: u32, euid: u32) -> Resul
     Ok(())
 }
 
+/// As [`check_owner_and_mode`], for a **secret** (a password file, a key): no permission bit at all for the group or
+/// for others, since reading is as bad as writing.
+pub fn check_secret_owner_and_mode(path: &str, uid: u32, mode: u32, euid: u32) -> Result<(), SettingsError> {
+    if mode & 0o077 != 0 {
+        return Err(SettingsError::ReadableByOthers { path: path.to_owned(), mode: mode & 0o7777 });
+    }
+    if uid != 0 && uid != euid {
+        return Err(SettingsError::WrongOwner { path: path.to_owned(), uid });
+    }
+    Ok(())
+}
+
 fn effective_uid() -> u32 {
     // SAFETY: `geteuid` has no arguments and cannot fail.
     unsafe { libc::geteuid() }
@@ -130,6 +152,12 @@ fn effective_uid() -> u32 {
 /// bit) and read at most `max_bytes` of it; more is [`SettingsError::TooLarge`]. A file that does not exist is
 /// [`SettingsError::NotFound`]. The content is read only after the checks, and is not looked at here.
 pub fn read_checked(path: &Path, max_bytes: u64) -> Result<Vec<u8>, SettingsError> {
+    read_with(path, max_bytes, check_owner_and_mode)
+}
+
+type Rule = fn(&str, u32, u32, u32) -> Result<(), SettingsError>;
+
+fn read_with(path: &Path, max_bytes: u64, rule: Rule) -> Result<Vec<u8>, SettingsError> {
     let shown = path.display().to_string();
     let io = |source| SettingsError::Io { path: shown.clone(), source };
     let file = File::open(path).map_err(|e| {
@@ -139,13 +167,52 @@ pub fn read_checked(path: &Path, max_bytes: u64) -> Result<Vec<u8>, SettingsErro
     if !meta.is_file() {
         return Err(SettingsError::NotARegularFile(shown));
     }
-    check_owner_and_mode(&shown, meta.uid(), meta.permissions().mode(), effective_uid())?;
+    rule(&shown, meta.uid(), meta.permissions().mode(), effective_uid())?;
     let mut bytes = Vec::new();
     file.take(max_bytes + 1).read_to_end(&mut bytes).map_err(io)?;
     if u64::try_from(bytes.len()).unwrap_or(u64::MAX) > max_bytes {
         return Err(SettingsError::TooLarge(shown));
     }
     Ok(bytes)
+}
+
+/// The checks of [`read_secret_checked`] on a file that is **already open** (standard input redirected from a file, a
+/// descriptor passed in): a regular file, no permission bit for group or others, owned by root or the running user, or by the running user alone
+/// if `only_running_user`.
+///
+/// `label` names the file in the refusal; the remedy names it as well, so it should be a path when there is one.
+/// Not a regular file (a pipe, a terminal) is [`SettingsError::NotARegularFile`]: the caller decides whether that is
+/// fine, since nothing about a pipe can be checked.
+pub fn check_open_secret(file: &File, label: &str, only_running_user: bool) -> Result<(), SettingsError> {
+    let meta = file.metadata().map_err(|source| SettingsError::Io { path: label.to_owned(), source })?;
+    if !meta.is_file() {
+        return Err(SettingsError::NotARegularFile(label.to_owned()));
+    }
+    let euid = effective_uid();
+    check_secret_owner_and_mode(label, meta.uid(), meta.permissions().mode(), euid)?;
+    if only_running_user && meta.uid() != euid {
+        return Err(SettingsError::WrongOwner { path: label.to_owned(), uid: meta.uid() });
+    }
+    Ok(())
+}
+
+/// Open `path` as a secret: [`check_secret_owner_and_mode`] on the open file (a regular file, owned by root or the
+/// running user, no permission bit for group or others), then at most `max_bytes` of it. The remedy in the refusal
+/// names `path` as given. The content is never in an error. A file that does not exist is
+/// [`SettingsError::NotFound`].
+///
+/// The bytes come back in a plain `Vec`: a caller that must not leave a secret in freed memory wipes it itself.
+pub fn read_secret_checked(path: &Path, max_bytes: u64) -> Result<Vec<u8>, SettingsError> {
+    read_with(path, max_bytes, check_secret_owner_and_mode)
+}
+
+/// As [`read_secret_checked`], but a file that does not exist is `Ok(None)`; every other problem is an error.
+pub fn read_secret_optional(path: &Path, max_bytes: u64) -> Result<Option<Vec<u8>>, SettingsError> {
+    match read_secret_checked(path, max_bytes) {
+        Ok(v) => Ok(Some(v)),
+        Err(SettingsError::NotFound(_)) => Ok(None),
+        Err(e) => Err(e),
+    }
 }
 
 /// The text of a settings file: no byte order mark, UTF-8.
@@ -492,5 +559,92 @@ mod core_tests {
         let io = SettingsError::Io { path: "f".into(), source: std::io::Error::other("boom") };
         assert!(std::error::Error::source(&io).is_some());
         assert!(std::error::Error::source(&SettingsError::NotFound("f".into())).is_none());
+    }
+}
+
+#[cfg(test)]
+mod secret_tests {
+    use super::*;
+    use std::io::Write;
+
+    fn write(dir: &Path, name: &str, text: &[u8], mode: u32) -> std::path::PathBuf {
+        let path = dir.join(name);
+        let _ = std::fs::remove_file(&path);
+        File::create(&path).unwrap().write_all(text).unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(mode)).unwrap();
+        path
+    }
+
+    #[test]
+    fn a_secret_with_no_permission_for_group_or_others_is_read() {
+        let guard = tempfile::tempdir().unwrap();
+        for mode in [0o600, 0o400, 0o700, 0o500] {
+            let p = write(guard.path(), "pw", b"hunter2", mode);
+            assert_eq!(read_secret_checked(&p, 100).unwrap(), b"hunter2");
+        }
+        let p = write(guard.path(), "pw", b"hunter2", 0o400);
+        assert_eq!(read_secret_checked(&p, 100).unwrap(), b"hunter2");
+        assert_eq!(read_secret_optional(&p, 100).unwrap().unwrap(), b"hunter2");
+    }
+
+    #[test]
+    fn any_bit_for_group_or_others_refuses_and_the_message_gives_the_remedy_without_the_content() {
+        let guard = tempfile::tempdir().unwrap();
+        for mode in [0o640, 0o604, 0o644, 0o660, 0o606, 0o602, 0o610, 0o601, 0o666, 0o744, 0o750] {
+            let p = write(guard.path(), "it's pw", b"hunter2", mode);
+            let text = match read_secret_checked(&p, 100) {
+                Err(e @ SettingsError::ReadableByOthers { mode: m, .. }) => {
+                    assert_eq!(m, mode);
+                    e.to_string()
+                }
+                other => panic!("{mode:o}: {other:?}"),
+            };
+            let path = p.display().to_string();
+            assert!(text.contains(&format!("run `chmod 600 {}`", shell_quote(&path))), "{text}");
+            assert!(text.contains(&format!("{mode:04o}")) && !text.contains("hunter2"), "{text}");
+            assert!(read_secret_optional(&p, 100).is_err());
+        }
+    }
+
+    #[test]
+    fn the_owner_not_a_regular_file_missing_and_too_large() {
+        assert!(check_secret_owner_and_mode("f", 0, 0o600, 1000).is_ok());
+        assert!(check_secret_owner_and_mode("f", 1000, 0o600, 1000).is_ok());
+        let e = check_secret_owner_and_mode("/etc/x", 1001, 0o600, 1000).unwrap_err().to_string();
+        assert!(e.contains("chown <that user> /etc/x"), "{e}");
+        // The mode is judged first: a file both wrong in owner and readable is told to be made private.
+        assert!(matches!(
+            check_secret_owner_and_mode("f", 1001, 0o644, 1000),
+            Err(SettingsError::ReadableByOthers { .. })
+        ));
+        let guard = tempfile::tempdir().unwrap();
+        assert!(matches!(read_secret_checked(guard.path(), 10), Err(SettingsError::NotARegularFile(_))));
+        let missing = guard.path().join("nothing");
+        assert!(matches!(read_secret_checked(&missing, 10), Err(SettingsError::NotFound(_))));
+        assert!(read_secret_optional(&missing, 10).unwrap().is_none());
+        let p = write(guard.path(), "big", &[b'a'; 11], 0o600);
+        let e = read_secret_checked(&p, 10).unwrap_err();
+        assert!(matches!(e, SettingsError::TooLarge(_)));
+        assert!(!e.to_string().contains("aaaa"));
+    }
+
+    #[test]
+    fn an_open_file_is_checked_through_its_descriptor() {
+        let guard = tempfile::tempdir().unwrap();
+        let p = write(guard.path(), "bundle", b"x", 0o600);
+        let f = File::open(&p).unwrap();
+        assert!(check_open_secret(&f, "standard input", true).is_ok());
+        // The mode changes after it was opened: what is judged is the open file now, not a path.
+        std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o644)).unwrap();
+        assert!(matches!(
+            check_open_secret(&f, "standard input", true),
+            Err(SettingsError::ReadableByOthers { mode: 0o644, .. })
+        ));
+        assert!(matches!(
+            check_open_secret(&File::open(guard.path()).unwrap(), "dir", true),
+            Err(SettingsError::NotARegularFile(_))
+        ));
+        std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o600)).unwrap();
+        assert!(check_open_secret(&f, "standard input", false).is_ok());
     }
 }

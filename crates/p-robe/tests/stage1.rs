@@ -54,6 +54,7 @@ use common::*;
 
 #[test]
 fn the_real_parts_against_each_other() {
+    check_build();
     let dir = dir_for("run");
     let path = |name: &str| dir.join(name).to_string_lossy().into_owned();
     // A throwaway host key that pledge's configuration names, and the service's key and certificate

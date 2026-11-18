@@ -12,7 +12,7 @@ use p_act::exchange::{ClearancePolicy, Message, Outcome, Submit};
 use p_act::rating::Rating;
 use p_act::sign::{ApprovalKind, ApprovalTrust, PublicKey, verify_approval};
 use p_age::net::{Broker, Lines, serve_tls};
-use p_age::testing::{BrokerSetup, PersonSpec, SiteBuilder, TestBroker, TestPki, socket_dir};
+use p_age::testing::{BrokerSetup, PersonSpec, SiteBuilder, TestBroker, TestPki, socket_dir, write_certificate};
 use tokio::io::AsyncWriteExt;
 
 use crate::approvals_tests::{Lab, yes};
@@ -34,9 +34,8 @@ impl Site2 {
         let dir = lab.material.dir.path();
         let line = |name: &str| std::fs::read_to_string(dir.join(name)).expect("key").trim().to_owned();
         let connection = lab.rig.shared.key_with_purpose("connection").expect("connection key").public_line();
-        let certificates: Vec<String> = ["confirmed", "automatic"]
-            .iter()
-            .map(|role| {
+        for role in ["confirmed", "automatic"] {
+            {
                 let key = lab.rig.shared.key_with_purpose(role).expect("key");
                 std::fs::write(dir.join(format!("{role}-tls.pub")), format!("{}\n", key.public_line())).expect("write");
                 crate::approvals_tests::keygen(&[
@@ -53,21 +52,22 @@ impl Site2 {
                     "clear",
                     &dir.join(format!("{role}-tls.pub")).to_string_lossy(),
                 ]);
-                line(&format!("{role}-tls-cert.pub"))
-            })
-            .collect();
+                write_certificate(&dir.join("certificates"), "jan", role, &line(&format!("{role}-tls-cert.pub")));
+            }
+        }
         let public = |role: &str| lab.rig.shared.key_with_purpose(role).expect("key").public_line();
         let site = SiteBuilder::new()
             .person(
                 PersonSpec::new("jan")
                     .keys(&public("confirmed"), &public("automatic"), delegation_key, &connection)
-                    .groups(&["ops"])
-                    .certificates(certificates),
+                    .groups(&["ops"]),
             )
             .host("a.example", &lab.material.host_line())
             .build()
             .expect("site");
-        let TestBroker { broker, .. } = BrokerSetup::new(site, dir.join("broker"), dir.join("state")).start();
+        let TestBroker { broker, .. } = BrokerSetup::new(site, dir.join("broker"), dir.join("state"))
+            .certificates(PublicKey::parse(&lab.material.ca_line()).expect("site ca"), dir.join("certificates"))
+            .start();
         let pki = TestPki::new(&["broker.test"]);
         let acceptor = pki.acceptor();
         let ca = pki;

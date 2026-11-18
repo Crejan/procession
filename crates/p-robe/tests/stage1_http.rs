@@ -31,14 +31,7 @@ use p_robe::{pledge, setup};
 use serde_json::{Value, json};
 
 fn pact_binary() -> PathBuf {
-    let exe = std::env::current_exe().unwrap();
-    let path = exe.parent().and_then(std::path::Path::parent).unwrap().join("pact");
-    assert!(
-        path.exists(),
-        "{} is not built: cargo build --workspace --features p-robe/test-verbs,p-act/pact",
-        path.display()
-    );
-    path
+    workspace_binary("PROBE_PACT_BIN", "pact")
 }
 
 /// `pact call TOOL ARGUMENTS < bundle`: the normalised result, as a JSON value.
@@ -65,6 +58,7 @@ fn pact_call(bundle: &[u8], tool: &str, arguments: &Value) -> Value {
 #[test]
 #[ignore = "binds a TCP port; needs the pact binary; PROBE_STAGE1_HTTP=1"]
 fn the_real_pact_calls_the_real_probe_over_http() {
+    check_build();
     if std::env::var("PROBE_STAGE1_HTTP").as_deref() != Ok("1") {
         eprintln!("PROBE_STAGE1_HTTP is not 1: nothing run");
         return;

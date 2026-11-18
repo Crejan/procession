@@ -122,12 +122,18 @@ pub enum SignError {
     NotUserCertificate,
     #[error("the agent's certificate has the critical option `{0}`")]
     CriticalOption(String),
+    #[error(
+        "the certificate has the extension `{0}`; certificates the site CA issues carry none (issue them with `-O clear`)"
+    )]
+    SiteCertificateExtension(String),
     #[error("the agent's certificate has the extension `{0}`, only `groups@procession` is allowed")]
     UnknownExtension(String),
     #[error("the agent's certificate has a bad `groups@procession`: {0}")]
     BadGroups(&'static str),
     #[error("`{0}` is not a fingerprint like SHA256:<43 base64 characters>")]
     MalformedFingerprint(String),
+    #[error("ssh-keygen reported success without having read all its input, so it did not check what was asked")]
+    InputNotRead,
     #[error("the certificate has bytes after its signature, which the signature does not cover")]
     CertificateTrailingData,
     #[error("the certificate is for another person or role than the one expected")]
@@ -316,7 +322,18 @@ impl Signer {
 /// Run `ssh-keygen args` with `stdin` as its input and no terminal input; its
 /// standard output on success.
 fn run(args: &[&OsStr], stdin: &[u8]) -> Result<Vec<u8>, SignError> {
-    let mut child = Command::new(KEYGEN)
+    run_program(OsStr::new(KEYGEN), args, stdin)
+}
+
+/// [`run`] for any program (the tests give a stand-in; nothing in a production build can).
+///
+/// The input is written on the side, so that a full pipe cannot deadlock. A program that stops reading early closes
+/// its end and the write fails (`Broken pipe`); that is **never reported as an I/O error of its own**: the outcome is
+/// the program's. Non-zero is [`SignError::Tool`] with its status and standard error. Zero with a write that failed
+/// is [`SignError::InputNotRead`]: the program says it succeeded without having been given all its input, so what it
+/// checked is not what was asked, and it is a refusal, never a verified signature.
+fn run_program(program: &OsStr, args: &[&OsStr], stdin: &[u8]) -> Result<Vec<u8>, SignError> {
+    let mut child = Command::new(program)
         .args(args)
         // A key that wants a passphrase must fail, not ask on the terminal: the "askpass program" is `false`.
         .env("SSH_ASKPASS", "false")
@@ -326,21 +343,22 @@ fn run(args: &[&OsStr], stdin: &[u8]) -> Result<Vec<u8>, SignError> {
         .stderr(Stdio::piped())
         .spawn()?;
     let mut pipe = child.stdin.take().ok_or_else(|| io::Error::other("no stdin"))?;
-    // Written on the side so that a full pipe cannot deadlock; a tool that stops reading early is seen in its exit status.
-    let output = std::thread::scope(|s| {
-        s.spawn(move || {
-            let _ = pipe.write_all(stdin);
-        });
-        child.wait_with_output()
-    })?;
-    if output.status.success() {
-        Ok(output.stdout)
-    } else {
-        Err(SignError::Tool {
+    let (output, written) = std::thread::scope(|s| {
+        let writer = s.spawn(move || pipe.write_all(stdin));
+        let output = child.wait_with_output();
+        (output, writer.join())
+    });
+    let output = output?;
+    if !output.status.success() {
+        return Err(SignError::Tool {
             status: output.status.to_string(),
             stderr: String::from_utf8_lossy(&output.stderr).trim().to_owned(),
-        })
+        });
     }
+    if !matches!(written, Ok(Ok(()))) {
+        return Err(SignError::InputNotRead);
+    }
+    Ok(output.stdout)
 }
 
 /// `ssh-keygen -Y verify -f <allowed> -I <principal> -n <namespace> -s <sig> < data`
@@ -810,7 +828,7 @@ pub fn verify_approval(request: &Request, sig: &str, trust: ApprovalTrust<'_>) -
             return Err(SignError::ApprovalForAnotherPerson);
         }
     }
-    let attempt = |kind: ApprovalKind| {
+    let signed = |kind: ApprovalKind| {
         let principal = format!("{person}:{}", kind.suffix());
         let allowed = match trust {
             ApprovalTrust::SiteCa(ca) => ca_line("*:confirmed,*:automatic", &[Namespace::Approval], ca),
@@ -821,6 +839,14 @@ pub fn verify_approval(request: &Request, sig: &str, trust: ApprovalTrust<'_>) -
             ),
         };
         verify(Namespace::Approval, &allowed, &principal, sig, request.as_bytes())
+    };
+    let attempt = |kind: ApprovalKind| {
+        signed(kind)?;
+        // Signed by a key certified by the site CA: its certificate has no option or extension.
+        if matches!(trust, ApprovalTrust::SiteCa(_)) {
+            site_certificate_in(sig)?;
+        }
+        Ok::<(), SignError>(())
     };
     match attempt(ApprovalKind::Confirmed) {
         Ok(()) => Ok(ApprovalKind::Confirmed),
@@ -842,7 +868,8 @@ pub fn sign_clearance(signer: &(impl SshsigSigner + ?Sized), clearance: &Clearan
 /// is the caller's to check.
 pub fn verify_clearance(clearance: &Clearance, sig: &str, site_ca: &PublicKey) -> Result<(), SignError> {
     let allowed = ca_line("broker", &[Namespace::Clearance], site_ca);
-    verify(Namespace::Clearance, &allowed, "broker", sig, clearance.as_bytes())
+    verify(Namespace::Clearance, &allowed, "broker", sig, clearance.as_bytes())?;
+    site_certificate_in(sig)
 }
 
 // ---------------------------------------------------------------------------
@@ -888,7 +915,8 @@ pub fn sign_broker(signer: &(impl SshsigSigner + ?Sized), document: &[u8]) -> Re
 /// `broker`, against the site CA's key. A person's key, certified for a person, does not verify here.
 pub fn verify_broker(site_ca: &PublicKey, sig: &str, document: &[u8]) -> Result<(), SignError> {
     let allowed = ca_line("broker", &[Namespace::Broker], site_ca);
-    verify(Namespace::Broker, &allowed, "broker", sig, document)
+    verify(Namespace::Broker, &allowed, "broker", sig, document)?;
+    site_certificate_in(sig)
 }
 
 // ---------------------------------------------------------------------------
@@ -1030,6 +1058,24 @@ pub fn verify_approval_certificate_for(
     if cert.person == person && cert.kind == kind { Ok(cert) } else { Err(SignError::NotTheExpectedName) }
 }
 
+/// A certificate the site CA issues (an approval key's, the broker's) carries **no critical option and no extension**
+/// (`approval-formats.md` section 3.2): what is not specified must not be there, since some other consumer of OpenSSH
+/// certificates might honour it.
+fn no_option_or_extension(cert: &Certificate) -> Result<(), SignError> {
+    if let Some((name, _)) = cert.critical_options.first() {
+        return Err(SignError::CriticalOption(shown(name)));
+    }
+    if let Some((name, _)) = cert.extensions.first() {
+        return Err(SignError::SiteCertificateExtension(shown(name)));
+    }
+    Ok(())
+}
+
+/// After a signature by a site-CA-certified key verified: the certificate inside it has no option or extension.
+fn site_certificate_in(sig: &str) -> Result<(), SignError> {
+    no_option_or_extension(&signature_certificate(sig)?)
+}
+
 /// Everything of [`verify_approval_certificate`] except the time: the shape, the name, the issuer and the signature. The
 /// caller judges validity itself, from `valid_after` and `valid_before` or [`ApprovalCertificate::valid_at`].
 pub fn check_approval_certificate(line: &str, site_ca: &PublicKey) -> Result<ApprovalCertificate, SignError> {
@@ -1037,9 +1083,7 @@ pub fn check_approval_certificate(line: &str, site_ca: &PublicKey) -> Result<App
     if cert.cert_type != 1 {
         return Err(SignError::NotUserCertificate);
     }
-    if let Some((name, _)) = cert.critical_options.first() {
-        return Err(SignError::CriticalOption(name.clone()));
-    }
+    no_option_or_extension(&cert)?;
     let principal = match <[String; 1]>::try_from(cert.principals.clone()) {
         Ok([p]) => p,
         Err(many) => return Err(SignError::PrincipalCount { found: many.len() }),
@@ -1067,4 +1111,61 @@ pub fn check_approval_certificate(line: &str, site_ca: &PublicKey) -> Result<App
         valid_after: cert.valid_after,
         valid_before: cert.valid_before,
     })
+}
+
+#[cfg(test)]
+mod run_tests {
+    use super::*;
+
+    /// A stand-in for `ssh-keygen`: `/bin/sh -c script`.
+    fn stand_in(script: &str, input: &[u8]) -> Result<Vec<u8>, SignError> {
+        run_program(OsStr::new("/bin/sh"), &[OsStr::new("-c"), OsStr::new(script)], input)
+    }
+
+    /// More than any pipe buffer holds, so that a program that does not read makes the write fail, whatever the timing.
+    fn big() -> Vec<u8> {
+        vec![b'x'; 4 * 1024 * 1024]
+    }
+
+    #[test]
+    fn a_program_that_reads_everything_and_succeeds_is_ok() {
+        assert_eq!(stand_in("cat >/dev/null; echo fine", &big()).unwrap(), b"fine\n");
+        assert_eq!(stand_in("cat; ", b"abc").unwrap(), b"abc");
+    }
+
+    #[test]
+    fn a_program_that_exits_non_zero_without_reading_is_its_status_not_an_io_error() {
+        for _ in 0..20 {
+            match stand_in("echo why >&2; exit 3", &big()) {
+                Err(SignError::Tool { status, stderr }) => {
+                    assert!(status.contains('3'), "{status}");
+                    assert_eq!(stderr, "why");
+                }
+                other => panic!("{other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn a_program_that_exits_zero_without_reading_is_not_taken_as_having_checked_anything() {
+        for _ in 0..20 {
+            assert!(matches!(stand_in("exit 0", &big()), Err(SignError::InputNotRead)));
+        }
+    }
+
+    #[test]
+    fn a_program_that_closes_its_input_early_and_then_exits_zero_is_not_taken_either() {
+        for _ in 0..20 {
+            assert!(matches!(stand_in("exec 0<&-; echo done; exit 0", &big()), Err(SignError::InputNotRead)));
+            assert!(matches!(stand_in("head -c 10 >/dev/null; exit 0", &big()), Err(SignError::InputNotRead)));
+        }
+    }
+
+    #[test]
+    fn what_a_failed_run_is_never_is_a_verified_signature() {
+        // `verify` turns Ok into "verified" and every Err into a refusal: so the three outcomes above cannot verify.
+        for script in ["exit 3", "exit 0", "exec 0<&-; exit 0", "head -c 10 >/dev/null; exit 0"] {
+            assert!(stand_in(script, &big()).is_err(), "{script}");
+        }
+    }
 }
