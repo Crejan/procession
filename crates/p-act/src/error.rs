@@ -58,6 +58,8 @@ pub enum ParseError {
     MalformedFingerprint(String),
     #[error("member `{0}` is not a certificate line")]
     MalformedCertificateLine(&'static str),
+    #[error("`{0}` is a set and has an entry twice")]
+    DuplicateEntry(&'static str),
     #[error("an entry of `{0}` is not a usable name")]
     MalformedName(&'static str),
     #[error("signature is not an armoured SSH signature")]

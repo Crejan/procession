@@ -155,6 +155,8 @@ pub struct StandingContent {
     pub groups: Vec<String>,
 }
 
+// The four lists are sets: written sorted, each entry once (`Standing::compose`).
+
 /// The broker's standing for a person, signed in `broker-v1@procession`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Standing {
@@ -173,8 +175,8 @@ struct StandingWire<'a> {
     blocked: bool,
     blocked_keys: Vec<String>,
     withdrawn: Vec<String>,
-    certificates: &'a [String],
-    groups: &'a [String],
+    certificates: Vec<String>,
+    groups: Vec<String>,
 }
 
 /// Why a standing was not accepted.
@@ -195,8 +197,21 @@ fn is_group_name(s: &str) -> bool {
     !s.is_empty() && !s.contains(char::is_whitespace) && !s.contains(',') && text::check("groups", s).is_ok()
 }
 
+fn has_duplicate(entries: &[&str]) -> bool {
+    let mut sorted = entries.to_vec();
+    sorted.sort_unstable();
+    sorted.windows(2).any(|w| w[0] == w[1])
+}
+
+fn sorted_strings<T: ToString>(entries: &[T]) -> Vec<String> {
+    let mut v: Vec<String> = entries.iter().map(ToString::to_string).collect();
+    v.sort_unstable();
+    v
+}
+
 impl Standing {
-    /// Write a new standing: its bytes are produced here, once, and checked by the parser.
+    /// Write a new standing: its bytes are produced here, once, and checked by the parser. The lists are
+    /// sets and are written **sorted** (bytewise); an entry given twice is refused by the parser.
     pub fn compose(content: &StandingContent) -> Result<Standing, ParseError> {
         let wire = StandingWire {
             v: 1,
@@ -205,10 +220,10 @@ impl Standing {
             nonce: STANDARD.encode(content.nonce),
             n: content.n,
             blocked: content.blocked,
-            blocked_keys: content.blocked_keys.iter().map(ToString::to_string).collect(),
-            withdrawn: content.withdrawn.iter().map(ToString::to_string).collect(),
-            certificates: &content.certificates,
-            groups: &content.groups,
+            blocked_keys: sorted_strings(&content.blocked_keys),
+            withdrawn: sorted_strings(&content.withdrawn),
+            certificates: sorted_strings(&content.certificates),
+            groups: sorted_strings(&content.groups),
         };
         Standing::parse_unverified(serde_json::to_vec(&wire).map_err(|e| ParseError::NotJson(e.to_string()))?)
     }
@@ -224,10 +239,21 @@ impl Standing {
         let blocked = o.take_bool("blocked")?;
         let blocked_keys = fingerprints(&mut o, "blocked_keys")?;
         let withdrawn = fingerprints(&mut o, "withdrawn")?;
-        // `certificates` and `groups` are "optional, may be empty": absent is empty.
-        let certificates = if o.has("certificates") { o.take_strings("certificates")? } else { vec![] };
-        let groups = if o.has("groups") { o.take_strings("groups")? } else { vec![] };
+        // Every member is required, `certificates` and `groups` too (they may be empty).
+        let certificates = o.take_strings("certificates")?;
+        let groups = o.take_strings("groups")?;
         o.finish()?;
+        // The lists are sets: a reader does not depend on their order and refuses a duplicate, which can only be a writer's fault.
+        for (member, entries) in [
+            ("blocked_keys", blocked_keys.iter().map(Fingerprint::as_str).collect::<Vec<_>>()),
+            ("withdrawn", withdrawn.iter().map(Fingerprint::as_str).collect()),
+            ("certificates", certificates.iter().map(String::as_str).collect()),
+            ("groups", groups.iter().map(String::as_str).collect()),
+        ] {
+            if has_duplicate(&entries) {
+                return Err(ParseError::DuplicateEntry(member));
+            }
+        }
         if !text::is_name(&to) {
             return Err(ParseError::MalformedName("to"));
         }
@@ -293,6 +319,7 @@ closed_code! {
         TooLong => "too-long",
         NotYours => "not-yours",
         Blocked => "blocked",
+        Unavailable => "unavailable",
     }
 }
 
@@ -347,6 +374,12 @@ pub enum ToPledge {
         delegation: Fingerprint,
         reason: NotRegisteredReason,
     },
+    /// The answer to a `withdraw`. `stored` is `false` when the withdrawal is in force in the broker's memory
+    /// but could not be written to its register: pledge records that and sends the withdrawal again.
+    Withdrawn {
+        delegation: Fingerprint,
+        stored: bool,
+    },
     /// `submit`, `cancel`, `error` of the shared exchange.
     Exchange(Box<Message>),
 }
@@ -362,19 +395,36 @@ pub enum First {
     Refuse(ErrorCode),
 }
 
-/// Tell from the first line which exchange this connection carries.
+/// Tell from the first line which exchange this connection carries. A well-formed `hello` or `submit` with a
+/// `schema_version` this code does not know is [`ErrorCode::UnsupportedVersion`] (it tells a peer only which version
+/// is spoken); anything else that is neither is `malformed-line`; a line over the limit is `line-too-long`.
 #[must_use]
 pub fn first_kind(line: &[u8]) -> First {
     match Message::parse(line, ClearancePolicy::Refused) {
-        Ok(Message::Submit(_)) => First::Service,
+        Ok(Message::Submit(_)) | Err(ExchangeError::BadRequest { .. }) => First::Service,
         Ok(Message::Hello) => First::Pledge,
-        Err(ExchangeError::BadRequest { .. }) => First::Service,
-        Ok(_) => First::Refuse(ErrorCode::MalformedLine),
-        // Any other first message is `malformed-line` (section 4); a version it does not know and a line over the limit keep their own.
-        Err(ExchangeError::UnsupportedVersion) => First::Refuse(ErrorCode::UnsupportedVersion),
+        Err(ExchangeError::UnsupportedVersion) if is_well_formed_first(line) => {
+            First::Refuse(ErrorCode::UnsupportedVersion)
+        }
         Err(ExchangeError::LineTooLong) => First::Refuse(ErrorCode::LineTooLong),
-        Err(_) => First::Refuse(ErrorCode::MalformedLine),
+        _ => First::Refuse(ErrorCode::MalformedLine),
     }
+}
+
+/// Whether `line`, whose `schema_version` is not 1, is otherwise exactly a `hello` or a `submit`: one object with
+/// a numeric `schema_version`, the type, and for a `submit` its two strings `request` and `request_sig`, nothing else.
+fn is_well_formed_first(line: &[u8]) -> bool {
+    let Ok(text) = check_bytes(line, crate::exchange::MAX_LINE) else { return false };
+    let Ok(mut o) = Object::parse(text, "") else { return false };
+    let version_is_a_number =
+        o.take_raw("schema_version").is_ok_and(|v| serde_json::from_str::<serde_json::Number>(v.get()).is_ok());
+    let Ok(kind) = o.take_string("type") else { return false };
+    let members = match kind.as_str() {
+        "hello" => true,
+        "submit" => o.take_string("request").is_ok() && o.take_string("request_sig").is_ok(),
+        _ => false,
+    };
+    version_is_a_number && members && o.finish().is_ok()
 }
 
 #[derive(Serialize)]
@@ -403,6 +453,8 @@ struct WithText<'a> {
     #[serde(skip_serializing_if = "Option::is_none")]
     delegation: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    stored: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     request: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     reason: Option<&'static str>,
@@ -413,7 +465,7 @@ fn head(kind: &str) -> Head<'_> {
 }
 
 fn text_message(kind: &str) -> WithText<'_> {
-    WithText { head: head(kind), nonce: None, cert: None, delegation: None, request: None, reason: None }
+    WithText { head: head(kind), nonce: None, cert: None, delegation: None, stored: None, request: None, reason: None }
 }
 
 fn line<T: Serialize>(value: &T) -> Result<Vec<u8>, EncodeError> {
@@ -488,7 +540,7 @@ impl ToPledge {
     /// Parse a line from the broker.
     pub fn parse(line: &[u8]) -> Result<ToPledge, ExchangeError> {
         let Some((kind, mut o)) =
-            broker_object(line, &["challenge", "ready", "notice", "registered", "not-registered"])?
+            broker_object(line, &["challenge", "ready", "notice", "registered", "not-registered", "withdrawn"])?
         else {
             return Ok(ToPledge::Exchange(Box::new(Message::parse(line, ClearancePolicy::Refused)?)));
         };
@@ -497,6 +549,10 @@ impl ToPledge {
             "ready" => ToPledge::Ready,
             "notice" => ToPledge::Notice(take_signed(&mut o)?),
             "registered" => ToPledge::Registered(take_fingerprint(&mut o, "delegation")?),
+            "withdrawn" => {
+                let delegation = take_fingerprint(&mut o, "delegation")?;
+                ToPledge::Withdrawn { delegation, stored: o.take_bool("stored")? }
+            }
             _ => {
                 let delegation = take_fingerprint(&mut o, "delegation")?;
                 ToPledge::NotRegistered {
@@ -522,6 +578,11 @@ impl ToPledge {
                 delegation: Some(delegation.to_string()),
                 reason: Some(reason.wire()),
                 ..text_message("not-registered")
+            }),
+            ToPledge::Withdrawn { delegation, stored } => line(&WithText {
+                delegation: Some(delegation.to_string()),
+                stored: Some(*stored),
+                ..text_message("withdrawn")
             }),
             ToPledge::Exchange(m) => m.encode(ClearancePolicy::Refused),
         }
@@ -688,13 +749,76 @@ mod tests {
             Standing::parse_unverified(Standing::compose(&none).unwrap().as_bytes().to_vec()).unwrap().content(),
             &none
         );
-        // `certificates` and `groups` are optional: absent is empty, and what is written always has them.
-        let minimal = format!(
-            r#"{{"v":1,"type":"standing","to":"jan","nonce":"{}","n":0,"blocked":false,"blocked_keys":[],"withdrawn":[]}}"#,
-            nb()
+    }
+
+    #[test]
+    fn every_member_of_the_standing_is_required_and_the_lists_are_sets() {
+        // Required: `certificates` and `groups` too. Absent is refused, not read as empty; empty is fine.
+        let base = |tail: &str| {
+            format!(
+                r#"{{"v":1,"type":"standing","to":"jan","nonce":"{}","n":0,"blocked":false,"blocked_keys":[],"withdrawn":[]{tail}}}"#,
+                nb()
+            )
+        };
+        assert!(Standing::parse_unverified(base(r#","certificates":[],"groups":[]"#)).is_ok());
+        assert_eq!(Standing::parse_unverified(base("")), Err(ParseError::MissingMember("certificates")));
+        assert_eq!(Standing::parse_unverified(base(r#","certificates":[]"#)), Err(ParseError::MissingMember("groups")));
+        assert_eq!(Standing::parse_unverified(base(r#","groups":[]"#)), Err(ParseError::MissingMember("certificates")));
+        for member in ["blocked_keys", "withdrawn"] {
+            let without = base(r#","certificates":[],"groups":[]"#)
+                .replacen(&format!(r#""{member}":[],"#), "", 1)
+                .replacen(&format!(r#","{member}":[]"#), "", 1);
+            assert!(matches!(Standing::parse_unverified(without), Err(ParseError::MissingMember(_))), "{member}");
+        }
+        // A writer writes each list sorted, whatever order it was given.
+        let shuffled = StandingContent {
+            blocked_keys: vec![fp('b'), fp('A'), fp('Q')],
+            withdrawn: vec![fp('z'), fp('B')],
+            groups: vec!["rt".into(), "ops".into(), "Admins".into()],
+            ..content()
+        };
+        let written = String::from_utf8(Standing::compose(&shuffled).unwrap().as_bytes().to_vec()).unwrap();
+        let (a, q, b) = (
+            written.find(&fp('A').to_string()).unwrap(),
+            written.find(&fp('Q').to_string()).unwrap(),
+            written.rfind(&fp('b').to_string()).unwrap(),
         );
-        let read = Standing::parse_unverified(minimal).unwrap();
-        assert!(read.content().certificates.is_empty() && read.content().groups.is_empty());
+        assert!(a < q && q < b, "blocked_keys sorted: {written}");
+        assert!(written.contains(r#""groups":["Admins","ops","rt"]"#), "{written}");
+        // A reader does not depend on the order: what arrives unsorted is read, and keeps its bytes.
+        let unsorted = base(r#","certificates":[],"groups":["rt","ops"]"#);
+        let read = Standing::parse_unverified(unsorted.clone()).unwrap();
+        assert_eq!(read.content().groups, ["rt", "ops"]);
+        assert_eq!(read.as_bytes(), unsorted.as_bytes());
+        // A duplicate is refused, in each of the four lists, and a writer cannot produce one.
+        let dup = |member: &str, entry: &str| {
+            let text = base(r#","certificates":[],"groups":[]"#).replacen(
+                &format!(r#""{member}":[]"#),
+                &format!(r#""{member}":[{entry},{entry}]"#),
+                1,
+            );
+            Standing::parse_unverified(text)
+        };
+        let fingerprint = format!("\"{}\"", fp('Q'));
+        assert_eq!(dup("blocked_keys", &fingerprint), Err(ParseError::DuplicateEntry("blocked_keys")));
+        assert_eq!(dup("withdrawn", &fingerprint), Err(ParseError::DuplicateEntry("withdrawn")));
+        assert_eq!(dup("groups", "\"ops\""), Err(ParseError::DuplicateEntry("groups")));
+        assert_eq!(
+            Standing::compose(&StandingContent { groups: vec!["ops".into(), "ops".into()], ..content() }),
+            Err(ParseError::DuplicateEntry("groups"))
+        );
+        assert_eq!(
+            Standing::compose(&StandingContent { withdrawn: vec![fp('Q'), fp('Q')], ..content() }),
+            Err(ParseError::DuplicateEntry("withdrawn"))
+        );
+        // Entries that differ only in case or by a character are different entries.
+        assert!(
+            Standing::compose(&StandingContent {
+                groups: vec!["ops".into(), "Ops".into(), "ops2".into()],
+                ..content()
+            })
+            .is_ok()
+        );
     }
 
     #[test]
@@ -765,7 +889,10 @@ mod tests {
     #[test]
     fn a_standing_with_many_entries_fits_a_line() {
         // 64 KiB of document is about 88 KiB in base64: with the signature it must still fit the 96 KiB line.
-        let many = StandingContent { withdrawn: (0..1100).map(|_| fp('Z')).collect(), ..content() };
+        let many = StandingContent {
+            withdrawn: (0..1100).map(|i| format!("SHA256:{i:043}").parse().unwrap()).collect(),
+            ..content()
+        };
         let s = Standing::compose(&many).unwrap();
         assert!(s.as_bytes().len() < MAX_STANDING_BYTES);
         let line = ToPledge::Notice(Signed { doc: s.as_bytes().to_vec(), sig: SIG.into() }).encode().unwrap();
@@ -959,7 +1086,7 @@ mod tests {
         }
         assert_eq!(
             NotRegisteredReason::ALL.iter().map(|r| r.wire()).collect::<Vec<_>>(),
-            ["bad-certificate", "too-long", "not-yours", "blocked"]
+            ["bad-certificate", "too-long", "not-yours", "blocked", "unavailable"]
         );
     }
 
@@ -990,5 +1117,235 @@ mod tests {
         assert_eq!(first_kind(b"not json"), First::Refuse(ErrorCode::MalformedLine));
         assert_eq!(first_kind(&vec![b' '; crate::exchange::MAX_LINE + 1]), First::Refuse(ErrorCode::LineTooLong));
         let _ = json!(null);
+    }
+
+    #[test]
+    fn withdrawn_answers_a_withdraw_and_says_whether_it_is_stored() {
+        for stored in [true, false] {
+            let m = ToPledge::Withdrawn { delegation: fp('Q'), stored };
+            let line = m.encode().unwrap();
+            assert_eq!(
+                line,
+                format!(
+                    "{{\"schema_version\":1,\"type\":\"withdrawn\",\"delegation\":\"{}\",\"stored\":{stored}}}\n",
+                    fp('Q')
+                )
+                .into_bytes()
+            );
+            assert_eq!(ToPledge::parse(&line[..line.len() - 1]).unwrap(), m);
+        }
+        let with =
+            |tail: &str| format!(r#"{{"schema_version":1,"type":"withdrawn","delegation":"{}"{tail}}}"#, fp('Q'));
+        assert_eq!(
+            ToPledge::parse(with("").as_bytes()),
+            Err(ExchangeError::Malformed(ParseError::MissingMember("stored")))
+        );
+        for bad in ["\"true\"", "1", "0", "null", "[]"] {
+            assert!(
+                matches!(
+                    ToPledge::parse(with(&format!(r#","stored":{bad}"#)).as_bytes()),
+                    Err(ExchangeError::Malformed(ParseError::WrongType { .. }))
+                ),
+                "{bad}"
+            );
+        }
+        assert_eq!(
+            ToPledge::parse(with(r#","stored":true,"x":1"#).as_bytes()),
+            Err(ExchangeError::Malformed(ParseError::UnknownMember("x".into())))
+        );
+        assert!(matches!(
+            ToPledge::parse(br#"{"schema_version":1,"type":"withdrawn","delegation":"nope","stored":true}"#),
+            Err(ExchangeError::Malformed(ParseError::MalformedFingerprint(_)))
+        ));
+        // It is the broker's answer: a pledge does not send it, a service does not read it.
+        assert_eq!(FromPledge::parse(with(r#","stored":true"#).as_bytes()), Err(ExchangeError::UnknownType));
+        assert_eq!(FromService::parse(with(r#","stored":true"#).as_bytes()), Err(ExchangeError::UnknownType));
+    }
+
+    #[test]
+    fn unavailable_is_a_reason_a_registration_can_get() {
+        let m = ToPledge::NotRegistered { delegation: fp('Q'), reason: NotRegisteredReason::Unavailable };
+        let line = m.encode().unwrap();
+        assert!(String::from_utf8_lossy(&line).contains(r#""reason":"unavailable""#));
+        assert_eq!(ToPledge::parse(&line[..line.len() - 1]).unwrap(), m);
+        assert_eq!(NotRegisteredReason::from_wire("unavailable"), NotRegisteredReason::Unavailable);
+    }
+
+    #[test]
+    fn a_first_message_with_an_unknown_version_is_told_apart() {
+        let submit = |version: &str| {
+            format!(
+                r#"{{"schema_version":{version},"type":"submit","request":"{}","request_sig":"{}"}}"#,
+                STANDARD.encode(b"{}"),
+                signature_to_base64(crate::request::tests::SIG)
+            )
+        };
+        let hello = |version: &str| format!(r#"{{"schema_version":{version},"type":"hello"}}"#);
+        // Well-formed `hello` and `submit` of another version: `unsupported-version`.
+        for version in ["2", "0", "99", "1.5", "-1"] {
+            assert_eq!(
+                first_kind(hello(version).as_bytes()),
+                First::Refuse(ErrorCode::UnsupportedVersion),
+                "hello {version}"
+            );
+            assert_eq!(
+                first_kind(submit(version).as_bytes()),
+                First::Refuse(ErrorCode::UnsupportedVersion),
+                "submit {version}"
+            );
+        }
+        // Version 1 is as before.
+        assert_eq!(first_kind(hello("1").as_bytes()), First::Pledge);
+        assert_eq!(first_kind(submit("1").as_bytes()), First::Service);
+        // Anything else that is neither stays `malformed-line`: another type, extra members, missing ones, a version that is not a number.
+        let others = [
+            r#"{"schema_version":2,"type":"ping"}"#.to_owned(),
+            r#"{"schema_version":2,"type":"signin","doc":"e30=","doc_sig":"e30="}"#.to_owned(),
+            r#"{"schema_version":2,"type":"hello","x":1}"#.to_owned(),
+            submit("2").replacen('}', r#","x":1}"#, 1),
+            r#"{"schema_version":2,"type":"submit","request":"e30="}"#.to_owned(),
+            r#"{"schema_version":2,"type":"submit"}"#.to_owned(),
+            r#"{"schema_version":"2","type":"hello"}"#.to_owned(),
+            r#"{"type":"hello"}"#.to_owned(),
+            r#"{"schema_version":2}"#.to_owned(),
+            r#"{"schema_version":2,"type":"hello","type":"hello"}"#.to_owned(),
+            r#"{"schema_version":2,"type":"hel\u0000lo"}"#.to_owned(),
+            hello("2").replace("hello", "Hello"),
+            "[]".to_owned(),
+            String::new(),
+            "not json".to_owned(),
+        ];
+        for line in &others {
+            assert_eq!(first_kind(line.as_bytes()), First::Refuse(ErrorCode::MalformedLine), "{line}");
+        }
+        assert_eq!(first_kind(&vec![b' '; crate::exchange::MAX_LINE + 1]), First::Refuse(ErrorCode::LineTooLong));
+    }
+
+    #[test]
+    fn the_string_rules_apply_to_every_string_member_of_every_message() {
+        // A control character or a bidirectional mark in any string member is refused, signed or not.
+        let doc = STANDARD.encode(b"x");
+        let sig = signature_to_base64(SIG);
+        let nonce = nb();
+        let delegation = fp('Q').to_string();
+        let hash = hash().to_string();
+        let lines = [
+            (
+                "signin",
+                format!(r#"{{"schema_version":1,"type":"signin","doc":"{doc}","doc_sig":"{sig}"}}"#),
+                vec!["type", "doc", "doc_sig"],
+            ),
+            (
+                "withdraw",
+                format!(r#"{{"schema_version":1,"type":"withdraw","delegation":"{delegation}"}}"#),
+                vec!["type", "delegation"],
+            ),
+            ("ack", format!(r#"{{"schema_version":1,"type":"ack","request":"{hash}"}}"#), vec!["type", "request"]),
+            (
+                "challenge",
+                format!(r#"{{"schema_version":1,"type":"challenge","nonce":"{nonce}"}}"#),
+                vec!["type", "nonce"],
+            ),
+            (
+                "notice",
+                format!(r#"{{"schema_version":1,"type":"notice","doc":"{doc}","doc_sig":"{sig}"}}"#),
+                vec!["type", "doc", "doc_sig"],
+            ),
+            (
+                "registered",
+                format!(r#"{{"schema_version":1,"type":"registered","delegation":"{delegation}"}}"#),
+                vec!["type", "delegation"],
+            ),
+            (
+                "not-registered",
+                format!(
+                    r#"{{"schema_version":1,"type":"not-registered","delegation":"{delegation}","reason":"blocked"}}"#
+                ),
+                vec!["type", "delegation", "reason"],
+            ),
+            (
+                "withdrawn",
+                format!(r#"{{"schema_version":1,"type":"withdrawn","delegation":"{delegation}","stored":true}}"#),
+                vec!["type", "delegation"],
+            ),
+            (
+                "answer",
+                format!(
+                    r#"{{"schema_version":1,"type":"answer","request":"{hash}","result":"refused","by":"pledge","reason":"limit"}}"#
+                ),
+                vec!["type", "request", "result", "by", "reason"],
+            ),
+            ("error", r#"{"schema_version":1,"type":"error","error":"signin"}"#.to_owned(), vec!["type", "error"]),
+            (
+                "approved answer",
+                format!(
+                    r#"{{"schema_version":1,"type":"answer","request":"{hash}","result":"approved","approval":"{sig}"}}"#
+                ),
+                vec!["result", "approval"],
+            ),
+            (
+                "cancel",
+                format!(r#"{{"schema_version":1,"type":"cancel","request":"{hash}"}}"#),
+                vec!["type", "request"],
+            ),
+        ];
+        let parse_any = |line: &[u8]| -> bool {
+            FromPledge::parse(line).is_ok() || FromService::parse(line).is_ok() || ToPledge::parse(line).is_ok()
+        };
+        for (kind, line, members) in &lines {
+            assert!(parse_any(line.as_bytes()), "{kind} as written");
+            for member in members {
+                for (mark, what) in [
+                    ("\\u0000", "NUL"),
+                    ("\\u001f", "unit separator"),
+                    ("\\u007f", "DEL"),
+                    ("\\u0085", "NEL"),
+                    ("\\u202e", "bidi override"),
+                    ("\\u2066", "bidi isolate"),
+                ] {
+                    let needle = format!("\"{member}\":\"");
+                    let at = line.find(&needle).unwrap_or_else(|| panic!("{kind}: no {member}")) + needle.len();
+                    let broken = format!("{}{mark}{}", &line[..at], &line[at..]);
+                    assert!(!parse_any(broken.as_bytes()), "{kind}.{member} with {what} was read");
+                }
+            }
+        }
+        // The signed documents carry strings too: the person, the groups, the entries, the certificates.
+        let connection = |person: &str| {
+            format!(
+                r#"{{"v":1,"type":"connection","person":"{person}","nonce":"{nonce}","tls":"{}"}}"#,
+                STANDARD.encode(T)
+            )
+        };
+        assert_eq!(
+            ConnectionDocument::parse_unverified(connection("j\\u202en")),
+            Err(ParseError::BidiMark("person".into()))
+        );
+        assert_eq!(
+            ConnectionDocument::parse_unverified(connection("j\\u0007n")),
+            Err(ParseError::ControlCharacter("person".into()))
+        );
+        let standing = |groups: &str, to: &str| {
+            format!(
+                r#"{{"v":1,"type":"standing","to":"{to}","nonce":"{nonce}","n":0,"blocked":false,"blocked_keys":[],"withdrawn":[],"certificates":[],"groups":[{groups}]}}"#
+            )
+        };
+        assert_eq!(
+            Standing::parse_unverified(standing("\"o\\u202eps\"", "jan")),
+            Err(ParseError::BidiMark("groups".into()))
+        );
+        assert_eq!(
+            Standing::parse_unverified(standing("\"o\\u0000ps\"", "jan")),
+            Err(ParseError::ControlCharacter("groups".into()))
+        );
+        assert_eq!(
+            Standing::parse_unverified(standing("", "ja\\u0000n")),
+            Err(ParseError::ControlCharacter("to".into()))
+        );
+        let with_cert = standing("", "jan")
+            .replace(r#""certificates":[]"#, r#""certificates":["ssh-ed25519-cert-v01@openssh.com AAAA\u0000"]"#);
+        assert_eq!(Standing::parse_unverified(with_cert), Err(ParseError::ControlCharacter("certificates".into())));
+        let key = standing("", "jan").replace(r#""blocked_keys":[]"#, r#""blocked_keys":["SHA256:\u202e"]"#);
+        assert_eq!(Standing::parse_unverified(key), Err(ParseError::BidiMark("blocked_keys".into())));
     }
 }

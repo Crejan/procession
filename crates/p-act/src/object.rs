@@ -111,6 +111,7 @@ impl Object {
         Ok(())
     }
 
+    #[cfg(feature = "pact")]
     /// Whether a member of this name is present.
     pub(crate) fn has(&self, name: &str) -> bool {
         self.members.iter().any(|(n, _)| n == name)
