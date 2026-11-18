@@ -213,7 +213,13 @@ fn what_is_out_of_order_ends_the_connection_and_carried_is_ignored() {
     let mut w = W::new();
     w.sign_in();
     assert!(w.link.is_ready());
-    assert!(w.session.handle(br#"{"schema_version":1,"type":"carried","namespace":"hosts-v1@procession","doc":"AA==","doc_sig":"AA=="}"#).expect("ignored").is_empty());
+    let content = w.content();
+    let ToPledge::Notice(signed) = w.notice(&content) else { unreachable!("a notice") };
+    let carried = ToPledge::Carried { namespace: "hosts-v1@procession".into(), signed };
+        namespace: "hosts-v1@procession".into(),
+        signed: Signed { doc: b"{}".to_vec(), sig: "AA==".into() },
+    };
+    assert!(w.feed(&carried).expect("ignored, by type").is_empty());
     assert!(matches!(w.session.handle(b"not json"), Err(End::Protocol(_))));
     let mut w = W::new();
     w.sign_in();
