@@ -83,11 +83,10 @@ impl Config {
         // One reader for the shared settings rules (`p_act::settings`): a regular file, owned by root or the
         // running user, not writable by others, one JSON object, no member twice, no trailing text, no byte
         // order mark, at most 1 MiB. Unknown members are refused by `deny_unknown_fields` on these types.
-        let config: Self = match p_act::settings::read(path) {
-            Ok(config) => config,
-            Err(p_act::settings::SettingsError::Io { source, .. }) if source.kind() == std::io::ErrorKind::NotFound => {
-                return Ok(Self::default());
-            }
+        // Only absence is the empty configuration; anything else wrong with the file is an error.
+        let config: Self = match p_act::settings::read_optional(path) {
+            Ok(Some(config)) => config,
+            Ok(None) => return Ok(Self::default()),
             Err(e) => return Err(Error::Corrupt { path: path.to_owned(), problem: e.to_string() }),
         };
         config.check().map_err(|problem| Error::Corrupt { path: path.to_owned(), problem })?;
