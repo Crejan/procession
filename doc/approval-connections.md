@@ -311,6 +311,17 @@ The broker keeps requests in memory only (section 5, "Reconnect"). A restart
 loses what waited, and the services' resubmissions put it back; nothing of it
 is on disk.
 
+**Whoever submits the same bytes gets the held answer**, approval and clearance
+included; nothing binds it to the connection that first asked. That is safe
+because of three rules, which this rests on. An approval authorises only the
+service whose signature is on the request. That service acts only on a call it
+received from an agent itself, and on an identifier once (R5). And a service
+drops an approval or clearance that arrives for a request it is not itself
+waiting on. So whoever submits again learns only that, and how, the person
+answered; and to do so they must hold the request and the service's signature,
+which only the service, the broker and the person's pledge ever see (TLS on
+both connections).
+
 **An answer that was not delivered.** An approval that came back while the
 service's connection was gone has nowhere to go. The broker keeps the answer **in
 memory** until the service's `ack` or the deadline, whichever is first, so that
