@@ -848,7 +848,371 @@ Each step leaves `cargo test` green on Linux and keys in files working.
     with the least new code, and the dialog process can then be built
     against something that works.
 
-## 8. What was read, what was not; nothing was run
+12. **One Mac app or two** (section 8.4).
+    *Recommendation:* two apps from one Swift code base; preserve's app
+    is admitted on `control.sock` for `keys.create` with purpose `bound`
+    and `keys.list` only, which needs a rule per command and peer there.
+    *Reason:* the program that shows requests should hold no updater and
+    no backup code, and one identity for everything is the wider key.
+
+13. **Take Atticus's SwiftUI front end at all**, against the web views
+    that `crates/p-reserve/SPEC.md` recommends.
+    *Recommendation:* yes for preserve's Mac app, on one condition: the
+    logic still in Atticus's views and view models moves into the daemon
+    first, and the socket protocols meet section 8.5. For pledge, take the
+    frame; its content is new either way.
+    *Reason:* about 4800 lines of working views and view models, most of
+    them already behind protocols; what is dropped is the layer under the
+    protocols, which the Rust programs replace anyway. The price is a
+    second front end for Linux later, which is why the condition is
+    strict. This overturns a recommendation in p-reserve's specification,
+    so it is its designer's call.
+
+14. **"Cancel by closing" in p-reserve's protocol.**
+    *Recommendation:* closing a connection cancels only requests that were
+    made as bound to it (browsing, a preview); a run, a prune or a restore
+    goes on and is cancelled by a message.
+    *Reason:* a backup must not stop because a window closed. This belongs
+    in p-reserve's proposal; it is raised here because the front end
+    depends on it.
+
+15. **The licence of what is taken from Atticus.** Its `LICENSE` is
+    proprietary, all rights reserved; p-ledge is `MIT OR Apache-2.0`.
+    *Recommendation:* the owner decides before any view is copied, and the
+    shared Swift package states the result.
+    *Reason:* it cannot be decided by whoever does the copying.
+
+16. **Where the dialog for a request lives** (section 8.6).
+    *Recommendation:* a small program in pledge's app bundle that `pledge
+    serve` starts itself; the app's window is a second place that shows
+    the same question.
+    *Reason:* a request can arrive with no app open, and the answer never
+    depends on the app: the touch is the yes.
+
+## 8. Atticus's SwiftUI front end as the Mac front end
+
+The owner's question: can Atticus's front end become the Mac front end of
+procession, with the Rust programs behind it. This part answers from the
+code, tree `develop` at `a1ada83`. What of it I read and what I only
+searched is in section 9; several panes I only searched, and the lists
+below can miss a call.
+
+### 8.1 What the front end is
+
+| Layer | Where | Size |
+|---|---|---|
+| Views | `Sources/Views/Redesign/`, 15 files | about 3450 lines |
+| View models | `Sources/ViewModels/`, 9 files | about 1400 lines |
+| Service protocols | `Sources/Core/Services/`, 13 files | about 390 lines |
+| Their implementations | `Sources/Core/Services/Live/`, 14 files | about 2000 lines |
+| Values the layers pass | `Sources/Core/Domain/`, 41 files, Foundation only | about 3300 lines |
+| Wiring | `Sources/App/ServiceContainer.swift`, `AtticusApp.swift` (one `Window`, one `MenuBarExtra`) | |
+
+A view builds its view model from the `ServiceContainer`; a view model
+holds protocols (`BackupService`, `ConfigStore`, `SnapshotService`,
+`SSHKeyService`, `HealthService`, `ScheduleStatusService`,
+`ConnectionTestService`, `ImportService`, `UpdateService`, `DaemonService`,
+`LoginItemService`, `SystemAccessService`, `ManagedConfigService`,
+`SnapshotBrowserService`) and three small seams for the system
+(`Pasteboard`, `AppActivator`, `SystemSettingsOpener`). A script,
+`tools/check-layering.sh`, holds one boundary: `Core/Domain` imports
+Foundation only and names nothing above it. It does **not** check that
+views stay behind the protocols. Only one protocol has a second
+implementation in the sources (`Mock/MockSnapshotBrowserService.swift`);
+whether the tests bring others I did not look.
+
+### 8.2 How clean the seam is
+
+**Clean, as far as I read or searched:** the menu bar popover
+(`MenuBarPopover.swift` with `MenuBarViewModel.swift`, both read: every
+call goes to `BackupService`, `ConfigStore`, `ScheduleStatusService`,
+`HealthService`, `UpdateService`, `AppActivator`), the overview, the
+schedule pane, the snapshot list of the restore pane, and the key part of
+the SSH pane (`SSHKeyViewModel.swift`: `SSHKeyService`, `ConfigStore`,
+`Pasteboard`).
+
+**Reaching past the protocols:**
+
+| View or view model | Reaches | What that is |
+|---|---|---|
+| `SnapshotBrowserSheet.swift` (`@ObservedObject var browser: SnapshotBrowser`; calls `navigate`, `goUp`, `open(directory:)`, `open(file:)`, `refresh`, `restore(_:into:)`, `close`) and `RestoreViewModel.swift` (`activeBrowser: SnapshotBrowser?`) | `Sources/Engine/SnapshotBrowser.swift` | The engine class itself. It runs restic through `ProcessRunner`, reads `SSHAgentServer.socketPath` and the bundle's path, and imports AppKit. The protocol `SnapshotBrowserService` is only a factory: `makeBrowser()` returns this class. The seam here is the class's published surface, not a protocol |
+| `SSHPane.swift` (`private let decisions: AgentDecisionLog`), `AccessHistorySheet.swift` (`AgentDecision`, `AgentPolicyTrace.Outcome`, `AgentDecisionLog.appName`) | `Sources/AgentDecisionLog.swift`, `Sources/AgentPolicyTrace.swift` | A concrete observable object, filled through two static hooks that `ServiceContainer.live()` sets (`AgentPolicy.traceSink`, `SSHAgentServer.signEventSink`). In memory only |
+| `BackupPane.swift` (`private let excludeStore: ExcludeStore`, `excludeStore.reload()`), `OverviewViewModel.swift` (`let excludeStore: ExcludeStore`), `ExcludesEditorRedesign.swift` (`ExcludeRules`, eight uses; `FileManager.default.fileExists` to test a rule against the disk) | `Sources/ExcludeStore.swift`, `Sources/ExcludeRules.swift` | A concrete object that reads and writes the exclude file itself, and the rules for it |
+| `RetentionRunner.swift` | `PruneRequest.write()`, `PruneRequest.clear()` (`Sources/Engine/PruneRequest.swift`) | A marker file for the daemon, written from the view-model layer |
+| `BackupViewModel.swift` | `ExcludeRules.systemExcludes()`, `BackupConfig.defaultPruneIntervalHours` | Rules and a default, read directly |
+| `GeneralViewModel.swift` | `catch let error as DaemonError` | An engine error type |
+| `GeneralPane.swift` | the global `logPath`, `FileManager.default.fileExists`, `NSWorkspace.shared.open` | The log file's place, known to the view |
+| `BackupPane.swift`, `GeneralPane.swift`, `MainWindow.swift`, `OverviewPane.swift` | `NotificationCenter.default.publisher(...)` | Which notifications, I did not read |
+
+Using `NSOpenPanel` in a view (`SnapshotBrowserSheet.swift`,
+`ExcludesEditorRedesign.swift`) is not counted: that is the view's own
+business.
+
+**The protocols themselves carry Atticus.** `ConfigStore` has the
+repository password in the Keychain (`saveRepoPassword`,
+`probeRepoPassword`, `rotateRepoPassword`), three switches of the SSH agent
+that do not carry over (section 5, rows 12, 18, 19) and the locks of an
+`.attic` profile. `SnapshotService.mount` is a FUSE mount, which
+`crates/p-reserve/SPEC.md` leaves out of scope. `BackupService` hands out a
+concrete observable object (`BackupMonitor`). Most getters are synchronous
+and on the main actor (`info()`, `status()`, `current()`, `load()`): an
+answer is expected at once, from memory or a file.
+
+**The larger point.** What is behind the protocols is not a back end that
+could be swapped. It is the program. The app's process *is* the SSH agent
+(`LiveSSHKeyService.activate()` starts `SSHAgentServer` and sets the key);
+it is the scheduler (`ScheduleRunner`, wired in `ServiceContainer.live()`);
+it learns what a backup does by tailing a log file and polling every ten
+seconds (`LiveBackupService`: `LogTailer`, a poll timer,
+`BackupRunReducer`); it starts a run through `DaemonController`. So the
+owner's memory is right for the direction that matters (most views know
+only protocols) and the consequence is: the layer under the protocols is
+not ported, it is dropped, about 2000 lines, and with it the parts of
+`Core/Domain` that exist to read logs (`BackupRunReducer`,
+`SchedulerLogScan`, `SchedulerTick`, `Gates`).
+
+### 8.3 What it takes to put socket clients behind the protocols
+
+Common to both programs:
+
+- A Swift client for a Unix socket with one JSON object per line: requests
+  with an identifier, answers and events matched by it, events as
+  `AsyncStream`. One client type serves both sockets if both protocols
+  keep the same envelope (`schema_version`, `type`, an identifier). Today
+  `control.sock` calls it `ref` (`proposals/control-sock.md`, section 3);
+  whatever p-reserve's proposal calls it, one word for both is worth
+  agreeing now.
+- The synchronous getters. Either the protocols become `async`, which
+  touches every view model, or each client keeps the last state it was
+  told and the getters read that. The second needs the daemon to push
+  state: a `status` answer and events that keep it current. That is what
+  section 8.5 asks of the protocols anyway.
+- The three objects of section 8.2 that are not protocols
+  (`SnapshotBrowser`, `ExcludeStore`, `AgentDecisionLog`) get one each,
+  with the surface the views use today.
+
+**`preserve`** (the daemon protocol is being proposed elsewhere; I have not
+seen it, only its outline: requests with an identifier, answers and events
+carrying it, progress as events, cancel by closing or by a message):
+
+| Atticus protocol or object | Becomes |
+|---|---|
+| `BackupService.trigger`, `BackupMonitor` | a request to run; progress and the end as events into the monitor. `BackupRunReducer` and the log tailing go |
+| `HealthService.current`, `.changes`; `ScheduleStatusService.status` | `status`, and events |
+| `SnapshotService.list`, `.delete`, `.setPinned`, `.repositoryStatus`, `.initializeRepository` | requests. `.mount`, `.unmount` have no counterpart |
+| `SnapshotBrowser` (list a level, preview a file, restore an item, cancel what the person left) | requests to list, dump and restore, each cancellable. The class's published surface (`currentPath`, `entries`, `listing`, `error`, `opening`, `restoring`, `restoreResult`) maps one to one. Read-ahead and "one restic at a time" (commit `f18f7f6`) are the daemon's concern then, or go: the daemon holds the repository open |
+| `ConnectionTestService.test()` (a stream of stages) | one request whose events are the stages |
+| `ConfigStore.load`, `.save…`; the repository password | reading and setting the daemon's configuration; the password through the daemon's own secret store (`crates/p-reserve/SPEC.md`, "Platforms") |
+| `ExcludeStore`, `ExcludeRules`, `RetentionRunner` with `PruneRequest` | requests; the rules live in the daemon, once |
+| `DaemonService`, `LoginItemService`, `SystemAccessService`, `UpdateService` | stay in the app: installing a job of launchd, the login item, Full Disk Access and the updater are the Mac app's own |
+| `ImportService`, `ManagedConfigService` (`.attic` profiles) | a decision of p-reserve; not looked at |
+
+**`pledge`** (`control.sock`, `proposals/control-sock.md`, section 4):
+
+| Atticus protocol or object | Becomes |
+|---|---|
+| `SSHKeyService.info` | `keys.list` |
+| `SSHKeyService.generate` (and "regenerate" behind a warning) | `keys.create`, `keys.retire`; the presence check is pledge's |
+| `SSHKeyService.sshConfigSnippet` | the app's own text, with the socket path from `status` |
+| `SSHKeyService.activate` | nothing: `pledge serve` is the SSH agent |
+| `AgentDecisionLog`, the access history sheet | the record. `control.sock` has no command for it today (`pledge history` reads the file) and no events yet (`control-sock.md`, section 6, "later"). Both are needed (section 8.5) |
+| the three SSH switches in `ConfigStore` | nothing |
+
+For pledge that is one pane and one sheet. Everything else pledge needs to
+show has no view in Atticus: programs (admit, block, forget), delegations
+(start with groups and two ceilings, list, withdraw), the keys' block for
+an administrator, requests that wait, and the dialog for a request. Atticus
+gives pledge the frame (a window, a menu bar item, the router, the shared
+components in `Components.swift`, the error alert) and little content.
+
+Two more things that are not code:
+
+- Atticus's `LICENSE` begins "Copyright (c) 2026 C-IT-WORK GmbH. All rights
+  reserved … proprietary". `crates/p-ledge/Cargo.toml` says `MIT OR
+  Apache-2.0`. Taking the views across is the owner's decision as the
+  rights holder, and has to be made (question 15).
+- The views' texts are English keys with a German table
+  (`Resources/de.lproj`), and some German is written into the views
+  directly (`"Letztes Backup: …"` in `MenuBarPopover.swift`, `"Protokoll"`
+  in `GeneralPane.swift`).
+
+### 8.4 One Mac app or two
+
+`crates/p-ledge/SPEC.md`, section 11, proposes one each;
+`crates/p-reserve/SPEC.md` lists it as open and says that setup "stays one
+flow in the desktop app although two programs are behind it".
+
+*Recommendation:* **two apps from one code base.** A Swift package with
+what both need (the socket client, the components, the window and menu bar
+frame), and two targets:
+
+- **pledge's app**: small. Keys, programs, delegations, the record, and the
+  dialogs (section 8.6).
+- **preserve's app**: Atticus's panes. For the one setup flow it is also a
+  client of `control.sock`, for `keys.create` with purpose `bound`,
+  `keys.list`, and nothing else.
+
+Why not one:
+
+- pledge's app is what shows a person what they are about to approve. It
+  should hold as little else as possible. Atticus's app links an updater
+  that fetches and installs code (`Sources/App/Updater.swift`, Sparkle);
+  that belongs in a backup app and not in the process that shows requests.
+- `control.sock` admits a peer by its code signature
+  (`control-sock.md`, section 2). One identity that may do everything, from
+  starting agents to pruning backups, is the wider key. With two apps the
+  socket can admit preserve's app for two commands only. That needs a rule
+  per command and peer in `control.sock`, which is not there today
+  (question 12).
+- A person who approves requests and keeps no backup on that Mac needs
+  pledge alone; p-reserve works with a key file where there is no pledge.
+
+Why one would be tempting: one menu bar item, one thing to install. The
+second target can still present itself inside the first later; the reverse
+split is harder.
+
+### 8.5 Linux: what the socket protocols must offer
+
+SwiftUI ends at the Mac. Whatever is drawn on Linux later can only reuse
+what crosses the sockets. So that a Linux desktop is not cornered:
+
+1. **Everything a front end shows comes over the socket.** No front end
+   reads a file of the daemon's: not the record, not a log, not the
+   configuration, not an exclude file, not a marker file. Atticus's app
+   does all of these. For pledge this means a command for the record
+   beside `pledge history` reading the file.
+2. **State, then events.** A `status` (and a list per noun) that gives the
+   whole present state, and a subscription whose events are enough to keep
+   it current. A client that connects late, or again, asks for the state
+   and is right. No event is the only carrier of a fact.
+3. **Codes and values, not sentences.** A front end words what it shows,
+   in its language. The exceptions are the fields of a request and of a
+   signing request, which are shown as they were signed.
+4. **No nouns of one platform in the messages.** Not "Touch ID",
+   "Keychain", "Full Disk Access", "launchd". Instead what they mean: "this
+   key enforces presence itself", "a permission is missing: <code>", "the
+   service is not installed". `status` already has `form` (`files` or
+   `hardware`); it should say per key who performs the presence check.
+5. **A dialog is a message, and the protocol says what an answer is
+   worth.** An event "a question is open" with an identifier, a title as a
+   code, the labelled fields whole, and the deadline; "closed" with the
+   reason. Where the key enforces presence, the protocol offers `decline`
+   and no `approve` (section 8.6). Where it does not, it says so, and an
+   answer over the socket is then all there is. A FIDO2 token on Linux
+   (`doc/approvals.md`, section 9) fits the first case unchanged: the touch
+   is at the token.
+6. **Long work has an identifier, progress as events, and a cancel; and
+   closing a connection cancels only what was asked for that way.** A
+   listing in the browser may end with its connection. A backup run or a
+   prune must not stop because a window closed. "Cancel by closing", as
+   the outline of p-reserve's protocol has it, needs this distinction
+   (question 14).
+7. **Several front ends at once.** The command line, a window and a tray
+   item may be three processes on Linux. Events go to all; a question is
+   answered once and the others are told it closed.
+8. **Nothing rests on the peer's code signature alone.** Linux has none:
+   there a peer is a user and a path. What the Mac guards by code
+   signature, Linux must guard by a presence check or state as unguarded.
+   The commands that widen something already have a check of their own
+   (`control-sock.md`, section 4); keep that rule for every new command.
+9. **A front end older or newer than its daemon.** `schema_version` and
+   refusing unknown members are there. Add to `status` what this daemon
+   can do, so that a front end hides what is missing instead of failing.
+10. **Paths are the daemon's.** A restore target or an exclude rule is a
+    path on the daemon's machine; a front end must not assume it can see
+    it. This also keeps the view for a headless host, which
+    `crates/p-reserve/SPEC.md` wants, possible.
+
+Taking the SwiftUI front end is the third candidate of
+`crates/p-reserve/SPEC.md` ("native per platform"), which that document
+calls "tolerable only because the app holds no logic" and does not
+recommend. The condition is therefore strict: the logic that Atticus's
+views and view models still hold (section 8.2: exclude rules, the prune
+marker, the reducer over the log) moves into the daemons before or with
+the views, not after.
+
+### 8.6 The dialog for a confirmed approval, in that app
+
+Section 4.2 proposed a dialog process of pledge's own until the desktop app
+exists. With an app, the question is whether the dialog can live there.
+
+**It can, as the place where the request is shown.** What ties the answer
+to the signature does not move: it is the key. The confirmed approval key
+enforces presence in the Secure Enclave; the Touch ID prompt is raised by
+the key holder, with words that come from the reader (section 4.3). The
+app shows the request whole and can say "decline". It has no way to say
+"yes": `control.sock` offers no such message where the key enforces
+presence. A touch is the only yes.
+
+Conditions:
+
+1. **The dialog must not depend on the person having opened an app.**
+   `pledge serve` is a job of launchd; a request can arrive with no window
+   open. *Proposal:* the dialog is a small program inside pledge's app
+   bundle that `pledge serve` starts itself, speaking the `Dialogs` seam
+   (section 6.3). The app's window and menu bar item are a second client
+   that shows the same open question. If neither can be shown, the request
+   waits and expires (question 9).
+2. **It is pledge's app, not a shared one** (section 8.4), so that the
+   program that shows requests has no updater and no backup code in it.
+3. **`control.sock` sends a request's contents only to a peer it has
+   identified** by audit token and code signature (section 3). Until
+   builds are signed (question 8) that check is the user and nothing more,
+   and the document must say so.
+4. **`control.sock` gains what `control-sock.md`, section 6, left for
+   later:** the subscription, with events for a question opened and
+   closed, and a `decline`.
+
+What Atticus offers for the dialog itself: nothing to take over. Its
+confirmation of a signature is the system's Touch ID prompt with one
+sentence (`AgentPolicy.authorize(reason:)`); there is no view for it. The
+three SwiftUI confirmation dialogs in the app are the app asking about its
+own acts: delete a snapshot (`RestorePane.swift`), clean up now
+(`BackupPane.swift`), replace the key (`SSHPane.swift`). A dialog that
+shows a request field by field, whole, with the agent's claim apart, is new
+SwiftUI either way. The frame it sits in is Atticus's.
+
+What an app that is taken over could and could not do is section 4.4,
+unchanged: it can lie on the screen and decline; it cannot sign, cannot
+cause a signature without a touch, and the Touch ID prompt's line (service,
+host, action) does not pass through it.
+
+One thing to see with eyes, **[U]**: the Touch ID prompt carries the name
+of the program that uses the key, the key holder, and appears over the
+app's dialog. The person then sees two program names for one act. The key
+holder should be named so that it reads as pledge.
+
+## 9. What was read, what was not; nothing was run
+
+For section 8, in Atticus (`develop`, `a1ada83`). Read in full:
+`Sources/Views/Redesign/MenuBarPopover.swift`,
+`Sources/ViewModels/MenuBarViewModel.swift`,
+`Sources/App/ServiceContainer.swift`,
+`Sources/Core/Services/Live/LiveSSHKeyService.swift`, and the thirteen
+protocol files in `Sources/Core/Services/` (comments left out). In part:
+`SSHPane.swift` (lines 1 to 40, 160 to 183), `RestorePane.swift` (20 to
+37), `BackupPane.swift` (115 to 125), `SSHKeyViewModel.swift` (the first 90
+lines of code), `tools/check-layering.sh` (the first 80 lines), the first
+lines of `LICENSE`. **Only searched**, for names of types declared outside
+the views, for system calls and for how services are obtained: every other
+view and view model, among them `OverviewPane.swift`, `SchedulePane.swift`,
+`GeneralPane.swift`, `ImportSheet.swift`, `MainWindow.swift`,
+`Components.swift`, `SnapshotBrowserSheet.swift` (its calls on the
+browser), `ExcludesEditorRedesign.swift`; and of
+`Sources/Engine/SnapshotBrowser.swift`, `Sources/ExcludeStore.swift`,
+`Sources/AgentDecisionLog.swift` and `LiveBackupService.swift` the
+declarations. The search took type names by a pattern and matched whole
+words, comments included; a free function or a constant used by a view
+(like `logPath`, found by a second search) can have escaped it. "Clean" in
+section 8.2 means: that search found nothing. Not read: the other `Live`
+implementations, `Sources/App/` beyond the container and the scenes of
+`AtticusApp.swift`, the tests. The line counts are `wc -l`.
+
+In this worktree, for section 8: `crates/p-reserve/SPEC.md`, the section
+"The desktop app" and its neighbours read, the rest searched;
+`proposals/control-sock.md`, section 4, read. The proposal for p-reserve's
+daemon protocol I have not seen; what section 8 says of it is the outline
+I was given.
 
 Read in full, in this worktree: `doc/approvals.md`,
 `doc/approval-formats.md`, `crates/p-ledge/SPEC.md`,
