@@ -28,9 +28,9 @@ service over HTTP. Nothing in it has been run on Linux. Terms are those of
 | `probe serve` over HTTP (`hyper`) | **built** (`src/http.rs`), tested over memory and over a Unix socket; **never run over TCP** (no port can be bound in the sandbox) |
 | `pact` composer, signer, catalogue, `pact call` / `pact tools` | built (p-act) |
 | `pact`'s HTTP client | p-act's, `ureq` 3 (`pact::http::HttpTransport`), merged; its socket tests never ran over a real socket either |
-| the cross run through `SudoRunner` | **written, not run:** `tests/stage1_sudo.rs` |
+| the cross run through `SudoRunner` | **run and passed** by the owner on 2026-11-18 at `2a38839` (Debian 13, unprivileged LXC container; writer: p-act): `tests/stage1_sudo.rs`, 1.13 s |
 | the cross run over real HTTP with the real `pact` | **written, not run:** `tests/stage1_http.rs` (needs a TCP port and `pact`'s client) |
-| the scripts of Stage A (`stage1/*.sh`) | **written, not run** (syntax checked with `sh -n` on macOS) |
+| the scripts of Stage A (`stage1/*.sh`) | **run and passed** by the owner on 2026-11-18 at `2a38839`, unedited: a1, a2 (23 PASS lines), a3 ("PASSED (exit 0)"). a3 has since changed (it names the test executable from cargo's JSON; `ac1fcba`) and is not yet run in that form |
 
 So the runbook has two stages. **Stage A runs today on a Linux machine**: the
 sudo rule, the dispatcher as root, the audit lines, and the whole cross run
@@ -540,6 +540,22 @@ dev-dependency only, for the in-memory streams of the tests. No TLS crate: betwe
 agent and service TLS is open for stage 2. `pact`'s client is p-act's: `ureq` 3, no runtime.
 
 ## 7. What was run, and where
+
+**Stage A, by the owner, 2026-11-18, at `2a38839`, scripts unedited, Debian 13 in an unprivileged LXC container, writer: p-act.**
+a1 and a2 passed (`REPORT-runbook.md` lists the 23 lines). a3, run with the executable cargo named
+(`target/debug/build/p-robe/0db5897be5b28c37/out/stage1_sudo-0db5897be5b28c37`): "PASSED (exit 0)", test ok in 1.13 s; eight `peer:` lines, all
+`uid=999 pid=8858 program=/var/tmp/probe-stage1-run/debug/deps/stage1_sudo` (that path is where a3 copies the binary): request/approved for `5be41485` and `7c79adb4`;
+received, then request/approved for `a8a72e8d`; received, then request/declined for `66c6c4a9`; received, then request/approved for `76fef447`. The five calls: `sys kit` done (automatic),
+`test echo` done (automatic), `test peak` done (confirmed), `test peak` declined, `test read` done (confirmed). The journal (`journalctl -t probe`) has start and done for `5be41485` (`sys kit`, rc=0, bytes=1472),
+`7c79adb4` (`test echo`, `args=via=sudo`), `a8a72e8d` (`test peak`), `76fef447` (`test read`, `args=/etc/sudoers.d/probe-svc`, bytes=1058), nothing for the declined `66c6c4a9`; each line has `identity=probe-svc from=- call=<id> waited=0.00s`;
+and a2's lines (the refusal `above-approved: rated open,none,outage against approved open,none,none`, `run command is offered by the service only`, `bad --call: a value is needed, and each once`, `--until is more than ten minutes ahead`, expired
+`the deadline had passed before the call reached the dispatcher`, a call that started with `waited=1.97s`, expired `the deadline passed while waiting for the lock (waited 2.00s)`).
+**Shown on Linux:** the sudo rule; the dispatcher as root; the lock wait and `--until`; the audit lines by call identifier; the cross run with pledge's peer lookup (`SO_PEERCRED`) through real sudo.
+**Not shown (Stage B):** HTTP, the service under an account apart from the person, a person at the dialog, a timer, `probe serve` under systemd.
+**Why the first two calls have no `received`:** pledge writes `received` only for a request that waits for a person (mode ask: `received` is appended before the dialog, so that no record means no dialog); an automatic approval
+is signed at once and has the one `request` entry, which is the entry that says `approved`.
+
+(Earlier, on macOS:)
 
 All of it on one macOS machine (Darwin 25.5), in a sandbox with no network, no
 root, no sudo rule, no systemd, no Linux.
