@@ -59,7 +59,8 @@ the namespace. A reader refuses a `v` it does not know.
 - **Unknown members** make a document invalid. Nothing is ignored: what a
   dialog does not show must not be in what is signed.
 - **Size**: a call is at most 16 KiB; a request at most 32 KiB; a clearance
-  at most 1 KiB.
+  at most 1 KiB; a connection document at most 1 KiB; a standing at most
+  64 KiB (both in `approval-connections.md`, section 5).
 
 ## 3. The call
 
