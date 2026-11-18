@@ -7,16 +7,12 @@
 //! does that), a size limit, and error texts that carry no value from the
 //! file. Secrets are never in it: a path to a 0600 file, or the key store.
 //!
-//! The owner and mode rule is `p_act::settings::check_owner_and_mode`, not a
-//! copy; [`read_checked`] is the one function to point at p-act's TOML
-//! reading when that exists.
+//! The checks are p-ermit's (`p_ermit::settings`: `read_toml_optional` for this file,
+//! `read_secret_checked` for a password file), not copies.
 //!
 //! Provisional: the keys below are what `preserve health` needs. The full
 //! shape (sources, targets, schedule) is not designed yet.
 
-use std::fs::File;
-use std::io::Read;
-use std::os::unix::fs::{MetadataExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
@@ -26,8 +22,6 @@ use serde::Deserialize;
 
 pub const DEFAULT_CONFIG: &str = "/etc/p-reserve.toml";
 pub const DEFAULT_LEDGER: &str = "/var/lib/p-reserve/ledger.prom";
-/// A configuration file is at most this long.
-pub const MAX_BYTES: u64 = 1024 * 1024;
 
 /// The limits when the file names none. Provisional, and they assume a daily
 /// schedule: fresh within 26 hours, stale after 72 hours, one hour of grace
@@ -86,80 +80,24 @@ pub struct PairConfig {
     pub freshness: FreshnessConfig,
 }
 
-/// Why the configuration was refused. Never holds a value from the file.
-#[derive(Debug, PartialEq, Eq, thiserror::Error)]
+/// Why the configuration or a password file was refused. Never holds a value from the file (a refused name is the one
+/// exception, by the designer's rule).
+#[derive(Debug, thiserror::Error)]
 pub enum ConfigError {
-    #[error("{0} does not exist")]
-    NotFound(String),
-    #[error("cannot read {0}")]
-    Io(String),
-    #[error("{0} is not a regular file")]
-    NotARegularFile(String),
-    #[error("{0}: {1}")]
-    Untrusted(String, String),
-    #[error("{0} is larger than the limit")]
-    TooLarge(String),
-    #[error("{0} is not UTF-8")]
-    NotUtf8(String),
+    /// The file failed p-ermit's checks or its parsing.
+    #[error("{0}")]
+    File(#[from] p_ermit::settings::SettingsError),
     #[error("{0}: {1}")]
     Invalid(String, String),
 }
 
-/// The text of the file at `path` if it may be trusted: a regular file, owned
-/// by root or the running user, not writable by group or others, within
-/// [`MAX_BYTES`], UTF-8. The checks are on the open file.
-pub fn read_checked(path: &Path) -> Result<String, ConfigError> {
-    let shown = path.display().to_string();
-    let mut file = File::open(path).map_err(|e| match e.kind() {
-        std::io::ErrorKind::NotFound => ConfigError::NotFound(shown.clone()),
-        _ => ConfigError::Io(shown.clone()),
-    })?;
-    let meta = file.metadata().map_err(|_| ConfigError::Io(shown.clone()))?;
-    if !meta.is_file() {
-        return Err(ConfigError::NotARegularFile(shown));
-    }
-    p_act::settings::check_owner_and_mode(&shown, meta.uid(), meta.permissions().mode(), p_act::peer::own_uid())
-        .map_err(|e| ConfigError::Untrusted(shown.clone(), e.to_string()))?;
-    let mut bytes = Vec::new();
-    (&mut file).take(MAX_BYTES + 1).read_to_end(&mut bytes).map_err(|_| ConfigError::Io(shown.clone()))?;
-    if bytes.len() as u64 > MAX_BYTES {
-        return Err(ConfigError::TooLarge(shown));
-    }
-    String::from_utf8(bytes).map_err(|_| ConfigError::NotUtf8(shown))
-}
-
-/// The secret in the file at `path`, for a password: a regular file owned by
-/// the running user or root, with no permission for group or others (0600 or
-/// 0400), at most 4 KiB, UTF-8; one trailing newline is dropped. Errors name
-/// the file and never its content.
+/// The password in the file at `path`: p-ermit's secret checks (a regular file, owned by root or the running user, no
+/// permission for group or others), at most 4 KiB, UTF-8; one trailing newline is dropped; not empty.
 pub fn read_secret(path: &Path) -> Result<String, ConfigError> {
+    let bytes = p_ermit::settings::read_secret_checked(path, 4096)?;
     let shown = path.display().to_string();
-    let mut file = File::open(path).map_err(|e| match e.kind() {
-        std::io::ErrorKind::NotFound => ConfigError::NotFound(shown.clone()),
-        _ => ConfigError::Io(shown.clone()),
-    })?;
-    let meta = file.metadata().map_err(|_| ConfigError::Io(shown.clone()))?;
-    if !meta.is_file() {
-        return Err(ConfigError::NotARegularFile(shown));
-    }
-    if meta.permissions().mode() & 0o077 != 0 {
-        return Err(ConfigError::Untrusted(
-            shown,
-            "a password file must not be accessible to group or others: run chmod 600 on it".to_owned(),
-        ));
-    }
-    if meta.uid() != 0 && meta.uid() != p_act::peer::own_uid() {
-        return Err(ConfigError::Untrusted(
-            shown,
-            "a password file must be owned by root or by the user running this program".to_owned(),
-        ));
-    }
-    let mut bytes = Vec::new();
-    (&mut file).take(4097).read_to_end(&mut bytes).map_err(|_| ConfigError::Io(shown.clone()))?;
-    if bytes.len() > 4096 {
-        return Err(ConfigError::TooLarge(shown));
-    }
-    let mut text = String::from_utf8(bytes).map_err(|_| ConfigError::NotUtf8(shown.clone()))?;
+    let mut text = String::from_utf8(bytes)
+        .map_err(|_| ConfigError::Invalid(shown.clone(), "the file is not UTF-8".to_owned()))?;
     if text.ends_with('\n') {
         text.pop();
     }
@@ -167,22 +105,6 @@ pub fn read_secret(path: &Path) -> Result<String, ConfigError> {
         return Err(ConfigError::Invalid(shown, "the password file is empty".to_owned()));
     }
     Ok(text)
-}
-
-/// What is wrong with a TOML document, without any value from it: the parser's
-/// message can quote the offending value, so only messages that name a key
-/// are kept (a key is what tells a person which one to remove), and the rest
-/// is reduced to the line.
-fn describe(text: &str, e: &toml::de::Error) -> String {
-    let line = e.span().map_or(0, |span| text[..span.start.min(text.len())].matches('\n').count() + 1);
-    let message = e.message();
-    let first = message.lines().next().unwrap_or("");
-    let names_only = ["unknown field `", "missing field `", "duplicate key `", "duplicate field `"];
-    if names_only.iter().any(|prefix| first.starts_with(prefix)) {
-        format!("{first}, line {line}")
-    } else {
-        format!("a value of the wrong kind or out of range, or not TOML, near line {line}")
-    }
 }
 
 /// The rule for a configured name of a source or a target: `[a-z0-9][a-z0-9._-]{0,63}`.
@@ -243,15 +165,8 @@ fn limits(own: &FreshnessConfig, base: &FreshnessConfig) -> Result<Thresholds, S
 impl Config {
     /// The file at `path`, checked (see the module); `None` if there is none.
     pub fn load(path: &Path) -> Result<Option<Config>, ConfigError> {
-        let text = match read_checked(path) {
-            Ok(text) => text,
-            Err(ConfigError::NotFound(_)) => return Ok(None),
-            Err(e) => return Err(e),
-        };
-        let shown = path.display().to_string();
-        let config: Config =
-            toml::from_str(&text).map_err(|e| ConfigError::Invalid(shown.clone(), describe(&text, &e)))?;
-        config.check().map_err(|problem| ConfigError::Invalid(shown, problem))?;
+        let Some(config) = p_ermit::settings::read_toml_optional::<Config>(path)? else { return Ok(None) };
+        config.check().map_err(|problem| ConfigError::Invalid(path.display().to_string(), problem))?;
         Ok(Some(config))
     }
 
@@ -302,6 +217,10 @@ impl Config {
 
 #[cfg(test)]
 mod tests {
+    use std::os::unix::fs::PermissionsExt;
+
+    use p_ermit::settings::SettingsError;
+
     use super::*;
 
     fn write(dir: &Path, text: &str, mode: u32) -> PathBuf {
@@ -315,7 +234,7 @@ mod tests {
     fn every_key_is_optional_and_a_missing_file_is_none() {
         assert_eq!(toml::from_str::<Config>("").unwrap(), Config::default());
         assert_eq!(Config::default().default_limits().unwrap(), DEFAULT_LIMITS);
-        assert_eq!(Config::load(Path::new("/nonexistent/p-reserve.toml")), Ok(None));
+        assert!(Config::load(Path::new("/nonexistent/p-reserve.toml")).unwrap().is_none());
     }
 
     #[test]
@@ -342,9 +261,12 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         for mode in [0o664, 0o646, 0o666, 0o620, 0o602] {
             let path = write(dir.path(), "x = [", mode);
-            assert!(matches!(Config::load(&path), Err(ConfigError::Untrusted(..))), "{mode:o}");
+            assert!(
+                matches!(Config::load(&path), Err(ConfigError::File(SettingsError::WritableByOthers { .. }))),
+                "{mode:o}"
+            );
         }
-        // the owner check is p-act's `check_owner_and_mode`; a file of this user's passes it
+        // the owner check is p-ermit's; a file of this user's passes it
         for mode in [0o600, 0o644, 0o400] {
             let path = write(dir.path(), "", mode);
             assert!(Config::load(&path).unwrap().is_some(), "{mode:o}");
@@ -361,11 +283,11 @@ mod tests {
             "[[pair]]\nsource = \"a\"\ntarget = \"b\"\nx = 1",
         ] {
             let path = write(dir.path(), text, 0o600);
-            assert!(matches!(Config::load(&path), Err(ConfigError::Invalid(..))), "{text}");
+            assert!(matches!(Config::load(&path), Err(ConfigError::File(SettingsError::Invalid(_)))), "{text}");
         }
-        assert!(matches!(Config::load(dir.path()), Err(ConfigError::NotARegularFile(_))));
-        let big = write(dir.path(), &"#".repeat(MAX_BYTES as usize + 1), 0o600);
-        assert!(matches!(Config::load(&big), Err(ConfigError::TooLarge(_))));
+        assert!(matches!(Config::load(dir.path()), Err(ConfigError::File(SettingsError::NotARegularFile(_)))));
+        let big = write(dir.path(), &"#".repeat(p_ermit::settings::DEFAULT_MAX_BYTES as usize + 1), 0o600);
+        assert!(matches!(Config::load(&big), Err(ConfigError::File(SettingsError::TooLarge(_)))));
     }
 
     #[test]
