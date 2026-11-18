@@ -1202,3 +1202,273 @@ mod streaming {
         assert!(rig.ran().is_empty());
     }
 }
+
+// ---- the HTTP transport: hyper over memory and over a Unix socket -------------------------------
+
+mod http_tests {
+    use super::*;
+    use crate::http::{Limits, accept_loop, serve_connection};
+    use serde_json::{Value, json};
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    fn runtime() -> tokio::runtime::Runtime {
+        tokio::runtime::Builder::new_multi_thread().worker_threads(2).enable_all().build().unwrap()
+    }
+
+    /// A service on the rig's pledge, with its own dispatcher state.
+    fn service_of(rig: &Rig) -> Arc<Service> {
+        let runner = InProcess {
+            audit_file: rig.audit.clone(),
+            lock_dir: rig.dispatcher_dir.path().join("locks"),
+            user: "probe".into(),
+            before: None,
+        };
+        Arc::new(make_service(&rig.pki, rig.pledge.link(), &rig.used, runner, 16).0)
+    }
+
+    fn request(body: &Value, extra_headers: &str) -> Vec<u8> {
+        let body = body.to_string();
+        format!(
+            "POST /mcp HTTP/1.1\r\nHost: probe\r\nAccept: application/json, text/event-stream\r\nContent-Type: application/json\r\nContent-Length: {}\r\n{extra_headers}\r\n{body}",
+            body.len()
+        )
+        .into_bytes()
+    }
+
+    fn call_body(sent: &Sent, token: Option<&str>) -> Value {
+        let mut meta = json!({"procession/call": sent.call, "procession/call_sig": sent.call_sig});
+        if let Some(token) = token {
+            meta["progressToken"] = json!(token);
+        }
+        json!({"jsonrpc": "2.0", "id": 5, "method": "tools/call", "params": {"name": sent.name, "arguments": {"params": sent.params}, "_meta": meta}})
+    }
+
+    /// What arrived, and when: the status, the headers and the pieces of the chunked body.
+    struct Reply {
+        status: u16,
+        headers: Vec<(String, String)>,
+        head_at: Duration,
+        chunks: Vec<(Duration, String)>,
+    }
+
+    impl Reply {
+        fn comments(&self) -> usize {
+            self.chunks.iter().filter(|(_, c)| c.starts_with(": keepalive")).count()
+        }
+
+        fn messages(&self) -> Vec<Value> {
+            self.chunks
+                .iter()
+                .filter_map(|(_, c)| c.strip_prefix("event: message\ndata: "))
+                .map(|d| serde_json::from_str(d.trim_end()).unwrap())
+                .collect()
+        }
+
+        fn header(&self, name: &str) -> Option<&str> {
+            self.headers.iter().find(|(k, _)| k.eq_ignore_ascii_case(name)).map(|(_, v)| v.as_str())
+        }
+    }
+
+    /// Reads one response from `stream` as it arrives: the head, then the pieces of the chunked body or the
+    /// whole body of a Content-Length response, until the server closes.
+    async fn read_reply<S: AsyncReadExt + Unpin>(stream: &mut S) -> Reply {
+        let started = Instant::now();
+        let mut buffer = Vec::new();
+        let mut byte = [0u8; 4096];
+        let end = loop {
+            if let Some(at) = buffer.windows(4).position(|w| w == b"\r\n\r\n") {
+                break at;
+            }
+            let n = stream.read(&mut byte).await.unwrap();
+            assert!(n > 0, "closed before a head: {:?}", String::from_utf8_lossy(&buffer));
+            buffer.extend_from_slice(&byte[..n]);
+        };
+        let head_at = started.elapsed();
+        let head = String::from_utf8_lossy(&buffer[..end]).into_owned();
+        let mut lines = head.split("\r\n");
+        let status: u16 = lines.next().unwrap().split(' ').nth(1).unwrap().parse().unwrap();
+        let headers: Vec<(String, String)> =
+            lines.filter_map(|l| l.split_once(": ")).map(|(k, v)| (k.to_string(), v.to_string())).collect();
+        let chunked = headers.iter().any(|(k, v)| k.eq_ignore_ascii_case("transfer-encoding") && v == "chunked");
+        let length: Option<usize> =
+            headers.iter().find(|(k, _)| k.eq_ignore_ascii_case("content-length")).and_then(|(_, v)| v.parse().ok());
+        let mut rest = buffer[end + 4..].to_vec();
+        let mut chunks = Vec::new();
+        loop {
+            if chunked {
+                // size CRLF data CRLF ... 0 CRLF CRLF
+                while let Some(line_end) = rest.windows(2).position(|w| w == b"\r\n") {
+                    let size =
+                        usize::from_str_radix(std::str::from_utf8(&rest[..line_end]).unwrap().trim(), 16).unwrap();
+                    if size == 0 {
+                        return Reply { status, headers, head_at, chunks };
+                    }
+                    if rest.len() < line_end + 2 + size + 2 {
+                        break;
+                    }
+                    let data = String::from_utf8(rest[line_end + 2..line_end + 2 + size].to_vec()).unwrap();
+                    chunks.push((started.elapsed(), data));
+                    rest.drain(..line_end + 2 + size + 2);
+                }
+            } else if length.is_some_and(|l| rest.len() >= l) {
+                chunks.push((started.elapsed(), String::from_utf8(rest).unwrap()));
+                return Reply { status, headers, head_at, chunks };
+            }
+            let n = stream.read(&mut byte).await.unwrap();
+            if n == 0 {
+                if !chunked && length.is_none() && !rest.is_empty() {
+                    chunks.push((started.elapsed(), String::from_utf8(rest).unwrap()));
+                }
+                return Reply { status, headers, head_at, chunks };
+            }
+            rest.extend_from_slice(&byte[..n]);
+        }
+    }
+
+    /// One request over an in-memory connection.
+    async fn exchange(service: &Arc<Service>, limits: Limits, bytes: &[u8]) -> Reply {
+        let (mut client, server) = tokio::io::duplex(1 << 16);
+        tokio::spawn(serve_connection(server, service.clone(), limits));
+        client.write_all(bytes).await.unwrap();
+        read_reply(&mut client).await
+    }
+
+    #[test]
+    fn a_plain_request_gets_a_plain_answer_and_what_is_not_allowed_gets_its_status() {
+        let rig = Rig::new(Plan::Decline);
+        let service = service_of(&rig);
+        runtime().block_on(async {
+            let ping = exchange(
+                &service,
+                Limits::default(),
+                &request(&json!({"jsonrpc": "2.0", "id": 1, "method": "ping"}), ""),
+            )
+            .await;
+            assert_eq!(ping.status, 200);
+            assert_eq!(ping.header("content-type"), Some("application/json"));
+            assert_eq!(ping.chunks.len(), 1);
+            assert_eq!(serde_json::from_str::<Value>(&ping.chunks[0].1).unwrap()["id"], 1);
+            let origin = exchange(
+                &service,
+                Limits::default(),
+                &request(&json!({"jsonrpc": "2.0", "id": 1, "method": "ping"}), "Origin: http://evil\r\n"),
+            )
+            .await;
+            assert_eq!(origin.status, 403);
+            let get = exchange(&service, Limits::default(), b"GET /mcp HTTP/1.1\r\nHost: probe\r\n\r\n").await;
+            assert_eq!(get.status, 405);
+            // More than the layer's 64 KiB: refused, whatever the client does next.
+            let big = json!({"jsonrpc": "2.0", "id": 1, "method": "ping", "pad": "x".repeat(70_000)});
+            assert_eq!(exchange(&service, Limits::default(), &request(&big, "")).await.status, 413);
+            // Not HTTP at all: hyper's own refusal, and the connection closes.
+            let (mut client, server) = tokio::io::duplex(4096);
+            tokio::spawn(serve_connection(server, service.clone(), Limits::default()));
+            client.write_all(b"\x16\x03\x01 not http\r\n\r\n").await.unwrap();
+            let mut rest = Vec::new();
+            let _ = tokio::time::timeout(Duration::from_secs(3), client.read_to_end(&mut rest)).await;
+            assert!(
+                String::from_utf8_lossy(&rest).starts_with("HTTP/1.1 400") || rest.is_empty(),
+                "{:?}",
+                String::from_utf8_lossy(&rest)
+            );
+        });
+    }
+
+    #[test]
+    fn a_client_that_sends_no_head_is_dropped_at_the_header_timeout() {
+        let rig = Rig::new(Plan::Decline);
+        let service = service_of(&rig);
+        runtime().block_on(async {
+            let (mut client, server) = tokio::io::duplex(4096);
+            let limits = Limits { header_timeout: Duration::from_millis(300), ..Limits::default() };
+            let handler = tokio::spawn(serve_connection(server, service.clone(), limits));
+            client.write_all(b"POST /mcp HTTP/1.1\r\nHost: pro").await.unwrap(); // and nothing more
+            let ended = tokio::time::timeout(Duration::from_secs(3), handler).await;
+            assert!(ended.is_ok(), "the connection was not dropped");
+        });
+    }
+
+    #[test]
+    fn the_stream_head_comes_at_acceptance_with_keepalive_comments_until_the_answer() {
+        let rig = Rig::new(Plan::Silent);
+        rig.pledge.set(Plan::ApproveAfter(Duration::from_millis(1200), rig.pki.confirmed.clone()));
+        let service = service_of(&rig);
+        let sent = rig.jan("sys kit", &[]);
+        runtime().block_on(async {
+            let limits = Limits { keepalive: Duration::from_millis(100), ..Limits::default() };
+            let reply = exchange(&service, limits, &request(&call_body(&sent, Some("tok")), "")).await;
+            assert_eq!(reply.status, 200);
+            assert_eq!(reply.header("content-type"), Some("text/event-stream"));
+            assert_eq!(reply.header("transfer-encoding"), Some("chunked"));
+            assert!(
+                reply.head_at < Duration::from_millis(600),
+                "the head came at {:?}, long before the approval",
+                reply.head_at
+            );
+            assert!(reply.comments() >= 5, "{} comments while the person was asked", reply.comments());
+            let messages = reply.messages();
+            assert_eq!(messages.len(), 1, "no notice of progress");
+            assert!(messages[0]["result"]["content"][0]["text"].as_str().unwrap().contains("\"outcome\":\"done\""));
+            // No silence longer than a few keepalives on the wire.
+            let mut times = vec![reply.head_at];
+            times.extend(reply.chunks.iter().map(|(t, _)| *t));
+            assert!(times.windows(2).all(|w| w[1] - w[0] < Duration::from_millis(500)), "{times:?}");
+        });
+    }
+
+    #[test]
+    fn a_client_that_goes_away_cancels_the_call_at_once_not_at_the_next_keepalive() {
+        let rig = Rig::new(Plan::Silent);
+        let service = service_of(&rig);
+        let sent = rig.jan("sys kit", &[]);
+        runtime().block_on(async {
+            // The default keepalive is 15 seconds: noticing the client at the next comment would take that long.
+            let (mut client, server) = tokio::io::duplex(1 << 16);
+            tokio::spawn(serve_connection(server, service.clone(), Limits::default()));
+            client.write_all(&request(&call_body(&sent, Some("tok")), "")).await.unwrap();
+            let mut head = [0u8; 256];
+            let n = client.read(&mut head).await.unwrap();
+            assert!(String::from_utf8_lossy(&head[..n]).starts_with("HTTP/1.1 200"));
+            drop(client); // the agent is gone
+        });
+        let started = Instant::now();
+        rig.pledge.wait_for("cancel");
+        assert!(started.elapsed() < Duration::from_secs(5), "{:?}", started.elapsed());
+        assert!(rig.ran().is_empty(), "nothing ran");
+        assert_eq!(service.waiting(), 0);
+    }
+
+    #[test]
+    fn over_a_unix_socket_through_the_accept_loop_two_calls_at_once_and_a_clean_shutdown() {
+        let rig = Rig::new(Plan::Silent);
+        rig.pledge.set(Plan::Approve(rig.pki.automatic.clone()));
+        let service = service_of(&rig);
+        let socket = socket_dir().join("probe.sock");
+        runtime().block_on(async {
+            let listener = tokio::net::UnixListener::bind(&socket).unwrap();
+            let (stop, shutdown) = tokio::sync::oneshot::channel();
+            let server = tokio::spawn(accept_loop(listener, service.clone(), Limits::default(), shutdown));
+            let (a, b) = (rig.jan("sys kit", &[]), rig.jan("sys kit", &[]));
+            let ask = |sent: Sent| {
+                let socket = socket.clone();
+                async move {
+                    let mut stream = tokio::net::UnixStream::connect(&socket).await.unwrap();
+                    stream.write_all(&request(&call_body(&sent, None), "")).await.unwrap();
+                    read_reply(&mut stream).await
+                }
+            };
+            let (first, second) = tokio::join!(ask(a), ask(b));
+            for reply in [first, second] {
+                assert_eq!(reply.status, 200);
+                let body: Value = serde_json::from_str(&reply.chunks[0].1).unwrap();
+                assert!(
+                    body["result"]["content"][0]["text"].as_str().unwrap().contains("\"outcome\":\"done\""),
+                    "{body}"
+                );
+            }
+            stop.send(()).unwrap();
+            tokio::time::timeout(Duration::from_secs(3), server).await.expect("the loop ended").unwrap();
+        });
+        assert_eq!(rig.pledge.count("submit"), 2);
+    }
+}

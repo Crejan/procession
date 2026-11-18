@@ -1,0 +1,17 @@
+[Unit]
+Description=probe: diagnostics for agents, with the approval of a person
+Documentation=file:///usr/local/share/doc/probe/RUNBOOK-stage1-linux.md
+After=network.target
+
+[Service]
+User=probe-svc
+ExecStart=/usr/local/bin/probe serve --config /etc/probe.json
+Restart=on-failure
+RestartSec=5
+# sudo must be able to become root from here: do not set NoNewPrivileges=true.
+# No sandboxing lines on purpose: ProtectSystem, PrivateTmp, ReadWritePaths and the like need mount
+# namespaces, which an unprivileged LXC container only gives with nesting. Where they work, add
+# probe-serve-hardening.conf as a drop-in (see the runbook, step B4).
+
+[Install]
+WantedBy=multi-user.target

@@ -1,12 +1,13 @@
 //! `probe serve` and `probe setup`: the commands around the service.
 //!
-//! **The HTTP transport is not built** (no HTTP server crate can be built in
-//! the environment this was written in; see `proposals/REPORT.md`). Everything
-//! up to it is: the settings, the service and the MCP layer as a function from
-//! an HTTP request to a response (`mcp::Mcp::handle`).
+//! `probe serve` builds the service from `/etc/probe.json` and serves MCP over HTTP on `listen`
+//! (`http.rs`: `hyper`, one request per connection). Nothing of the HTTP has run over a TCP
+//! socket in the environment this was written in (no port can be bound there); it is tested over
+//! memory and over a Unix socket.
 
 use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use p_act::sign::{PublicKey, Signer};
 
@@ -17,7 +18,7 @@ use crate::runner::SudoRunner;
 use crate::service::{Service, Settings};
 use crate::store::UsedStore;
 
-const DEFAULT_CONFIG: &str = "/etc/probe.toml";
+const DEFAULT_CONFIG: &str = crate::config::DEFAULT_FILE;
 
 /// Builds the service a configuration describes.
 ///
@@ -71,29 +72,50 @@ pub fn serve(args: &[&str]) -> u8 {
             return 64;
         }
     };
-    let built = std::fs::read_to_string(path)
-        .map_err(|e| format!("{path}: {e}"))
-        .and_then(|text| Config::parse(&text).map_err(|e| format!("{path}: {e}")))
-        .and_then(|config| build(&config).map(|service| (config, service)));
-    match built {
-        Ok((config, service)) => {
-            let reachable = crate::pledge::reachable(&service.pledge);
-            eprintln!(
-                "probe serve: the service is built for {} (pledge {}); the HTTP transport on {} is not built yet",
-                config.person,
-                if reachable { "reachable" } else { "not reachable" },
-                config.listen
-            );
-            2
-        }
+    let built = Config::load(Path::new(path)).and_then(|config| build(&config).map(|service| (config, service)));
+    let (config, service) = match built {
+        Ok(built) => built,
         Err(why) => {
             eprintln!("probe serve: {why}");
-            64
+            return 64;
+        }
+    };
+    eprintln!(
+        "probe serve: for {}, pledge {}",
+        config.person,
+        if crate::pledge::reachable(&service.pledge) {
+            "reachable"
+        } else {
+            "not reachable (calls will be unavailable until it is)"
+        }
+    );
+    match run(&config.listen, Arc::new(service)) {
+        Ok(()) => 0,
+        Err(why) => {
+            eprintln!("probe serve: {why}");
+            1
         }
     }
 }
 
-/// What `probe setup` does with no arguments: the settings of `/etc/probe.toml` if it is there (and
+/// Listens on `listen` (an address like `127.0.0.1:8765`) and serves until the process ends.
+///
+/// # Errors
+/// The address cannot be used.
+pub fn run(listen: &str, service: Arc<Service>) -> Result<(), String> {
+    let runtime = tokio::runtime::Builder::new_multi_thread().enable_all().build().map_err(|e| e.to_string())?;
+    runtime.block_on(async {
+        let listener =
+            tokio::net::TcpListener::bind(listen).await.map_err(|e| format!("cannot listen on {listen}: {e}"))?;
+        eprintln!("probe serve: listening on {listen}");
+        // The sender is kept for as long as the process runs: dropping it would stop the loop.
+        let (_keep, shutdown) = tokio::sync::oneshot::channel();
+        crate::http::accept_loop(listener, service, crate::http::Limits::default(), shutdown).await;
+        Ok(())
+    })
+}
+
+/// What `probe setup` does with no arguments: the settings of `/etc/probe.json` if it is there (and
 /// valid), else the defaults. This is what the root timer runs.
 ///
 /// # Errors
@@ -113,9 +135,9 @@ pub fn setup_defaults(config_text: Option<&str>, hostname: &str) -> Result<(Path
 }
 
 /// `probe setup [--host-key <file>] [--host <name>] [--out <dir>]`. With no arguments it renews, from
-/// `/etc/probe.toml` or the defaults (the root timer's form).
+/// `/etc/probe.json` or the defaults (the root timer's form).
 pub fn setup(args: &[&str]) -> u8 {
-    const USAGE: &str = "usage: probe setup [--if-due] [--host-key <file>] [--host <name>] [--out <dir>]   (no arguments: renew now, from /etc/probe.toml)";
+    const USAGE: &str = "usage: probe setup [--if-due] [--host-key <file>] [--host <name>] [--out <dir>]   (no arguments: renew now, from /etc/probe.json)";
     let (mut host_key, mut host, mut out, mut if_due) = (None, None, None, false);
     let mut rest = args.iter();
     while let Some(flag) = rest.next() {
@@ -134,7 +156,13 @@ pub fn setup(args: &[&str]) -> u8 {
         }
     }
     let hostname = crate::kit::hostname();
-    let text = std::fs::read_to_string(crate::config::DEFAULT_FILE).ok();
+    let text = match crate::config::read_checked(Path::new(crate::config::DEFAULT_FILE)) {
+        Ok(text) => text,
+        Err(why) => {
+            eprintln!("probe setup: {why}");
+            return 64;
+        }
+    };
     let (default_key, default_host, default_out) = match setup_defaults(text.as_deref(), &hostname) {
         Ok(defaults) => defaults,
         Err(why) => {
@@ -180,7 +208,11 @@ pub fn setup(args: &[&str]) -> u8 {
 mod tests {
     use super::*;
 
-    const MINIMAL: &str = "person = \"jan\"\nconfirmed_key = \"/k/c.pub\"\nautomatic_key = \"/k/a.pub\"\npledge_socket = \"/run/p/service.sock\"\n";
+    const MINIMAL: &str = r#"{"person":"jan","confirmed_key":"/k/c.pub","automatic_key":"/k/a.pub","pledge_socket":"/run/p/service.sock"}"#;
+
+    fn with(extra: &str) -> String {
+        format!("{}, {extra}}}", MINIMAL.trim_end_matches('}'))
+    }
 
     #[test]
     fn with_no_arguments_setup_takes_the_settings_file_or_the_defaults() {
@@ -189,9 +221,7 @@ mod tests {
             (key, host.as_str(), out),
             (PathBuf::from("/etc/ssh/ssh_host_ed25519_key"), "h.example", PathBuf::from("/etc/probe"))
         );
-        let text = format!(
-            "{MINIMAL}host = \"a.example\"\nhost_key = \"/k/host\"\nservice_key = \"/srv/probe/service-key\"\n"
-        );
+        let text = with(r#""host":"a.example","host_key":"/k/host","service_key":"/srv/probe/service-key""#);
         let (key, host, out) = setup_defaults(Some(&text), "h.example").unwrap();
         assert_eq!((key, host.as_str(), out), (PathBuf::from("/k/host"), "a.example", PathBuf::from("/srv/probe")));
         assert_eq!(setup_defaults(Some(MINIMAL), "h.example").unwrap().2, PathBuf::from("/etc/probe"));
@@ -200,6 +230,6 @@ mod tests {
     #[test]
     fn a_settings_file_that_does_not_parse_or_names_the_key_oddly_is_not_guessed_around() {
         assert!(setup_defaults(Some("person"), "h").is_err());
-        assert!(setup_defaults(Some(&format!("{MINIMAL}service_key = \"/etc/probe/other\"\n")), "h").is_err());
+        assert!(setup_defaults(Some(&with(r#""service_key":"/etc/probe/other""#)), "h").is_err());
     }
 }

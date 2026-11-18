@@ -158,3 +158,37 @@ and the certificate lapses. Now:
 - A limit: "the key changed" is seen as a certificate for another key than the public half
   beside the private key; a private key replaced without its `.pub` is not noticed until the
   next unconditional run.
+
+## Update: `probe serve` over HTTP, settings in JSON, units for a container
+
+- **`probe serve` listens** (`src/http.rs`, `hyper` 1.12.0): HTTP/1.1, one request per connection, a 64 KiB request
+  limit (413 above), a 10 s limit for the request head, at most 64 connections. The MCP layer runs on a blocking
+  thread and writes its response piece by piece into a channel that is the response body, so the head of a stream
+  goes out at acceptance and every keepalive comment goes out at once. **A client that goes away cancels the call
+  at once**: `hyper` drops the response body, which sets the call's cancel flag (a failed send does the same at
+  the next piece). `probe serve` binds `listen`, says so, and serves until the process ends.
+- **Settings are JSON**: `/etc/probe.json`, one object, an unknown member refused, and the file refused if its group
+  or others can write it (`config::Config::load`, `read_checked`). The TOML reader is gone; `probe setup`,
+  `setup --if-due`, `sys kit` and `probe serve` all use it. Runbook B3 has the file.
+- **Container (LXC on Proxmox):** `stage1/probe-serve.service` and `probe-setup.service` have **no sandboxing lines**
+  (they need mount namespaces: nesting in an unprivileged container, else `status=226/NAMESPACE`). Dropped:
+  `ProtectSystem`, `ReadWritePaths`, `PrivateTmp`, `ProtectHome`. `NoNewPrivileges` stays off for the service (sudo).
+  `probe-serve-hardening.conf` and `probe-setup-hardening.conf` are optional drop-ins for where they work. The
+  runbook also warns that a cloned container carries its template's SSH host key, which is what certifies the
+  service's key.
+- **Tests (no port bound):** over an in-memory stream: a plain answer, 403, 405, 413, a refusal of what is not HTTP,
+  the header timeout (a client that sends no head is dropped), the stream head at acceptance (before an approval that
+  takes 1.2 s) with at least five keepalive comments and no silence over 0.5 s on the wire, no progress notice; a
+  client that disconnects while the call waits cancels it at pledge within seconds although the keepalive is 15 s and
+  nothing runs; over a **Unix socket through the accept loop**: two calls at once and a clean shutdown. Settings:
+  JSON parsing, every refusal, the permission rule for seven modes, a missing file, a directory. 147 unit with
+  `test-verbs`; clippy and fmt clean.
+- **Never run over TCP.** `tests/stage1_http.rs` (the real `pledge`, this transport on a TCP port, the real `pact`
+  binary for each call; ignored, gated by `PROBE_STAGE1_HTTP=1`, optionally `PROBE_STAGE1_SUDO=1`) compiles and its gate
+  works; the sandbox allows no TCP bind and `pact` has no HTTP client here yet. It is what the owner runs on Linux once
+  p-act's client is merged.
+- **What I need from p-act:** a `pact` binary built with the `ureq` client by the same workspace command; `pact call
+  TOOL ARGS < bundle` as now; confirmation of the headers (`Accept: application/json, text/event-stream`,
+  `Content-Type: application/json`, `MCP-Protocol-Version: 2025-06-18`, no `Origin`), of reading the SSE response as
+  it arrives (not after it ends) with the 45 s idle timeout, and that the head arrives at acceptance. If a failure shows
+  at the seam of `ureq`'s chunked decoding and this stream, that is the first place to look.

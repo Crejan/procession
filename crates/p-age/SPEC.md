@@ -122,8 +122,21 @@ rule is made here.
   `register.json` in the state directory: the file readable and writable by
   its owner only (0600, the directory 0700), with a member `v`, replaced by
   writing a new file and renaming it. The broker refuses to start on a
-  register it cannot read whole; it never starts with an empty one in its
-  place, because that would drop blocks without a word.
+  register it cannot read whole, and on a missing one: a deleted file and a
+  damaged file are the same doubt, and an empty register in their place
+  would drop blocks without a word. The first start is explicit: `page init`
+  creates the empty register and refuses if one exists.
+- When the register cannot be written, what happens goes by direction. A
+  change that restricts (a block, a withdrawal, forgetting a registration)
+  takes effect in memory at once, always, and its caller is told that it is
+  in force but not stored, with a non-zero result: the administrator's verbs
+  say "blocked and stored" or "blocked, NOT stored: <why>". A change that
+  permits (registering, lifting a block) is refused: nothing is permitted
+  that would not survive a restart as recorded. From the first failed write
+  the broker is degraded: its status output and stderr say so, it tries the
+  whole write again on every later change and at least once a minute, and
+  it leaves that state when a write succeeds. Degraded, it goes on serving
+  with what it holds in memory.
 - Blocks, until lifted.
 - A log of every request: when, from which host, for which person, what
   became of it. Not the parameters of the action; those are in the person's

@@ -386,7 +386,9 @@ delegation at once; that alone is enough, since nothing is carried out
 without pledge (R1). pledge also tells the broker, which then stops passing
 requests on. An administrator withdraws or blocks at the broker; pledge
 learns of it over its connection, which it holds whenever the machine is
-awake, and stops as well. A service never needs a list of what was
+awake, and stops as well. A block or a withdrawal is in force from the
+moment it is made, also when the broker cannot store it; the administrator is
+then told that it is in force but not stored (`crates/p-age/SPEC.md`). A service never needs a list of what was
 withdrawn: without a clearance it does nothing, and the broker gives none.
 The 90 days of a person's certificate are only what remains if the broker
 itself fails at this.
