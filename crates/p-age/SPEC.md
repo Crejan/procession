@@ -101,8 +101,15 @@ It does not check the approval. That is the service's.
   concerning this person, renewed certificates, the names of the person's
   groups.
 
-**For an administrator**, on the broker's host: `page delegations` lists and
-withdraws, `page block` blocks a person or one key and lifts a block.
+**For an administrator**, on the broker's host: `page block` blocks a person or
+one key, `page unblock` lifts a block, `page withdraw` withdraws a delegation
+and `page status` says whether the broker is degraded and what it holds. They
+speak to the running broker over a socket in its state directory
+(`proposals/admin-socket.md`), never to `register.json`, so that the rule for
+a register that cannot be written holds for them: a restricting verb prints
+"blocked and stored" or "blocked, NOT stored: <why>" and exits non-zero in the
+second case; unblocking is refused while the register cannot be written.
+`page delegations` (a list) is not built.
 Blocking a key means: no request is passed to a pledge that signed in with
 it, and no approval by it is given a clearance.
 
