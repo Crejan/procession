@@ -248,17 +248,20 @@ file differ"):
 1. `persons` is a list of `{name, enabled, keys, ...}`, not a mapping by
    login.
 2. `hosts` is a list of `{name, key}`, not a mapping by name.
-3. Groups are a `groups` list inside each person, which the broker only
-   carries to pledge; there is no `groups` with descriptions and no
-   `members`, which R10 (check 4, not built) needs.
+3. `members` is there, optional, in its three states (absent, empty,
+   present). What still differs: there is also a `groups` list inside each
+   person, which the broker only carries to pledge, and there is no
+   `groups` with descriptions.
 4. There is no `services`; check 4 is stage 3.
 5. There is no `ca` and no `settings`; the one setting,
    `waiting_per_agent`, is in the configuration file.
-6. It has `certificates` per person, which the form above does not: see
-   the paragraph on certificates.
+6. It has `certificates` per person, checked for shape only, which the form
+   above does not: see the paragraph on certificates. The separate input is
+   not built.
 7. A person who is not enabled: the same in both. The row stays, without
    keys; keys on such a person are refused.
-8. There is no `v`.
+8. `v`: the same in both. It is required, `1`, and an unknown one is
+   refused.
 9. The four keys have the same shape. The site model's loader also refuses
    a key that is a login key or an account's key; the broker refuses a
    partial set, equal keys within a person, another person's key and a
