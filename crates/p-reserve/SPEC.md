@@ -194,15 +194,35 @@ Strings from outside (a file name in a snapshot, a host, a path, a tag) are
 shown through `p_ermit::text`, never raw: a control character (C1 included), a
 bidirectional mark or a byte that is not UTF-8 is written as visible literal
 text (`\u{202e}`, `\x{ff}`), reversibly, and a record that holds one says
-`"escaped": true`. A name is taken as the bytes the file system held
-(`escape_bytes`), so a file named with a newline or an ESC is listed as what it
-is, never refused. `restore` writes the real name; only what is shown is
-escaped. The engine's own words (rustic quotes paths and repository data) are
-never in the JSON: an `error` record has the outcome and nothing else; the text
-goes to stderr, escaped and cut at 512 characters. Ledger and marker files are
-read with the character rule (a name with a control character or bidirectional
-mark is refused, with the line and never the value) and written only if every
-name passes it.
+`"escaped": true`. Each field has a bound on the escaped text (a name 1024
+characters, a path 8192, a host or a tag 512; proposed) and a record that was
+cut says `"clipped": true`.
+
+Two facts about what the engine does, not about our code:
+
+1. **A name that is not UTF-8 is carried as bytes** (`Node.name` is a byte
+   string from the engine to the output, never `to_string_lossy`) and shown
+   escaped, so two different names never show alike; `restore` writes the real
+   name, bytes and all. A file is named to `dump`/`restore` by a `&str` path, so
+   a file whose name is not UTF-8 is reached by restoring its directory.
+2. **A snapshot written by restic after the engine opened the repository is
+   listed at once and its data is unreadable until the repository is reopened,
+   never wrong bytes** (`failed`, "Tree ID ... not found in index"). The rule
+   that follows: the daemon, on that failure, reopens the repository **once**
+   and retries, and reports the failure if it fails again. The one-shot CLI
+   opens the repository once per invocation, so it only meets this when a writer
+   races it within one run; it does not retry, reports `failed` and the operator
+   runs it again.
+
+The engine's own words (rustic quotes paths and repository data) are never in
+the JSON: an `error` record has the outcome (a closed code) and nothing else;
+the text goes to stderr, escaped and cut at 512 characters. The ledger and the
+markers are preserve's own state files and are read strictly: a name outside
+`[a-z0-9][a-z0-9._-]{0,63}` refuses the whole file (the line, never the
+value), and nothing is written whose names break it. A ledger of another tool
+(fundament's names are dataset paths such as `tank/home`) is not read; taking
+one over would be an explicit, one-time import run knowingly by an operator,
+which is not built.
 
 The engine is a cargo feature, `engine-rustic` of `p-reserve` (and of
 `p-reserve-core`), off by default: `rustic_core` and `rustic_backend` are about

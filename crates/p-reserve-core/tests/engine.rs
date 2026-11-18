@@ -12,6 +12,7 @@
 use std::collections::BTreeMap;
 use std::fs;
 use std::io::Write;
+use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::sync::OnceLock;
@@ -76,6 +77,10 @@ fn make_source(root: &Path) -> PathBuf {
         .collect();
     fs::write(source.join("deep/noise.bin"), noise).unwrap();
     fs::create_dir(source.join("weird")).unwrap();
+    for (i, bad) in [BAD_A, BAD_B].iter().enumerate() {
+        // best effort: not every file system takes them
+        let _ = fs::write(source.join("weird").join(std::ffi::OsStr::from_bytes(bad)), format!("bad {i}"));
+    }
     for (i, name) in WEIRD.iter().enumerate() {
         fs::write(source.join("weird").join(name), format!("content {i}")).unwrap();
     }
@@ -159,9 +164,21 @@ fn by_restic() -> Option<&'static Written> {
     .as_ref()
 }
 
-fn skipped() {
-    eprintln!("SKIPPED: no `restic` binary on the path; this test did not run");
+/// A test that cannot run where it is run says SKIPPED (and counts as not run); with `PRESERVE_TESTS_STRICT` set it
+/// fails instead.
+fn skip(why: &str) {
+    assert!(std::env::var_os("PRESERVE_TESTS_STRICT").is_none(), "SKIPPED in strict mode: {why}");
+    eprintln!("SKIPPED: {why}; this test did not run");
 }
+
+fn skipped() {
+    skip("no `restic` binary on the path");
+}
+
+/// Two file names that are not UTF-8 and differ only in the order of their bytes. A file system that needs valid UTF-8
+/// names (APFS) cannot hold them: the test then says SKIPPED.
+const BAD_A: &[u8] = b"bad\xff\xfename";
+const BAD_B: &[u8] = b"bad\xfe\xffname";
 
 fn assert_restores_with_matching_sha256(w: &Written, name: &str) {
     let dest = w.scratch(name);
@@ -314,10 +331,10 @@ fn a_repository_restic_is_writing_to_can_be_read_and_data_written_after_the_open
 }
 
 fn assert_weird_names_are_listed_read_and_restored_under_their_real_names(w: &Written, name: &str) {
-    use std::os::unix::ffi::OsStrExt;
     let dir = w.path_in_snapshot("weird");
     // listed, never refused: the names come back as the bytes the file system held
     let mut listed: Vec<Vec<u8>> = w.engine.list("latest", &dir).unwrap().into_iter().map(|n| n.name).collect();
+    listed.retain(|n| n != BAD_A && n != BAD_B);
     listed.sort();
     let mut want: Vec<Vec<u8>> = WEIRD.iter().map(|n| n.as_bytes().to_vec()).collect();
     want.sort();
@@ -333,6 +350,7 @@ fn assert_weird_names_are_listed_read_and_restored_under_their_real_names(w: &Wr
     w.engine.restore("latest", &dir, &dest).unwrap();
     let mut on_disk: Vec<Vec<u8>> =
         fs::read_dir(&dest).unwrap().map(|e| e.unwrap().file_name().as_bytes().to_vec()).collect();
+    on_disk.retain(|n| n != BAD_A && n != BAD_B);
     on_disk.sort();
     assert_eq!(on_disk, want);
     for (i, weird) in WEIRD.iter().enumerate() {
@@ -341,12 +359,53 @@ fn assert_weird_names_are_listed_read_and_restored_under_their_real_names(w: &Wr
 }
 
 #[test]
-fn names_with_c1_controls_and_a_bidi_mark_are_listed_read_and_restored_under_their_real_names_from_a_rustic_repository() {
+fn names_with_c1_controls_and_a_bidi_mark_are_listed_read_and_restored_under_their_real_names_from_a_rustic_repository()
+{
     assert_weird_names_are_listed_read_and_restored_under_their_real_names(by_rustic(), "weird-rustic");
 }
 
 #[test]
-fn names_with_c1_controls_and_a_bidi_mark_are_listed_read_and_restored_under_their_real_names_from_a_restic_repository() {
+fn names_with_c1_controls_and_a_bidi_mark_are_listed_read_and_restored_under_their_real_names_from_a_restic_repository()
+{
     let Some(w) = by_restic() else { return skipped() };
     assert_weird_names_are_listed_read_and_restored_under_their_real_names(w, "weird-restic");
+}
+
+fn assert_non_utf8_names_are_carried_as_bytes_shown_apart_and_restored_with_the_real_bytes(w: &Written, name: &str) {
+    let dir = w.path_in_snapshot("weird");
+    let source_has_them =
+        [BAD_A, BAD_B].iter().all(|b| w.source.join("weird").join(std::ffi::OsStr::from_bytes(b)).exists());
+    if !source_has_them {
+        return skip("this file system cannot hold file names that are not UTF-8 (APFS cannot; run it on Linux)");
+    }
+    let listed: Vec<Vec<u8>> = w.engine.list("latest", &dir).unwrap().into_iter().map(|n| n.name).collect();
+    for bad in [BAD_A, BAD_B] {
+        assert!(
+            listed.iter().any(|n| n == bad),
+            "{:?} is listed with its real bytes",
+            p_ermit::text::escape_bytes(bad).text
+        );
+    }
+    // shown apart, visibly, reversibly
+    let (a, b) = (p_ermit::text::escape_bytes(BAD_A), p_ermit::text::escape_bytes(BAD_B));
+    assert_eq!((a.text.as_str(), b.text.as_str()), ("bad\\x{ff}\\x{fe}name", "bad\\x{fe}\\x{ff}name"));
+    assert!(a.flagged > 0 && a.text != b.text);
+    assert_eq!(p_ermit::text::unescape_bytes(&a.text).as_deref(), Some(BAD_A));
+    // restored with the real bytes, content matching
+    let dest = w.scratch(name);
+    w.engine.restore("latest", &dir, &dest).unwrap();
+    for (bad, i) in [(BAD_A, 0), (BAD_B, 1)] {
+        assert_eq!(fs::read(dest.join(std::ffi::OsStr::from_bytes(bad))).unwrap(), format!("bad {i}").as_bytes());
+    }
+}
+
+#[test]
+fn names_that_are_not_utf8_are_carried_as_bytes_shown_apart_and_restored_from_a_rustic_repository() {
+    assert_non_utf8_names_are_carried_as_bytes_shown_apart_and_restored_with_the_real_bytes(by_rustic(), "bad-rustic");
+}
+
+#[test]
+fn names_that_are_not_utf8_are_carried_as_bytes_shown_apart_and_restored_from_a_restic_repository() {
+    let Some(w) = by_restic() else { return skipped() };
+    assert_non_utf8_names_are_carried_as_bytes_shown_apart_and_restored_with_the_real_bytes(w, "bad-restic");
 }

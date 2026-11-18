@@ -212,3 +212,38 @@ What I would do (nothing done yet):
 - What 6bfc376 and the commits after 2235bc2 contain: 6bfc376 and the commits after 2235bc2 up to here are: p-ermit for the character rule, settings and password file (and `p-act` dropped); `tests/engine.rs` (SHA-256 restore, a restic-written repository, a writing restic: item 4);
   a fix of a flaky umask test; the audit (c0d9aa0); and this unit.
 - Still open: the proposal's job messages and socket are not built; `Outcome`-per-exit-code; the SHA test is against local repositories only.
+
+## Second round of the audit's fixes (done)
+Built as assigned; changes against the first round:
+- **The ledger and the marker are read and written by the name class** `[a-z0-9][a-z0-9._-]{0,63}` (designer's decision; `is_name`/`NAME_RULE` now live in `p_reserve_core::ledger`, config uses them): a name outside it, a control character or bidi
+  mark included, refuses the **whole file** on reading (the line, never the value); `Textfile::save` refuses before writing anything (the file is left untouched); a marker with such a name or a bad job id is discarded without an entry. A fundament
+  ledger with `tank/home` is refused whole (tested); no import is built.
+- **Escape form with bounds**: `snapshots` and `ls`, text and JSON, escape every string from the repository (`escape_clipped`, names through `escape_bytes_clipped`: **bytes all the way**, `Node.name: Vec<u8>`; no `to_string_lossy` is left in the path),
+  `"escaped": true` and `"clipped": true` on a record. **Proposed bounds** (characters of the escaped form, an escaped byte is up to six): name 1024, path 8192, host 512, tag 512, an echoed argument 128 (snapshot) or 8192 (path). Text output marks a cut with `…`.
+- **Engine errors**: the text is the escape form (never a space), cut at 512 characters, goes to stderr only; the JSON `error` is the outcome (a closed code) and nothing else.
+- **Tests**: weird names (U+0085, U+009B, U+202E, ESC, newline) from rustic- and restic-written repositories, through engine and CLI, as before; **names that are not UTF-8** (two that differ only in byte order): listed as bytes, shown `bad\x{ff}\x{fe}name` and `bad\x{fe}\x{ff}name`, reversible, restored with the real bytes: **SKIPPED on this machine** (APFS refuses
+  such names, 3 tests say SKIPPED and count as not run); they have to be run on Linux. Strict mode: `PRESERVE_TESTS_STRICT=1` turns each SKIPPED into a failure (the README's rule; the restic tests too).
+  Limitation seen: `dump` and `restore` take a `&str` path, so a file whose name is not UTF-8 is reached by restoring its directory; listing and restoring are tested that way.
+- Verified here: 3-umask sweep of my crates; engine suite `cargo test -p p-reserve-core -p p-reserve --features p-reserve/engine-rustic --offline` passes (21 min 11 s on a machine with a very high load; was 10 min 45 s before), 3 SKIPPED.
+- Not yet applied from the README's test paragraph: explicit modes for the files the tests create (`fs::write` in the engine and CLI test fixtures takes the umask); the ledger files in `tests/health.rs` too. They do not depend on the mode today.
+
+## What else reads or writes the ledger file (the question)
+In this workspace **only preserve**: `p_reserve_core::textfile::Textfile` (read by `preserve health`; written, once built, by the backup/prune jobs and by marker recovery). Nothing else in `crates/` or `doc/` refers to it. Outside it: the node exporter's textfile
+collector reads it (that is what the format and the 0644 mode are for), and people with `cat`. **It is not shared with fundament's tooling:** fundament's Python host kit writes its own ledger (`fundament_backup_*` under its own prefix, names such as `tank/home`) with its own code; preserve would need to read
+it only once, at a switch of writer, which is the import the designer left unbuilt. So the file is preserve's own.
+
+## The case not tested: a repository restic holds under an exclusive lock (commands for the owner's machine)
+`restic prune`, `forget --prune` and `rebuild-index` take an exclusive lock; rustic takes no lock and so would not notice it. To see what the engine does, hold such a lock without racing:
+```
+R=/tmp/excl-repo; export RESTIC_PASSWORD=pw
+restic -r $R init
+dd if=/dev/urandom of=/tmp/excl-src.bin bs=1m count=256        # Linux: bs=1M
+restic -r $R backup /tmp/excl-src.bin; restic -r $R backup /tmp/excl-src.bin
+restic -r $R forget --keep-last 1 --prune &                    # takes the exclusive lock
+P=$!; until [ -n "$(ls $R/locks)" ]; do sleep 0.1; done; kill -STOP $P
+restic -r $R cat lock $(restic -r $R list locks | head -1)     # expect "exclusive": true
+# with a [[target]] named excl in a configuration (repository = "/tmp/excl-repo", password_file with 'pw', mode 0600):
+preserve snapshots excl; preserve ls excl latest /tmp; preserve restore excl latest /tmp/excl-src.bin --to /tmp/excl-out.bin
+kill -CONT $P; wait $P
+```
+Expected from the rustic code (read, not run): all three work as if there were no lock; reading during the repack's delete step is the unsafe case the SPEC names (a pack the index lists may already be gone: `failed`, never wrong bytes, but this is not run).

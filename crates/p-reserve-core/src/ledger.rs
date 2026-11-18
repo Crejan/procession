@@ -12,6 +12,19 @@ use serde::{Deserialize, Serialize};
 use crate::freshness::{Freshness, Thresholds, freshness};
 use crate::outcome::Outcome;
 
+/// The rule for the name of a source or a target: `[a-z0-9][a-z0-9._-]{0,63}`: a plain word, no slash, no upper case,
+/// not `.` or `..`, at most 64 bytes. It is what goes into the ledger, the metrics' labels and the socket's messages; the
+/// path a name stands for stays in the configuration.
+pub const NAME_RULE: &str = "[a-z0-9][a-z0-9._-]{0,63}";
+
+/// Whether `name` is in the class [`NAME_RULE`].
+pub fn is_name(name: &str) -> bool {
+    let bytes = name.as_bytes();
+    (1..=64).contains(&bytes.len())
+        && (bytes[0].is_ascii_lowercase() || bytes[0].is_ascii_digit())
+        && bytes.iter().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || matches!(b, b'.' | b'_' | b'-'))
+}
+
 /// One source backed up to one target.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub struct Pair {

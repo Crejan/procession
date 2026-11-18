@@ -32,7 +32,7 @@ use std::time::{Duration, SystemTime};
 
 use thiserror::Error;
 
-use crate::ledger::{Cause, Entry, Ledger, Pair};
+use crate::ledger::{Cause, Entry, Ledger, Pair, is_name};
 use crate::outcome::Outcome;
 
 /// The prefix of the metric names unless the caller chooses another.
@@ -75,7 +75,7 @@ pub enum TextfileError {
     #[error("{0} is not a regular file")]
     NotARegularFile(String),
     #[error(
-        "a source or target name in the ledger has a control character or a bidirectional mark; it was not written"
+        "a source or target name in the ledger is outside the class [a-z0-9][a-z0-9._-]{{0,63}}; nothing was written"
     )]
     BadName,
     #[error("{0} is larger than the limit")]
@@ -139,8 +139,7 @@ impl Textfile {
 
     /// Publish `ledger`, replacing the file atomically.
     pub fn save(&self, ledger: &Ledger) -> Result<(), TextfileError> {
-        let clean = |s: &str| p_ermit::text::check(s).is_ok();
-        if ledger.pairs().any(|(pair, _)| !clean(&pair.source) || !clean(&pair.target)) {
+        if ledger.pairs().any(|(pair, _)| !is_name(&pair.source) || !is_name(&pair.target)) {
             return Err(TextfileError::BadName);
         }
         write_atomic(&self.path, render(ledger, &self.prefix).as_bytes(), FILE_MODE)
@@ -226,8 +225,8 @@ pub fn parse(text: &str, prefix: &str) -> Result<Ledger, (usize, String)> {
         if outcome.is_some() != (family == LAST_OUTCOME) || (cause.is_some() && outcome.is_none()) {
             return Err(fail("the outcome and cause labels belong to the last-outcome family, and only to it"));
         }
-        if p_ermit::text::check(&source).is_err() || p_ermit::text::check(&target).is_err() {
-            return Err(fail("a source or target name has a control character or a bidirectional mark"));
+        if !is_name(&source) || !is_name(&target) {
+            return Err(fail("a source or target name is outside the class [a-z0-9][a-z0-9._-]{0,63}"));
         }
         let pair = Pair::new(source, target);
         if !seen.insert((family.to_owned(), pair.clone())) {
@@ -379,7 +378,7 @@ mod tests {
     fn sample() -> Ledger {
         let mut ledger = Ledger::default();
         ledger.record(Pair::new("home", "offsite"), Run::stored(10, 0), t(1_700_000_000));
-        ledger.record(Pair::new("docs \"x\"\\ new", "off,site"), Run::stored(7, 3), t(1_700_000_500));
+        ledger.record(Pair::new("docs.v2", "off-site"), Run::stored(7, 3), t(1_700_000_500));
         ledger.record(Pair::new("never", "offsite"), Run::ended(Outcome::Locked), t(1_700_000_900));
         ledger.record(Pair::new("cut", "offsite"), Run::interrupted(), t(1_700_001_000));
         ledger
@@ -417,12 +416,12 @@ mod tests {
     fn a_file_with_only_fundaments_three_families_loads_without_an_outcome() {
         let text = "# HELP fundament_backup_last_success_timestamp_seconds x\n\
                     # TYPE fundament_backup_last_success_timestamp_seconds gauge\n\
-                    fundament_backup_last_success_timestamp_seconds{source=\"tank/home\",target=\"box\"} 1700000000\n\
-                    fundament_backup_last_added_bytes{source=\"tank/home\",target=\"box\"} 123\n\
+                    fundament_backup_last_success_timestamp_seconds{source=\"tank-home\",target=\"box\"} 1700000000\n\
+                    fundament_backup_last_added_bytes{source=\"tank-home\",target=\"box\"} 123\n\
                     fundament_backup_first_attempt_timestamp_seconds{source=\"new\",target=\"box\"} 1700000100\n\
                     some_other_metric 4\n";
         let ledger = parse(text, "fundament_").unwrap();
-        let home = ledger.entry(&Pair::new("tank/home", "box")).unwrap();
+        let home = ledger.entry(&Pair::new("tank-home", "box")).unwrap();
         assert_eq!((home.last_success, home.last_added_bytes, home.last_outcome), (Some(t(1_700_000_000)), 123, None));
         assert_eq!(ledger.entry(&Pair::new("new", "box")).unwrap().first_attempt, Some(t(1_700_000_100)));
     }
@@ -461,7 +460,7 @@ mod tests {
             let text = format!("p_backup_last_added_bytes{{source=\"{bad}\",target=\"t\"}} 1\n");
             let err = parse(&text, "p_").unwrap_err();
             assert_eq!(err.0, 1, "{bad:?}");
-            assert!(err.1.contains("control character"), "{err:?}");
+            assert!(err.1.contains("outside the class"), "{err:?}");
             for c in ['\u{85}', '\u{9b}', '\u{202e}', '\x1b'] {
                 assert!(!err.1.contains(c), "{err:?}");
             }
@@ -476,6 +475,26 @@ mod tests {
             assert!(matches!(file.save(&ledger), Err(TextfileError::BadName)), "{bad:?}");
             assert_eq!(fs::read(file.path()).unwrap(), before, "the file is untouched");
         }
+    }
+
+    #[test]
+    fn the_reader_and_the_writer_hold_the_name_class_a_fundament_dataset_path_is_refused_whole() {
+        let long = "a".repeat(65);
+        for bad in ["tank/home", "Home", "-lead", ".", "..", "a b", long.as_str(), ""] {
+            let text = format!(
+                "p_backup_last_success_timestamp_seconds{{source=\"ok\",target=\"t\"}} 1\n\
+                 p_backup_last_success_timestamp_seconds{{source=\"{bad}\",target=\"t\"}} 1\n"
+            );
+            assert_eq!(parse(&text, "p_").map_err(|e| e.0), Err(2), "{bad:?}");
+            let mut ledger = Ledger::default();
+            ledger.record(Pair::new(bad, "t"), Run::stored(1, 0), t(1));
+            let dir = tempfile::tempdir().unwrap();
+            let file = Textfile::new(dir.path().join("l.prom"), "p_").unwrap();
+            assert!(matches!(file.save(&ledger), Err(TextfileError::BadName)), "{bad:?}");
+            assert!(!file.path().exists());
+        }
+        assert!(parse("p_backup_last_added_bytes{source=\"a\",target=\"b\"} 1\n", "p_").is_ok());
+        assert!(is_name(&"a".repeat(64)) && !is_name(&"a".repeat(65)));
     }
 
     #[test]

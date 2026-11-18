@@ -95,23 +95,43 @@ fn rfc3339(time: SystemTime) -> String {
     humantime::format_rfc3339_seconds(SystemTime::UNIX_EPOCH + Duration::from_secs(unix(time))).to_string()
 }
 
-/// What is shown of a string from outside: the escape form, and whether anything was escaped.
+/// The most characters of the escaped form shown per field (a path can be 4096 bytes, and an escaped byte is up to six
+/// characters). Proposed numbers: a name 1024, a path 8192, a host or a tag 512, an argument echoed 8192.
+const NAME_CHARS: usize = 1024;
+const PATH_CHARS: usize = 8192;
+const HOST_CHARS: usize = 512;
+const TAG_CHARS: usize = 512;
+
+/// What is shown of a string from outside: the escape form, cut at a bound, and whether anything was escaped or cut.
 struct Shown {
     text: String,
     flagged: bool,
+    clipped: bool,
 }
 
-fn show(text: &str) -> Shown {
-    let e = p_reserve_core::text::escape(text);
-    Shown { flagged: e.was_flagged(), text: e.text }
+impl From<p_reserve_core::text::Clipped> for Shown {
+    fn from(c: p_reserve_core::text::Clipped) -> Shown {
+        Shown { flagged: c.flagged > 0, clipped: c.clipped, text: c.text }
+    }
 }
 
-fn show_bytes(bytes: &[u8]) -> Shown {
-    let e = p_reserve_core::text::escape_bytes(bytes);
-    Shown { flagged: e.was_flagged(), text: e.text }
+fn show(text: &str, max: usize) -> Shown {
+    p_reserve_core::text::escape_clipped(text, max).into()
 }
 
-/// A snapshot as written to JSON. `escaped` is true if any of host, paths or tags held a character the rule refuses.
+fn show_bytes(bytes: &[u8], max: usize) -> Shown {
+    p_reserve_core::text::escape_bytes_clipped(bytes, max).into()
+}
+
+impl Shown {
+    /// For text output: a cut is marked with an ellipsis.
+    fn line(&self) -> String {
+        if self.clipped { format!("{}…", self.text) } else { self.text.clone() }
+    }
+}
+
+/// A snapshot as written to JSON. `escaped` is true if any of host, paths or tags held a character the rule refuses;
+/// `clipped` if any was cut at its bound.
 #[derive(Serialize)]
 struct SnapshotRecord<'a> {
     id: &'a str,
@@ -120,10 +140,11 @@ struct SnapshotRecord<'a> {
     paths: Vec<String>,
     tags: Vec<String>,
     escaped: bool,
+    clipped: bool,
 }
 
-/// A directory entry as written to JSON: `name` is the escape form of the name's bytes, and `escaped` says whether
-/// that differs from the name itself.
+/// A directory entry as written to JSON: `name` is the escape form of the name's bytes, `escaped` says whether anything
+/// was escaped and `clipped` whether the name was cut.
 #[derive(Serialize)]
 struct NodeRecord {
     name: String,
@@ -131,6 +152,7 @@ struct NodeRecord {
     size: u64,
     mtime: Option<u64>,
     escaped: bool,
+    clipped: bool,
 }
 
 #[derive(Serialize)]
@@ -238,13 +260,13 @@ fn execute(verb: Verb, options: &Options, out: &mut impl Write) -> Result<(), Fa
                 snapshots
                     .iter()
                     .try_for_each(|s| {
-                        let paths: Vec<String> = s.paths.iter().map(|p| show(p).text).collect();
+                        let paths: Vec<String> = s.paths.iter().map(|p| show(p, PATH_CHARS).line()).collect();
                         writeln!(
                             out,
                             "{}  {}  {}  {}",
                             &s.id[..s.id.len().min(8)],
                             rfc3339(s.time),
-                            show(&s.host).text,
+                            show(&s.host, HOST_CHARS).line(),
                             paths.join(",")
                         )
                     })
@@ -265,8 +287,8 @@ fn execute(verb: Verb, options: &Options, out: &mut impl Write) -> Result<(), Fa
                 let entries = nodes.iter().map(node_record).collect();
                 let body = Body {
                     target: &target,
-                    snapshot: show(&options.positional[1]).text,
-                    path: show(path).text,
+                    snapshot: show(&options.positional[1], 128).line(),
+                    path: show(path, PATH_CHARS).line(),
                     entries,
                 };
                 emit(out, "ls", body).map_err(io)
@@ -279,7 +301,7 @@ fn execute(verb: Verb, options: &Options, out: &mut impl Write) -> Result<(), Fa
                             NodeKind::Symlink => "@",
                             _ => "",
                         };
-                        writeln!(out, "{:>12}  {}{mark}", n.size, show_bytes(&n.name).text)
+                        writeln!(out, "{:>12}  {}{mark}", n.size, show_bytes(&n.name, NAME_CHARS).line())
                     })
                     .map_err(io)
             }
@@ -314,25 +336,34 @@ fn execute(verb: Verb, options: &Options, out: &mut impl Write) -> Result<(), Fa
 
 fn shown_path(path: &Path) -> String {
     use std::os::unix::ffi::OsStrExt;
-    show_bytes(path.as_os_str().as_bytes()).text
+    show_bytes(path.as_os_str().as_bytes(), PATH_CHARS).line()
 }
 
 fn snapshot_record(s: &Snapshot) -> SnapshotRecord<'_> {
-    let host = show(&s.host);
-    let paths: Vec<Shown> = s.paths.iter().map(|p| show(p)).collect();
-    let tags: Vec<Shown> = s.tags.iter().map(|t| show(t)).collect();
-    let escaped = host.flagged || paths.iter().chain(&tags).any(|x| x.flagged);
+    let host = show(&s.host, HOST_CHARS);
+    let paths: Vec<Shown> = s.paths.iter().map(|p| show(p, PATH_CHARS)).collect();
+    let tags: Vec<Shown> = s.tags.iter().map(|t| show(t, TAG_CHARS)).collect();
+    let all = || std::iter::once(&host).chain(&paths).chain(&tags);
+    let (escaped, clipped) = (all().any(|x| x.flagged), all().any(|x| x.clipped));
     SnapshotRecord {
         id: &s.id,
         time: unix(s.time),
-        host: host.text,
-        paths: paths.into_iter().map(|x| x.text).collect(),
-        tags: tags.into_iter().map(|x| x.text).collect(),
+        host: host.text.clone(),
+        paths: paths.iter().map(|x| x.text.clone()).collect(),
+        tags: tags.iter().map(|x| x.text.clone()).collect(),
         escaped,
+        clipped,
     }
 }
 
 fn node_record(n: &Node) -> NodeRecord {
-    let name = show_bytes(&n.name);
-    NodeRecord { name: name.text, kind: n.kind, size: n.size, mtime: n.mtime.map(unix), escaped: name.flagged }
+    let name = show_bytes(&n.name, NAME_CHARS);
+    NodeRecord {
+        name: name.text,
+        kind: n.kind,
+        size: n.size,
+        mtime: n.mtime.map(unix),
+        escaped: name.flagged,
+        clipped: name.clipped,
+    }
 }
