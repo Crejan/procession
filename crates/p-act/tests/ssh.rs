@@ -5,6 +5,7 @@
 use p_act::broker::{
     ConnectionDocument, DelegationMessage, FromPledge, Signed, Standing, StandingContent, StandingError, ToPledge,
 };
+use p_act::clearance::approval_hash;
 use p_act::exchange::{ErrorCode, ExchangeError};
 use p_act::rating::{Damage, Disruption, Exposure, Rating};
 use p_act::sign::{
@@ -95,6 +96,9 @@ fn call_content(service: &str, host: &str) -> CallContent {
         claim: Some("checking why the control loop misses cycles".into()),
     }
 }
+
+/// The approval the clearances of these tests name (any bytes: a clearance carries their hash).
+const APPROVAL: &str = "an approval";
 
 const INTERNAL: Rating = Rating::new(Exposure::Internal, Damage::None, Disruption::None);
 
@@ -258,7 +262,7 @@ fn host() -> Host {
 }
 
 fn request(d: &Delegation, rating: Rating) -> Request {
-    Request::compose(&d.call, &d.sig, rating).unwrap()
+    Request::compose(&d.call, &d.sig, rating, false).unwrap()
 }
 
 #[test]
@@ -291,7 +295,7 @@ fn a_request_is_refused_for_another_service_host_key_bytes_namespace_and_expiry(
 
     // A request whose call names a different service than the signer: the name comes from the call inside.
     let other_call = Call::compose(&call_content("probe", "b.example")).unwrap();
-    let for_b = Request::compose(&other_call, &d.sig, INTERNAL).unwrap();
+    let for_b = Request::compose(&other_call, &d.sig, INTERNAL, false).unwrap();
     let sig_for_a = sign_request(&h.service, &request).unwrap();
     assert!(is_rejected(verify_request(&for_b, &sig_for_a, &host_key)));
 
@@ -394,9 +398,21 @@ fn an_approval_is_refused_for_another_person_the_broker_other_requests_namespace
 
     // The broker's key and a person's key are not each other's.
     assert!(is_rejected(verify_approval(&request, &sign_approval(&s.broker, &request).unwrap(), trust)));
-    let clearance = Clearance::compose(request.hash(), Timestamp::from_unix(1_794_409_445).unwrap()).unwrap();
-    assert!(is_rejected(verify_clearance(&clearance, &sign_clearance(&s.confirmed, &clearance).unwrap(), &ca)));
-    assert!(is_rejected(verify_clearance(&clearance, &sign_clearance(&s.automatic, &clearance).unwrap(), &ca)));
+    let clearance =
+        Clearance::compose(request.hash(), approval_hash(APPROVAL), Timestamp::from_unix(1_794_409_445).unwrap())
+            .unwrap();
+    assert!(is_rejected(verify_clearance(
+        &clearance,
+        &sign_clearance(&s.confirmed, &clearance).unwrap(),
+        &ca,
+        APPROVAL
+    )));
+    assert!(is_rejected(verify_clearance(
+        &clearance,
+        &sign_clearance(&s.automatic, &clearance).unwrap(),
+        &ca,
+        APPROVAL
+    )));
 
     // Over another request, over a changed one.
     let approval = sign_approval(&s.confirmed, &request).unwrap();
@@ -419,7 +435,7 @@ fn an_approval_is_refused_for_another_person_the_broker_other_requests_namespace
     // is approved only by bob.
     let for_bob = {
         let bobs_agent = delegation("bob");
-        Request::compose(&bobs_agent.call, &bobs_agent.sig, INTERNAL).unwrap()
+        Request::compose(&bobs_agent.call, &bobs_agent.sig, INTERNAL, false).unwrap()
     };
     assert!(is_rejected(verify_approval(&for_bob, &sign_approval(&s.confirmed, &for_bob).unwrap(), trust)));
     assert_eq!(
@@ -511,27 +527,36 @@ fn a_clearance_verifies_as_the_broker_and_nothing_else() {
     let s = site();
     let ca = s.keys.public(&s.ca);
     let request = request(&d, INTERNAL);
-    let clearance = Clearance::compose(request.hash(), Timestamp::from_unix(1_794_409_481).unwrap()).unwrap();
+    let clearance =
+        Clearance::compose(request.hash(), approval_hash(APPROVAL), Timestamp::from_unix(1_794_409_481).unwrap())
+            .unwrap();
     let sig = sign_clearance(&s.broker, &clearance).unwrap();
-    verify_clearance(&clearance, &sig, &ca).unwrap();
+    verify_clearance(&clearance, &sig, &ca, APPROVAL).unwrap();
     assert!(clearance.covers(&request));
 
     // Changed bytes.
-    let later = Clearance::compose(request.hash(), Timestamp::from_unix(1_794_409_482).unwrap()).unwrap();
-    assert!(is_rejected(verify_clearance(&later, &sig, &ca)));
+    let later =
+        Clearance::compose(request.hash(), approval_hash(APPROVAL), Timestamp::from_unix(1_794_409_482).unwrap())
+            .unwrap();
+    assert!(is_rejected(verify_clearance(&later, &sig, &ca, APPROVAL)));
     // Another CA.
-    assert!(is_rejected(verify_clearance(&clearance, &sig, &s.keys.public(&s.keys.key("other-ca")))));
+    assert!(is_rejected(verify_clearance(&clearance, &sig, &s.keys.public(&s.keys.key("other-ca")), APPROVAL)));
     // An approval signature is not a clearance, nor the reverse.
     let approval = sign_approval(&s.broker, &request).unwrap();
-    assert!(is_rejected(verify_clearance(&clearance, &approval, &ca)));
+    assert!(is_rejected(verify_clearance(&clearance, &approval, &ca, APPROVAL)));
     let trust = ApprovalTrust::SiteCa(&ca);
     assert!(is_rejected(verify_approval(&request, &sig, trust)));
     // A key certified under another name is not the broker.
     let not_broker = s.keys.certified("not-broker", &s.ca, "brokers", VALID);
-    assert!(is_rejected(verify_clearance(&clearance, &sign_clearance(&not_broker, &clearance).unwrap(), &ca)));
+    assert!(is_rejected(verify_clearance(
+        &clearance,
+        &sign_clearance(&not_broker, &clearance).unwrap(),
+        &ca,
+        APPROVAL
+    )));
     // Expired.
     let expired = s.keys.certified("old-broker", &s.ca, "broker", EXPIRED);
-    assert!(is_rejected(verify_clearance(&clearance, &sign_clearance(&expired, &clearance).unwrap(), &ca)));
+    assert!(is_rejected(verify_clearance(&clearance, &sign_clearance(&expired, &clearance).unwrap(), &ca, APPROVAL)));
 }
 
 // ---------------------------------------------------------------------------
@@ -554,7 +579,7 @@ fn one_exchange_from_call_to_clearance() {
     // The service receives call bytes and signature, checks them, and writes a request around them.
     let received = Call::parse(call.as_bytes()).unwrap();
     verify_call(&received, &call_sig, &delegation_keys.public(&delegation_key)).unwrap();
-    let request = Request::compose(&received, &call_sig, INTERNAL).unwrap();
+    let request = Request::compose(&received, &call_sig, INTERNAL, false).unwrap();
     let request_sig = sign_request(&host.service, &request).unwrap();
 
     // The broker and pledge parse what the service sent, and verify all of it.
@@ -565,10 +590,10 @@ fn one_exchange_from_call_to_clearance() {
 
     // Pledge approves, the broker clears, the service accepts both.
     let approval = sign_approval(&site.automatic, &at_pledge).unwrap();
-    let clearance = Clearance::compose(at_pledge.hash(), Timestamp::now().unwrap()).unwrap();
+    let clearance = Clearance::compose(at_pledge.hash(), approval_hash(APPROVAL), Timestamp::now().unwrap()).unwrap();
     let clearance_sig = sign_clearance(&site.broker, &clearance).unwrap();
     assert_eq!(verify_approval(&request, &approval, ApprovalTrust::SiteCa(&ca)).unwrap(), ApprovalKind::Automatic);
-    verify_clearance(&Clearance::parse(clearance.as_bytes()).unwrap(), &clearance_sig, &ca).unwrap();
+    verify_clearance(&Clearance::parse(clearance.as_bytes()).unwrap(), &clearance_sig, &ca, APPROVAL).unwrap();
     assert!(clearance.covers(&request));
 }
 
@@ -668,7 +693,7 @@ fn an_agent_certificate_for_a_p256_key_is_refused_everywhere() {
     assert!(named(signature_agent(&sig).unwrap_err()));
     assert!(named(signature_person(&sig).unwrap_err()));
     let request = request(&delegation("alice"), INTERNAL);
-    let on_p256 = Request::compose(&call, &sig, INTERNAL).unwrap();
+    let on_p256 = Request::compose(&call, &sig, INTERNAL, false).unwrap();
     assert!(named(request_person(&on_p256).unwrap_err()));
     assert!(request_person(&request).is_ok());
     // The raw reading, which judges nothing, still shows it.
@@ -716,9 +741,11 @@ fn a_p256_broker_and_plain_p256_anchors() {
     let ca = keys.ecdsa_key("ca");
     let broker = keys.certify(&keys.ecdsa_key("broker"), &ca, "broker", "broker");
     let request = request(&d, INTERNAL);
-    let clearance = Clearance::compose(request.hash(), Timestamp::from_unix(1_794_409_481).unwrap()).unwrap();
+    let clearance =
+        Clearance::compose(request.hash(), approval_hash(APPROVAL), Timestamp::from_unix(1_794_409_481).unwrap())
+            .unwrap();
     let sig = sign_clearance(&broker, &clearance).unwrap();
-    verify_clearance(&clearance, &sig, &keys.public(&ca)).unwrap();
+    verify_clearance(&clearance, &sig, &keys.public(&ca), APPROVAL).unwrap();
 
     // Stage 1: plain P-256 approval keys listed directly.
     let (c, a) = (keys.ecdsa_key("c"), keys.ecdsa_key("a"));
@@ -924,7 +951,9 @@ fn the_site_ca_lines_accept_exactly_the_three_names() {
     let d = delegation("alice");
     let keys = Keys::new();
     let request = request(&d, INTERNAL);
-    let clearance = Clearance::compose(request.hash(), Timestamp::from_unix(1_794_409_481).unwrap()).unwrap();
+    let clearance =
+        Clearance::compose(request.hash(), approval_hash(APPROVAL), Timestamp::from_unix(1_794_409_481).unwrap())
+            .unwrap();
     for (label, ca) in [("ed25519", keys.key("ca")), ("p256", keys.ecdsa_key("ca-p256"))] {
         let ca_pub = keys.public(&ca);
         let trust = ApprovalTrust::SiteCa(&ca_pub);
@@ -944,7 +973,7 @@ fn the_site_ca_lines_accept_exactly_the_three_names() {
             ApprovalKind::Automatic
         );
         let broker = named("broker");
-        verify_clearance(&clearance, &sign_clearance(&broker, &clearance).unwrap(), &ca_pub).unwrap();
+        verify_clearance(&clearance, &sign_clearance(&broker, &clearance).unwrap(), &ca_pub, APPROVAL).unwrap();
 
         // Any other name verifies nowhere.
         for other in [
@@ -963,7 +992,12 @@ fn the_site_ca_lines_accept_exactly_the_three_names() {
                 "{label} approval {other}"
             );
             assert!(
-                is_rejected(verify_clearance(&clearance, &sign_clearance(&signer, &clearance).unwrap(), &ca_pub)),
+                is_rejected(verify_clearance(
+                    &clearance,
+                    &sign_clearance(&signer, &clearance).unwrap(),
+                    &ca_pub,
+                    APPROVAL
+                )),
                 "{label} clearance {other}"
             );
         }
@@ -972,7 +1006,12 @@ fn the_site_ca_lines_accept_exactly_the_three_names() {
         for person in ["alice:confirmed", "alice:automatic"] {
             let signer = named(person);
             assert!(
-                is_rejected(verify_clearance(&clearance, &sign_clearance(&signer, &clearance).unwrap(), &ca_pub)),
+                is_rejected(verify_clearance(
+                    &clearance,
+                    &sign_clearance(&signer, &clearance).unwrap(),
+                    &ca_pub,
+                    APPROVAL
+                )),
                 "{person}"
             );
         }
@@ -1415,8 +1454,10 @@ fn what_the_broker_says_verifies_as_broker_in_the_broker_namespace_only() {
         }
         // And the broker's standing is not a clearance, nor a clearance a standing.
         let request = request(&delegation("alice"), INTERNAL);
-        let clearance = Clearance::compose(request.hash(), Timestamp::from_unix(1_794_409_481).unwrap()).unwrap();
-        assert!(is_rejected(verify_clearance(&clearance, &sig, &ca_pub)), "{label}");
+        let clearance =
+            Clearance::compose(request.hash(), approval_hash(APPROVAL), Timestamp::from_unix(1_794_409_481).unwrap())
+                .unwrap();
+        assert!(is_rejected(verify_clearance(&clearance, &sig, &ca_pub, APPROVAL)), "{label}");
         let as_clearance = sign_clearance(&broker, &clearance).unwrap();
         assert!(is_rejected(verify_broker(&ca_pub, &as_clearance, clearance.as_bytes())), "{label}");
     }
@@ -1574,6 +1615,7 @@ fn standing_content(nonce: [u8; 32]) -> StandingContent {
         to: "jan".into(),
         nonce,
         n: 0,
+        at: Timestamp::from_unix(1_794_409_481).unwrap(),
         blocked: false,
         blocked_keys: vec![],
         withdrawn: vec!["SHA256:Qm3AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA".parse().unwrap()],
@@ -1639,8 +1681,13 @@ fn a_standing_is_signed_by_the_broker_and_read_only_after_it_verifies() {
         );
         // A clearance's signature is not a standing's, nor the reverse.
         let request = request(&delegation("alice"), INTERNAL);
-        let clearance = Clearance::compose(request.hash(), Timestamp::from_unix(1_794_409_481).unwrap()).unwrap();
-        assert!(is_rejected(verify_clearance(&clearance, &standing.sign(&broker).unwrap(), &ca_pub)), "{label}");
+        let clearance =
+            Clearance::compose(request.hash(), approval_hash(APPROVAL), Timestamp::from_unix(1_794_409_481).unwrap())
+                .unwrap();
+        assert!(
+            is_rejected(verify_clearance(&clearance, &standing.sign(&broker).unwrap(), &ca_pub, APPROVAL)),
+            "{label}"
+        );
     }
 }
 
@@ -2008,7 +2055,9 @@ fn a_certificate_the_site_ca_issued_with_an_extension_is_refused_everywhere_it_i
     let ca = keys.public(&s.ca);
     let now = at("2026-11-11T15:00:00Z");
     let request = request(&d, INTERNAL);
-    let clearance = Clearance::compose(request.hash(), Timestamp::from_unix(1_794_409_481).unwrap()).unwrap();
+    let clearance =
+        Clearance::compose(request.hash(), approval_hash(APPROVAL), Timestamp::from_unix(1_794_409_481).unwrap())
+            .unwrap();
     let standing = br#"{"v":1,"type":"standing","n":4}"#;
     // With `-O clear` (s.confirmed, s.broker are made like that) everything is accepted; the loose ones are refused.
     for (how, extra) in [("the defaults", None), ("one extension", Some("permit-pty"))] {
@@ -2020,7 +2069,7 @@ fn a_certificate_the_site_ca_issued_with_an_extension_is_refused_everywhere_it_i
         let approval = sign_approval(&confirmed, &request).unwrap();
         assert!(is_extension(verify_approval(&request, &approval, ApprovalTrust::SiteCa(&ca)).map(|_| ())), "{how}");
         assert!(
-            is_extension(verify_clearance(&clearance, &sign_clearance(&broker, &clearance).unwrap(), &ca)),
+            is_extension(verify_clearance(&clearance, &sign_clearance(&broker, &clearance).unwrap(), &ca, APPROVAL)),
             "{how}"
         );
         assert!(is_extension(verify_broker(&ca, &sign_broker(&broker, standing).unwrap(), standing)), "{how}");
@@ -2046,7 +2095,7 @@ fn a_certificate_the_site_ca_issued_with_an_extension_is_refused_everywhere_it_i
     // And the same certificates issued with `-O clear` are accepted by all of them.
     let request_sig = sign_approval(&s.confirmed, &request).unwrap();
     assert!(verify_approval(&request, &request_sig, ApprovalTrust::SiteCa(&ca)).is_ok());
-    assert!(verify_clearance(&clearance, &sign_clearance(&s.broker, &clearance).unwrap(), &ca).is_ok());
+    assert!(verify_clearance(&clearance, &sign_clearance(&s.broker, &clearance).unwrap(), &ca, APPROVAL).is_ok());
     assert!(verify_broker(&ca, &sign_broker(&s.broker, standing).unwrap(), standing).is_ok());
 }
 
@@ -2108,4 +2157,37 @@ fn the_brokers_own_certificate_verifies_bare_for_the_name_broker_only() {
         assert!(verify_broker_certificate("garbage", &ca_pub, now).is_err());
         assert!(verify_broker_certificate(&format!("{line}\n"), &ca_pub, now).is_err());
     }
+}
+
+#[test]
+fn a_clearance_names_one_approval_and_a_service_holding_another_refuses_it() {
+    let d = delegation("alice");
+    let s = site();
+    let ca = s.keys.public(&s.ca);
+    let request = request(&d, INTERNAL);
+    // Two approvals of the same request, by two keys of the same person: different bytes.
+    let confirmed = sign_approval(&s.confirmed, &request).unwrap();
+    let automatic = sign_approval(&s.automatic, &request).unwrap();
+    assert_ne!(confirmed, automatic);
+    let clearance =
+        Clearance::compose(request.hash(), approval_hash(&confirmed), Timestamp::from_unix(1_794_409_481).unwrap())
+            .unwrap();
+    let sig = sign_clearance(&s.broker, &clearance).unwrap();
+    verify_clearance(&clearance, &sig, &ca, &confirmed).unwrap();
+    assert!(matches!(
+        verify_clearance(&clearance, &sig, &ca, &automatic),
+        Err(SignError::ClearanceNamesAnotherApproval)
+    ));
+    assert!(matches!(verify_clearance(&clearance, &sig, &ca, ""), Err(SignError::ClearanceNamesAnotherApproval)));
+    // Not the same approval by a different key's bytes, and not the same bytes with a changed byte.
+    let mut changed = confirmed.clone();
+    changed.push('\n');
+    assert!(matches!(verify_clearance(&clearance, &sig, &ca, &changed), Err(SignError::ClearanceNamesAnotherApproval)));
+    // The signature is judged first: a bad one is a rejection, whatever approval is named.
+    assert!(is_rejected(verify_clearance(
+        &clearance,
+        &sign_clearance(&s.automatic, &clearance).unwrap(),
+        &ca,
+        &confirmed
+    )));
 }

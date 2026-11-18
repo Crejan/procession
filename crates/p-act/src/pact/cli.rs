@@ -73,9 +73,14 @@ fn parse(args: &[String]) -> Result<Options, String> {
     Ok(o)
 }
 
+/// One line to standard error, **escaped and bounded**: what reaches a log may hold text from a service or a certificate
+/// (a transport's detail, a tool's name), and nothing of it is written raw.
 fn log(line: &str) {
-    eprintln!("pact: {line}");
+    eprintln!("pact: {}", p_ermit::text::escape_clipped(line, MAX_LOG_LINE_CHARS).text);
 }
+
+/// The longest line `pact` logs, in characters of the escaped text.
+const MAX_LOG_LINE_CHARS: usize = 2000;
 
 /// Run the command line; the exit status.
 #[must_use]

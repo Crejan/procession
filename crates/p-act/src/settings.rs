@@ -55,6 +55,8 @@ fn describe(e: &serde_json::Error) -> String {
     let first = message.split(" at line ").next().unwrap_or("");
     let names_only = ["unknown field `", "missing field `", "duplicate field `"].iter().any(|p| first.starts_with(p));
     if names_only {
+        // The name of a member is the file's own text: escaped and bounded, like everything else from outside.
+        let first = p_ermit::text::escape_clipped(first, 256).text;
         format!("{first} at line {} column {}", e.line(), e.column())
     } else {
         format!("a value of the wrong kind or out of range at line {} column {}", e.line(), e.column())

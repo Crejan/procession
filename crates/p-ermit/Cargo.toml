@@ -17,6 +17,10 @@ publish = false
 # A reader for TOML settings files (`read_toml`, `read_toml_optional`, `parse_toml`): `toml` 0.9 and `serde`.
 toml = ["dep:toml", "dep:serde"]
 
+# Probe strings (control characters, a bidirectional mark) and `assert_clean`, for other crates' tests: a dev-dependency
+# with this feature.
+test-support = []
+
 [dependencies]
 libc = "0.2"
 serde = { version = "1", features = ["derive"], optional = true }

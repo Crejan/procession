@@ -68,29 +68,32 @@ pub enum SettingsError {
 impl fmt::Display for SettingsError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            SettingsError::NotFound(path) => write!(f, "{path} does not exist"),
-            SettingsError::Io { path, source } => write!(f, "cannot read {path}: {source}"),
-            SettingsError::NotARegularFile(path) => write!(f, "{path} is not a regular file"),
+            SettingsError::NotFound(path) => write!(f, "{} does not exist", shown_path(path)),
+            SettingsError::Io { path, source } => write!(f, "cannot read {}: {source}", shown_path(path)),
+            SettingsError::NotARegularFile(path) => write!(f, "{} is not a regular file", shown_path(path)),
             SettingsError::WritableByOthers { path, mode } => write!(
                 f,
-                "{path} can be written by someone other than its owner (mode {mode:04o}); a settings file must not be writable by its group or by others: run `chmod 600 {}`",
-                shell_quote(path)
+                "{} can be written by someone other than its owner (mode {mode:04o}); a settings file must not be writable by its group or by others: run `chmod 600 {}`",
+                shown_path(path),
+                shown_path(&shell_quote(path))
             ),
             SettingsError::ReadableByOthers { path, mode } => write!(
                 f,
-                "{path} can be read or written by someone other than its owner (mode {mode:04o}); a secret file must not have any permission for its group or for others: run `chmod 600 {}`",
-                shell_quote(path)
+                "{} can be read or written by someone other than its owner (mode {mode:04o}); a secret file must not have any permission for its group or for others: run `chmod 600 {}`",
+                shown_path(path),
+                shown_path(&shell_quote(path))
             ),
             SettingsError::WrongOwner { path, uid } => write!(
                 f,
-                "{path} is owned by user {uid}, who is neither root nor the user running this program; a settings file must be owned by root or by the user that runs the program: as root, run `chown <that user> {}`",
-                shell_quote(path)
+                "{} is owned by user {uid}, who is neither root nor the user running this program; a settings file must be owned by root or by the user that runs the program: as root, run `chown <that user> {}`",
+                shown_path(path),
+                shown_path(&shell_quote(path))
             ),
-            SettingsError::TooLarge(path) => write!(f, "{path} is larger than the limit"),
-            SettingsError::NotAnObject(why) => write!(f, "not one JSON object: {why}"),
+            SettingsError::TooLarge(path) => write!(f, "{} is larger than the limit", shown_path(path)),
+            SettingsError::NotAnObject(why) => write!(f, "not one JSON object: {}", shown(why)),
             SettingsError::ByteOrderMark => f.write_str("the file has a byte order mark"),
             SettingsError::NotUtf8 => f.write_str("the file is not UTF-8"),
-            SettingsError::Invalid(why) => f.write_str(why),
+            SettingsError::Invalid(why) => f.write_str(&shown(why)),
         }
     }
 }
@@ -102,6 +105,18 @@ impl std::error::Error for SettingsError {
             _ => None,
         }
     }
+}
+
+/// A path or a message that may hold text from outside, escaped and bounded for a message. (The escape doubles a
+/// backslash, which a path rarely has.)
+fn shown(s: &str) -> String {
+    crate::text::escape_clipped(s, 512).text
+}
+
+/// A path for a message or for a command to type: **as it is** if it has nothing the rule refuses (so that a remedy such
+/// as `chmod 600 '/tmp/it'\\''s'` stays exact), else escaped and bounded.
+fn shown_path(s: &str) -> String {
+    if crate::text::check(s).is_ok() { s.to_owned() } else { crate::text::escape_clipped(s, 512).text }
 }
 
 /// `path` as one word for a shell, for the remedy in a message: left alone if it has only safe characters, else in
@@ -278,7 +293,8 @@ fn describe_toml(e: &toml::de::Error, text: &str) -> String {
         .iter()
         .any(|p| message.starts_with(p));
     if names_only {
-        let first = message.lines().next().unwrap_or("");
+        // The name of a key is the file's own text: escaped and bounded, like everything else from outside.
+        let first = crate::text::escape_clipped(message.lines().next().unwrap_or(""), 256).text;
         format!("{first}{at}")
     } else {
         format!("a value of the wrong kind or out of range, or syntax that is wrong{at}")
@@ -646,5 +662,24 @@ mod secret_tests {
         ));
         std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o600)).unwrap();
         assert!(check_open_secret(&f, "standard input", false).is_ok());
+    }
+
+    #[test]
+    fn an_error_with_text_from_outside_never_shows_it_raw() {
+        let dirty = "a\u{85}b\u{9b}c\u{202e}d\u{1b}e";
+        for e in [
+            SettingsError::NotFound(dirty.into()),
+            SettingsError::Io { path: dirty.into(), source: std::io::Error::other("x") },
+            SettingsError::NotARegularFile(dirty.into()),
+            SettingsError::WritableByOthers { path: dirty.into(), mode: 0o666 },
+            SettingsError::ReadableByOthers { path: dirty.into(), mode: 0o644 },
+            SettingsError::WrongOwner { path: dirty.into(), uid: 7 },
+            SettingsError::TooLarge(dirty.into()),
+            SettingsError::NotAnObject(dirty.into()),
+            SettingsError::Invalid(dirty.into()),
+        ] {
+            assert!(crate::text::check(&e.to_string()).is_ok(), "{e}");
+            assert!(crate::text::check(&format!("{e:?}")).is_ok(), "{e:?}");
+        }
     }
 }

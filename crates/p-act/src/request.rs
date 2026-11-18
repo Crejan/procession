@@ -22,6 +22,7 @@ pub struct Request {
     call: Call,
     call_sig: String,
     rating: Rating,
+    host_text: bool,
 }
 
 #[derive(Serialize)]
@@ -32,6 +33,7 @@ struct Wire<'a> {
     call: String,
     call_sig: String,
     rating: WireRating,
+    host_text: bool,
 }
 
 #[derive(Serialize)]
@@ -77,14 +79,17 @@ impl Request {
         let damage = value_of(&DAMAGE, "damage", r.take_string("damage")?)?;
         let disruption = value_of(&DISRUPTION, "disruption", r.take_string("disruption")?)?;
         r.finish()?;
+        // Required and always written: there is no "absent means false".
+        let host_text = o.take_bool("host_text")?;
         o.finish()?;
-        Ok(Request { bytes, call, call_sig, rating: Rating::new(exposure, damage, disruption) })
+        Ok(Request { bytes, call, call_sig, rating: Rating::new(exposure, damage, disruption), host_text })
     }
 
     /// Write a new request around `call`, which is carried as the bytes it
     /// was parsed from or written to. The bytes are produced here, once, and
-    /// checked by the same parser that reads every other request.
-    pub fn compose(call: &Call, call_sig: &str, rating: Rating) -> Result<Request, ParseError> {
+    /// checked by the same parser that reads every other request. `host_text` is whether the action's result can
+    /// carry text that is not the service's (formats section 4); there is no default.
+    pub fn compose(call: &Call, call_sig: &str, rating: Rating, host_text: bool) -> Result<Request, ParseError> {
         if !looks_armoured(call_sig) {
             return Err(ParseError::MalformedSignature);
         }
@@ -98,6 +103,7 @@ impl Request {
                 damage: name_of(&DAMAGE, rating.damage),
                 disruption: name_of(&DISRUPTION, rating.disruption),
             },
+            host_text,
         };
         let bytes = serde_json::to_vec(&wire).map_err(|e| ParseError::NotJson(e.to_string()))?;
         Request::parse(bytes)
@@ -119,6 +125,14 @@ impl Request {
     pub fn rating(&self) -> Rating {
         self.rating
     }
+
+    /// Whether the action's result can carry text that is not the service's (what runs on the host chooses it, or a
+    /// file that is read). pledge shows a fixed line when it is `true`; the dispatcher refuses a call whose row has it
+    /// `true` when the approved request said `false`: the flag can only restrict.
+    #[must_use]
+    pub fn host_text(&self) -> bool {
+        self.host_text
+    }
 }
 
 impl Document for Request {
@@ -138,7 +152,7 @@ pub(crate) mod tests {
     }
 
     pub(crate) fn request() -> Request {
-        Request::compose(&call(), SIG, Rating::new(Exposure::Internal, Damage::None, Disruption::None)).unwrap()
+        Request::compose(&call(), SIG, Rating::new(Exposure::Internal, Damage::None, Disruption::None), false).unwrap()
     }
 
     /// The example's text with one member rewritten, as bytes.
@@ -151,7 +165,12 @@ pub(crate) mod tests {
         let request = request();
         let text = std::str::from_utf8(request.as_bytes()).unwrap();
         assert!(text.starts_with(r#"{"v":1,"type":"request","call":"eyJ2IjoxLCJ0eXBlIjoiY2FsbCIs"#), "{text}");
-        assert!(text.ends_with(r#""rating":{"exposure":"internal","damage":"none","disruption":"none"}}"#), "{text}");
+        assert!(
+            text.ends_with(
+                r#""rating":{"exposure":"internal","damage":"none","disruption":"none"},"host_text":false}"#
+            ),
+            "{text}"
+        );
         // The signature is carried as base64 of its armoured bytes: `-----BEGIN SSH SIGNATURE-----\n...`.
         assert!(text.contains(r#""call_sig":"LS0tLS1CRUdJTiBTU0ggU0lHTkFUVVJFLS0tLS0K"#), "{text}");
         assert!(!text.contains("BEGIN"));
@@ -161,6 +180,36 @@ pub(crate) mod tests {
         assert_eq!(parsed.call().as_bytes(), crate::call::tests::EXAMPLE.as_bytes());
         assert_eq!(parsed.call_sig(), SIG);
         assert_eq!(parsed.rating(), Rating::new(Exposure::Internal, Damage::None, Disruption::None));
+        assert!(!parsed.host_text());
+    }
+
+    #[test]
+    fn host_text_is_required_always_written_true_or_false_and_nothing_else() {
+        for flag in [false, true] {
+            let request = Request::compose(&call(), SIG, Rating::HARMLESS, flag).unwrap();
+            let text = std::str::from_utf8(request.as_bytes()).unwrap();
+            assert!(text.ends_with(&format!(r#""host_text":{flag}}}"#)), "{text}");
+            assert_eq!(Request::parse(request.as_bytes()).unwrap().host_text(), flag);
+            // The flag is part of what is signed: the two requests have different bytes and different hashes.
+            let other = Request::compose(&call(), SIG, Rating::HARMLESS, !flag).unwrap();
+            assert_ne!(request.as_bytes(), other.as_bytes());
+            assert_ne!(request.hash(), other.hash());
+        }
+        let swap = |from: &str, to: &str| edited(|t| t.replacen(from, to, 1));
+        // Absent is malformed, not false.
+        assert_eq!(Request::parse(swap(r#","host_text":false"#, "")), Err(ParseError::MissingMember("host_text")));
+        for bad in ["null", "0", "1", "\"false\"", "\"true\"", "[]", "{}", "False"] {
+            assert!(Request::parse(swap("\"host_text\":false", &format!("\"host_text\":{bad}"))).is_err(), "{bad}");
+        }
+        assert_eq!(
+            Request::parse(swap(r#""host_text":false"#, r#""host_text":false,"host_text":true"#)),
+            Err(ParseError::DuplicateMember("host_text".into()))
+        );
+        // Inside the rating it is an unknown member.
+        assert_eq!(
+            Request::parse(swap(r#""disruption":"none""#, r#""disruption":"none","host_text":false"#)),
+            Err(ParseError::UnknownMember("rating.host_text".into()))
+        );
     }
 
     #[test]
@@ -168,7 +217,7 @@ pub(crate) mod tests {
         // A call whose spacing a re-serialisation would change.
         let spaced = crate::call::tests::EXAMPLE.replacen(r#""v":1,"#, r#""v": 1, "#, 1);
         let call = Call::parse(spaced.as_bytes()).unwrap();
-        let request = Request::compose(&call, SIG, Rating::HARMLESS).unwrap();
+        let request = Request::compose(&call, SIG, Rating::HARMLESS, false).unwrap();
         assert_eq!(Request::parse(request.as_bytes()).unwrap().call().as_bytes(), spaced.as_bytes());
     }
 
@@ -179,7 +228,9 @@ pub(crate) mod tests {
                 for (_, s) in DISRUPTION {
                     let rating = Rating::new(e, d, s);
                     assert_eq!(
-                        Request::parse(Request::compose(&call(), SIG, rating).unwrap().as_bytes()).unwrap().rating(),
+                        Request::parse(Request::compose(&call(), SIG, rating, false).unwrap().as_bytes())
+                            .unwrap()
+                            .rating(),
                         rating
                     );
                 }
@@ -249,7 +300,7 @@ pub(crate) mod tests {
             .find(|c| STANDARD.encode(c.as_bytes()).ends_with('='))
             .unwrap();
         let encoded = STANDARD.encode(padded.as_bytes());
-        let request = Request::compose(&padded, SIG, Rating::HARMLESS).unwrap();
+        let request = Request::compose(&padded, SIG, Rating::HARMLESS, false).unwrap();
         let text = String::from_utf8(request.as_bytes().to_vec()).unwrap();
         let unpadded = text.replacen(&encoded, encoded.trim_end_matches('='), 1);
         assert_eq!(Request::parse(unpadded), Err(ParseError::MalformedBase64("call")));
@@ -280,7 +331,7 @@ pub(crate) mod tests {
             "-----BEGIN SSH SIGNATURE-----\nAA\u{0}AA\n-----END SSH SIGNATURE-----\n",
         ] {
             assert_eq!(
-                Request::compose(&call(), bad, Rating::HARMLESS),
+                Request::compose(&call(), bad, Rating::HARMLESS, false),
                 Err(ParseError::MalformedSignature),
                 "{bad:?}"
             );
@@ -314,7 +365,7 @@ pub(crate) mod tests {
     fn the_hash_is_over_the_requests_bytes() {
         let request = request();
         assert_eq!(request.hash(), crate::DocumentHash::of(request.as_bytes()));
-        let other = Request::compose(&call(), SIG, Rating::WORST).unwrap();
+        let other = Request::compose(&call(), SIG, Rating::WORST, false).unwrap();
         assert_ne!(request.hash(), other.hash());
     }
 }

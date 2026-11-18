@@ -22,6 +22,7 @@ use crate::sign::{
 };
 use crate::sshsig::SshsigSigner;
 use crate::text;
+use crate::time::Timestamp;
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD;
 use serde::Serialize;
@@ -167,6 +168,9 @@ pub struct StandingContent {
     pub nonce: Secret32,
     /// 0 in the first standing after the sign-in, rising by one with each later one on the same connection.
     pub n: u64,
+    /// When the broker made it, UTC to the second. **Shown, never used to decide anything**: `accepted_by` does not
+    /// look at it.
+    pub at: Timestamp,
     /// An administrator blocked the person.
     pub blocked: bool,
     /// Fingerprints of this person's keys an administrator blocked.
@@ -196,6 +200,7 @@ struct StandingWire<'a> {
     to: &'a str,
     nonce: String,
     n: u64,
+    at: String,
     blocked: bool,
     blocked_keys: Vec<String>,
     withdrawn: Vec<String>,
@@ -243,6 +248,7 @@ impl Standing {
             to: &content.to,
             nonce: STANDARD.encode(content.nonce),
             n: content.n,
+            at: content.at.to_string(),
             blocked: content.blocked,
             blocked_keys: sorted_strings(&content.blocked_keys),
             withdrawn: sorted_strings(&content.withdrawn),
@@ -260,6 +266,7 @@ impl Standing {
         let to = o.take_string("to")?;
         let nonce = decode32("nonce", &o.take_string("nonce")?)?;
         let n = o.take_u64("n")?;
+        let at = o.take_string("at")?.parse()?;
         let blocked = o.take_bool("blocked")?;
         let blocked_keys = fingerprints(&mut o, "blocked_keys")?;
         let withdrawn = fingerprints(&mut o, "withdrawn")?;
@@ -289,7 +296,7 @@ impl Standing {
         }
         Ok(Standing {
             bytes,
-            content: StandingContent { to, nonce, n, blocked, blocked_keys, withdrawn, certificates, groups },
+            content: StandingContent { to, nonce, n, at, blocked, blocked_keys, withdrawn, certificates, groups },
         })
     }
 
@@ -784,6 +791,7 @@ mod tests {
             to: "jan".into(),
             nonce: N,
             n: 3,
+            at: Timestamp::from_unix(1_794_409_481).unwrap(),
             blocked: false,
             blocked_keys: vec![fp('A')],
             withdrawn: vec![fp('Q'), fp('b')],
@@ -793,10 +801,24 @@ mod tests {
     }
 
     #[test]
+    fn the_time_of_a_standing_is_shown_and_never_decides() {
+        let at = |secs| {
+            Standing::compose(&StandingContent { at: Timestamp::from_unix(secs).unwrap(), ..content() }).unwrap()
+        };
+        // Long ago, now, far ahead: `accepted_by` says the same.
+        for secs in [0, 1_794_409_481, 253_402_300_799] {
+            let s = at(secs);
+            assert_eq!(s.content().at.unix(), secs);
+            assert!(s.accepted_by("jan", &N, None) && s.accepted_by("jan", &N, Some(2)));
+            assert!(!s.accepted_by("jan", &N, Some(3)) && !s.accepted_by("eva", &N, None));
+        }
+    }
+
+    #[test]
     fn the_standing_has_the_documents_bytes_and_round_trips() {
         let s = Standing::compose(&content()).unwrap();
         let expected = format!(
-            r#"{{"v":1,"type":"standing","to":"jan","nonce":"{}","n":3,"blocked":false,"blocked_keys":["{}"],"withdrawn":["{}","{}"],"certificates":[],"groups":["ops","rt"]}}"#,
+            r#"{{"v":1,"type":"standing","to":"jan","nonce":"{}","n":3,"at":"2026-11-11T15:04:41Z","blocked":false,"blocked_keys":["{}"],"withdrawn":["{}","{}"],"certificates":[],"groups":["ops","rt"]}}"#,
             nb(),
             fp('A'),
             fp('Q'),
@@ -823,7 +845,7 @@ mod tests {
         // Required: `certificates` and `groups` too. Absent is refused, not read as empty; empty is fine.
         let base = |tail: &str| {
             format!(
-                r#"{{"v":1,"type":"standing","to":"jan","nonce":"{}","n":0,"blocked":false,"blocked_keys":[],"withdrawn":[]{tail}}}"#,
+                r#"{{"v":1,"type":"standing","to":"jan","nonce":"{}","n":0,"at":"2026-11-11T15:04:41Z","blocked":false,"blocked_keys":[],"withdrawn":[]{tail}}}"#,
                 nb()
             )
         };
@@ -900,6 +922,17 @@ mod tests {
         assert!(matches!(parse(swap("standing", "connection")), Err(ParseError::WrongDocumentType { .. })));
         assert_eq!(parse(swap(r#""n":3"#, r#""n":3,"x":1"#)), Err(ParseError::UnknownMember("x".into())));
         assert_eq!(parse(swap(r#""n":3,"#, "")), Err(ParseError::MissingMember("n")));
+        // `at` is required, a time, once, and after `n`.
+        assert_eq!(parse(swap(r#""at":"2026-11-11T15:04:41Z","#, "")), Err(ParseError::MissingMember("at")));
+        assert!(matches!(parse(swap("2026-11-11T15:04:41Z", "yesterday")), Err(ParseError::MalformedTime(_))));
+        assert!(matches!(
+            parse(swap(r#""at":"2026-11-11T15:04:41Z""#, r#""at":5"#)),
+            Err(ParseError::WrongType { .. })
+        ));
+        assert_eq!(
+            parse(swap(r#""at":"2026-11-11T15:04:41Z""#, r#""at":"2026-11-11T15:04:41Z","at":"2026-11-11T15:04:41Z""#)),
+            Err(ParseError::DuplicateMember("at".into()))
+        );
         assert_eq!(parse(swap(r#""n":3"#, r#""n":3,"n":4"#)), Err(ParseError::DuplicateMember("n".into())));
         for n in ["-1", "1.5", "\"3\"", "null", "18446744073709551616"] {
             let b = text.replacen(r#""n":3"#, &format!(r#""n":{n}"#), 1).into_bytes();
@@ -1398,7 +1431,7 @@ mod tests {
         );
         let standing = |groups: &str, to: &str| {
             format!(
-                r#"{{"v":1,"type":"standing","to":"{to}","nonce":"{nonce}","n":0,"blocked":false,"blocked_keys":[],"withdrawn":[],"certificates":[],"groups":[{groups}]}}"#
+                r#"{{"v":1,"type":"standing","to":"{to}","nonce":"{nonce}","n":0,"at":"2026-11-11T15:04:41Z","blocked":false,"blocked_keys":[],"withdrawn":[],"certificates":[],"groups":[{groups}]}}"#
             )
         };
         assert_eq!(
