@@ -74,6 +74,24 @@ pub fn is_name(name: &str) -> bool {
     (1..=64).contains(&name.len()) && name.bytes().all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'-'))
 }
 
+/// A settings file is refused if anyone but its owner or root can write it
+/// (`doc/approvals.md`, section 10): no group or other write bit, and an owner that is
+/// this user or root.
+fn check_not_writable_by_others(path: &Path) -> Result<()> {
+    use std::os::unix::fs::MetadataExt;
+    let meta = fs::metadata(path).map_err(Error::io(format!("examining {}", path.display())))?;
+    let refuse = |problem: &str| Error::Corrupt { path: path.to_owned(), problem: problem.to_owned() };
+    if meta.mode() & 0o022 != 0 {
+        return Err(refuse("can be written by someone other than its owner: refused"));
+    }
+    // SAFETY: getuid has no preconditions.
+    let me = unsafe { libc::getuid() };
+    if meta.uid() != me && meta.uid() != 0 {
+        return Err(refuse("is owned by neither this user nor root: refused"));
+    }
+    Ok(())
+}
+
 impl Config {
     /// Reads `path`; a missing file is the empty configuration.
     ///
@@ -86,8 +104,14 @@ impl Config {
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Self::default()),
             Err(e) => return Err(Error::io(format!("reading {}", path.display()))(e)),
         };
-        let config: Self = serde_json::from_slice(&bytes)
-            .map_err(|e| Error::Corrupt { path: path.to_owned(), problem: e.to_string() })?;
+        check_not_writable_by_others(path)?;
+        let corrupt = |problem: String| Error::Corrupt { path: path.to_owned(), problem };
+        // One object: serde would also read a struct from an array, which a settings file may not be.
+        let value: serde_json::Value = serde_json::from_slice(&bytes).map_err(|e| corrupt(e.to_string()))?;
+        if !value.is_object() {
+            return Err(corrupt("a settings file is one JSON object".into()));
+        }
+        let config: Self = serde_json::from_value(value).map_err(|e| corrupt(e.to_string()))?;
         config.check().map_err(|problem| Error::Corrupt { path: path.to_owned(), problem })?;
         Ok(config)
     }
@@ -174,6 +198,31 @@ mod tests {
         assert_eq!(config.person.as_deref(), Some("jan"));
         assert!(config.host_key("a.example").is_some());
         assert_eq!(config.max_waiting(), 3);
+    }
+
+    #[test]
+    fn a_file_others_can_write_is_refused_and_one_object_is_required() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = TestDir::new("config-mode");
+        let path = dir.path().join("config.json");
+        fs::write(&path, r#"{"person":"jan"}"#).expect("write");
+        for (mode, ok) in [(0o600, true), (0o644, true), (0o664, false), (0o646, false), (0o666, false), (0o620, false)]
+        {
+            fs::set_permissions(&path, fs::Permissions::from_mode(mode)).expect("chmod");
+            assert_eq!(Config::load(&path).is_ok(), ok, "mode {mode:o}");
+        }
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).expect("chmod");
+        for text in [
+            "[]",
+            r#"[{"person":"jan"}]"#,
+            "\"jan\"",
+            r#"{"person":"jan"} {"person":"bob"}"#,
+            "{\"person\":\"jan\"} // comment",
+            "// c\n{}",
+        ] {
+            fs::write(&path, text).expect("write");
+            assert!(matches!(Config::load(&path), Err(Error::Corrupt { .. })), "{text}");
+        }
     }
 
     #[test]
