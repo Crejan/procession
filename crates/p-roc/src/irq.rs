@@ -108,7 +108,7 @@ pub struct Irq {
 }
 
 fn cpu_file(path: &std::path::Path) -> Result<Option<CpuSet>, Error> {
-    match fs::read_to_string(path) {
+    match crate::text::read_to_string(path) {
         Ok(s) => {
             CpuSet::parse_list(&s).map(Some).map_err(|source| Error::Cpus { what: path.display().to_string(), source })
         }
@@ -132,7 +132,7 @@ pub fn read_irqs(root: &Root) -> Result<Scan<Irq>, Error> {
                 .map_err(|e| Error::io(&base, e))?
                 .filter_map(|e| {
                     let e = e.ok()?;
-                    (e.file_type().ok()?.is_dir()).then(|| e.file_name().to_string_lossy().into_owned())
+                    (e.file_type().ok()?.is_dir()).then(|| crate::text::entry_name(&e))
                 })
                 .filter(|n| n != "node")
                 .collect();

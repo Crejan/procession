@@ -69,7 +69,7 @@ pub struct PciNic {
 }
 
 fn file_name(p: &std::path::Path) -> Option<String> {
-    Some(p.file_name()?.to_string_lossy().into_owned())
+    Some(crate::text::from_os(p.file_name()?))
 }
 
 /// Every PCI device of class `0x02` (network), by address.
@@ -80,13 +80,13 @@ pub fn network_devices(root: &Root) -> Result<Scan<PciNic>, Error> {
     let dir = root.sys.join("bus/pci/devices");
     let mut names: Vec<String> = fs::read_dir(&dir)
         .map_err(|e| Error::io(&dir, e))?
-        .filter_map(|e| Some(e.ok()?.file_name().to_string_lossy().into_owned()))
+        .filter_map(|e| Some(crate::text::entry_name(&e.ok()?)))
         .collect();
     names.sort();
     let mut out = Scan::default();
     for address in names {
         let d = dir.join(&address);
-        let class = match fs::read_to_string(d.join("class")) {
+        let class = match crate::text::read_to_string(d.join("class")) {
             Ok(c) => c,
             Err(e) => {
                 out.unreadable.push(Unreadable::new(d.join("class").display().to_string(), &e));
@@ -96,14 +96,16 @@ pub fn network_devices(root: &Root) -> Result<Scan<PciNic>, Error> {
         if !class.trim().starts_with("0x02") {
             continue;
         }
-        let read = |f: &str| fs::read_to_string(d.join(f)).ok().map(|s| s.trim().trim_start_matches("0x").to_string());
+        let read = |f: &str| {
+            crate::text::read_to_string(d.join(f)).ok().map(|s| s.trim().trim_start_matches("0x").to_string())
+        };
         let driver = fs::read_link(d.join("driver")).ok().and_then(|p| file_name(&p));
         out.items.push(PciNic {
             id: read("vendor").zip(read("device")).map(|(v, d)| format!("{v}:{d}")),
             attached: Attached::from_driver(driver.as_deref()),
             netdev: fs::read_dir(d.join("net"))
                 .ok()
-                .and_then(|rd| rd.filter_map(Result::ok).map(|e| e.file_name().to_string_lossy().into_owned()).min()),
+                .and_then(|rd| rd.filter_map(Result::ok).map(|e| crate::text::entry_name(&e)).min()),
             iommu_group: fs::read_link(d.join("iommu_group")).ok().and_then(|p| file_name(&p)?.parse().ok()),
             driver,
             address,
@@ -123,7 +125,7 @@ pub fn uio_device(root: &Root, n: u32) -> Option<String> {
 pub fn vfio_group_devices(root: &Root, group: u32) -> Vec<String> {
     let dir = root.sys.join("kernel/iommu_groups").join(group.to_string()).join("devices");
     let mut v: Vec<String> = fs::read_dir(dir)
-        .map(|rd| rd.filter_map(|e| Some(e.ok()?.file_name().to_string_lossy().into_owned())).collect())
+        .map(|rd| rd.filter_map(|e| Some(crate::text::entry_name(&e.ok()?))).collect())
         .unwrap_or_default();
     v.sort();
     v

@@ -5,6 +5,8 @@
   "started_at": "2026-11-06T21:20:00Z",
   "mode": "observe",
   "cost": "light",
+  "escaped_records": 0,
+  "clipped_records": 0,
   "unreadable": [
     {
       "source": "ethtool lan0",

@@ -16,7 +16,8 @@ fn read_toml(p: &Path) -> Result<Config, Error> {
 }
 
 fn read_toml_optional(p: &Path) -> Result<Option<Config>, Error> {
-    p_ermit::settings::read_toml_optional(p).map_err(|e| Error::Config { path: p.display().to_string(), detail: e.to_string() })
+    p_ermit::settings::read_toml_optional(p)
+        .map_err(|e| Error::Config { path: p.display().to_string(), detail: e.to_string() })
 }
 
 /// Default location of the configuration.

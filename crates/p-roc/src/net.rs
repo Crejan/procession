@@ -10,7 +10,7 @@ use crate::error::Error;
 use crate::root::{Root, read};
 
 fn opt(path: &std::path::Path) -> Option<String> {
-    fs::read_to_string(path).ok().map(|s| s.trim().to_string()).filter(|s| !s.is_empty())
+    crate::text::read_to_string(path).ok().map(|s| s.trim().to_string()).filter(|s| !s.is_empty())
 }
 
 fn num<T: std::str::FromStr>(path: &std::path::Path) -> Option<T> {
@@ -79,7 +79,7 @@ pub fn interfaces(root: &Root) -> Result<Vec<String>, Error> {
     let dir = root.sys.join("class/net");
     let mut v: Vec<String> = fs::read_dir(&dir)
         .map_err(|e| Error::io(&dir, e))?
-        .filter_map(|e| Some(e.ok()?.file_name().to_string_lossy().into_owned()))
+        .filter_map(|e| Some(crate::text::entry_name(&e.ok()?)))
         .collect();
     v.sort();
     Ok(v)
@@ -123,12 +123,10 @@ pub fn interface(root: &Root, name: &str) -> Result<Interface, Error> {
             carrier_changes: num(&base.join("carrier_changes")),
             admin_up: flags.map(|f| f & 1 != 0),
         },
-        driver: fs::read_link(dev.join("driver"))
-            .ok()
-            .and_then(|p| Some(p.file_name()?.to_string_lossy().into_owned())),
+        driver: fs::read_link(dev.join("driver")).ok().and_then(|p| Some(crate::text::from_os(p.file_name()?))),
         pci: fs::read_link(&dev)
             .ok()
-            .and_then(|p| Some(p.file_name()?.to_string_lossy().into_owned()))
+            .and_then(|p| Some(crate::text::from_os(p.file_name()?)))
             .filter(|n| is_pci_address(n)),
         rx_queues: count_queues(&base.join("queues"), "rx-"),
         tx_queues: count_queues(&base.join("queues"), "tx-"),
@@ -146,7 +144,7 @@ pub fn statistics(root: &Root, name: &str) -> Result<BTreeMap<String, u64>, Erro
     for e in fs::read_dir(&dir).map_err(|e| Error::io(&dir, e))? {
         let Ok(e) = e else { continue };
         if let Some(v) = read(&e.path()).ok().and_then(|s| s.trim().parse::<u64>().ok()) {
-            out.insert(e.file_name().to_string_lossy().into_owned(), v);
+            out.insert(crate::text::entry_name(&e), v);
         }
     }
     Ok(out)
@@ -244,7 +242,7 @@ pub fn sockets(root: &Root, wanted_xdp: &[u64]) -> Result<crate::root::Scan<(u64
     let mut out = crate::root::Scan::default();
     let mut add = |name: &str, parse: &dyn Fn(&str) -> Vec<(u64, SocketKind)>| {
         let p = root.proc.join("net").join(name);
-        match fs::read_to_string(&p) {
+        match crate::text::read_to_string(&p) {
             Ok(t) => out.items.extend(parse(&t)),
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
             Err(e) => out.unreadable.push(crate::root::Unreadable::new(p.display().to_string(), &e)),

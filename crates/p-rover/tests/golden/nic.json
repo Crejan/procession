@@ -5,6 +5,8 @@
   "started_at": "2026-11-06T21:20:00Z",
   "mode": "observe",
   "cost": "light",
+  "escaped_records": 0,
+  "clipped_records": 0,
   "unreadable": [],
   "records": [
     {"type":"link","name":"lan0","ifindex":3,"operstate":"up","carrier":true,"speed_mbps":1000,"duplex":"full","mtu":1500,"address":"aa:bb:cc:00:11:22","carrier_changes":2,"admin_up":true,"driver":"igb","pci":"0000:04:00.0","rx_queues":2,"tx_queues":2,"irqs":[125,126]},

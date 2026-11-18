@@ -17,6 +17,7 @@ pub mod pci;
 pub mod root;
 pub mod sys;
 pub mod task;
+pub mod text;
 
 pub use cpuset::{CpuSet, CpuSetError, MAX_CPU};
 pub use error::Error;

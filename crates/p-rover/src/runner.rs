@@ -53,7 +53,7 @@ fn drain(mut r: impl Read + Send + 'static) -> std::thread::JoinHandle<String> {
         let mut buf = Vec::new();
         let _ = (&mut r).take(CAP).read_to_end(&mut buf);
         let _ = std::io::copy(&mut r, &mut std::io::sink());
-        String::from_utf8_lossy(&buf).into_owned()
+        p_roc::text::from_bytes(&buf)
     })
 }
 

@@ -5,6 +5,8 @@
   "started_at": "2026-11-06T21:20:00Z",
   "mode": "observe",
   "cost": "light",
+  "escaped_records": 0,
+  "clipped_records": 0,
   "unreadable": [],
   "records": [
     {"type":"thread","pid":10,"tid":10,"comm":"cyclic (app)","uid":1000,"kthread":false,"policy":"fifo","rtprio":50,"cpu":2,"state":"R","cpus_allowed":"0-3","on_isolated":true,"rt":true},

@@ -67,7 +67,7 @@ pub fn fds(root: &Root, pid: i32) -> Result<Vec<Fd>, Error> {
     let mut out = Vec::new();
     for fd in numeric_entries(&dir)? {
         let Ok(target) = fs::read_link(dir.join(fd.to_string())) else { continue };
-        if let Some(kind) = classify(&target.to_string_lossy()) {
+        if let Some(kind) = classify(&crate::text::from_os(target.as_os_str())) {
             out.push(Fd { fd, kind });
         }
     }

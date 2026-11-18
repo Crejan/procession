@@ -130,8 +130,9 @@ pub fn run(env: &Env, args: &Args) -> Result<Report, Error> {
         report.push(&Record::Boots { known: all.len(), last: all[all.len().saturating_sub(4)..].to_vec() });
     }
 
-    let sysctl =
-        |n: &str| std::fs::read_to_string(env.root.proc.join("sys/kernel").join(n)).ok().map(|s| s.trim().to_string());
+    let sysctl = |n: &str| {
+        p_roc::text::read_to_string(env.root.proc.join("sys/kernel").join(n)).ok().map(|s| s.trim().to_string())
+    };
     let cmd = Cmdline::read(&env.root).unwrap_or_default();
     report.push(&Record::Detectors {
         values: ["nmi_watchdog", "soft_watchdog", "watchdog", "hung_task_timeout_secs", "panic"]

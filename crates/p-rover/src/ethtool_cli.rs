@@ -81,7 +81,12 @@ fn jbool(o: &serde_json::Map<String, Value>, k: &str) -> Option<bool> {
 pub fn parse_driver(text: &str) -> DriverInfo {
     let m = kv(text);
     let get = |k: &str| m.get(k).filter(|v| !v.is_empty()).cloned();
-    DriverInfo { driver: get("driver"), version: get("version"), firmware: get("firmware-version"), bus_info: get("bus-info") }
+    DriverInfo {
+        driver: get("driver"),
+        version: get("version"),
+        firmware: get("firmware-version"),
+        bus_info: get("bus-info"),
+    }
 }
 
 /// `-S` as text: `NIC statistics:` then `     name: value`.
@@ -174,7 +179,10 @@ impl EthtoolCli {
             Ok(o) if o.code == Some(0) => Ok(o.stdout),
             Ok(o) => {
                 let why = o.stderr.lines().next().unwrap_or("failed").trim().to_string();
-                Err(Unreadable { source: what, reason: if why.is_empty() { format!("exit {:?}", o.code) } else { why } })
+                Err(Unreadable {
+                    source: what,
+                    reason: if why.is_empty() { format!("exit {:?}", o.code) } else { why },
+                })
             }
             Err(RunError::NotFound(_)) => Err(Unreadable { source: "ethtool".into(), reason: "not installed".into() }),
             Err(e) => Err(Unreadable::new(what, &e)),
@@ -213,13 +221,19 @@ impl Ethtool for EthtoolCli {
             Err(u) if u.source == "ethtool" => return (d, vec![u]),
             Err(u) => bad.push(u),
         }
-        d.stats = self
-            .both(iface, "-S", |o| Some(json_stats(o)), |t| Some(parse_stats(t)), &mut bad)
-            .unwrap_or_default();
+        d.stats =
+            self.both(iface, "-S", |o| Some(json_stats(o)), |t| Some(parse_stats(t)), &mut bad).unwrap_or_default();
         d.ring = self.both(
             iface,
             "-g",
-            |o| Some(Ring { rx_max: jnum(o, "rx-max"), rx: jnum(o, "rx"), tx_max: jnum(o, "tx-max"), tx: jnum(o, "tx") }),
+            |o| {
+                Some(Ring {
+                    rx_max: jnum(o, "rx-max"),
+                    rx: jnum(o, "rx"),
+                    tx_max: jnum(o, "tx-max"),
+                    tx: jnum(o, "tx"),
+                })
+            },
             |t| Some(parse_ring(t)),
             &mut bad,
         );
@@ -242,7 +256,14 @@ impl Ethtool for EthtoolCli {
         d.channels = self.both(
             iface,
             "-l",
-            |o| Some(Channels { max_combined: jnum(o, "combined-max"), combined: jnum(o, "combined"), rx: jnum(o, "rx"), tx: jnum(o, "tx") }),
+            |o| {
+                Some(Channels {
+                    max_combined: jnum(o, "combined-max"),
+                    combined: jnum(o, "combined"),
+                    rx: jnum(o, "rx"),
+                    tx: jnum(o, "tx"),
+                })
+            },
             |t| Some(parse_channels(t)),
             &mut bad,
         );
@@ -281,16 +302,29 @@ mod tests {
         let r = parse_ring(RING);
         assert_eq!((r.rx_max, r.rx, r.tx_max, r.tx), (Some(4096), Some(256), Some(4096), Some(256)));
         let c = parse_coalesce(COAL);
-        assert_eq!((c.adaptive_rx, c.adaptive_tx, c.rx_usecs, c.rx_frames), (Some(false), Some(false), Some(3), Some(0)));
+        assert_eq!(
+            (c.adaptive_rx, c.adaptive_tx, c.rx_usecs, c.rx_frames),
+            (Some(false), Some(false), Some(3), Some(0))
+        );
         let h = parse_channels(CHAN);
         assert_eq!((h.max_combined, h.combined), (Some(4), Some(2)));
-        assert_eq!(parse_eee("EEE settings for eth0:\n\tEEE status: enabled - active\n"), Some(Eee { enabled: true, active: true }));
+        assert_eq!(
+            parse_eee("EEE settings for eth0:\n\tEEE status: enabled - active\n"),
+            Some(Eee { enabled: true, active: true })
+        );
         assert_eq!(parse_eee("EEE settings for eth0:\n\tEEE status: disabled\n").map(|e| e.enabled), Some(false));
         assert!(parse_eee("Cannot get EEE settings: Operation not supported\n").is_none());
-        let f = parse_features("Features for eth0:\ngeneric-receive-offload: on\nlarge-receive-offload: off [fixed]\nodd: maybe\n");
+        let f = parse_features(
+            "Features for eth0:\ngeneric-receive-offload: on\nlarge-receive-offload: off [fixed]\nodd: maybe\n",
+        );
         assert_eq!(f.len(), 2);
         assert!(f["generic-receive-offload"] && !f["large-receive-offload"]);
-        assert_eq!(parse_driver("driver: igb\nversion: 6.8\nfirmware-version: 1.63\nbus-info: 0000:04:00.0\n").bus_info.as_deref(), Some("0000:04:00.0"));
+        assert_eq!(
+            parse_driver("driver: igb\nversion: 6.8\nfirmware-version: 1.63\nbus-info: 0000:04:00.0\n")
+                .bus_info
+                .as_deref(),
+            Some("0000:04:00.0")
+        );
         assert_eq!(parse_stats("NIC statistics:\n     rx_packets: 5\n     name: x\n")["rx_packets"], 5);
     }
 
@@ -307,7 +341,10 @@ mod tests {
         assert_eq!(d.ring.unwrap().rx, Some(256));
         assert_eq!(d.coalesce.unwrap().rx_usecs, Some(3));
         assert!(d.eee.is_none());
-        assert!(bad.iter().any(|u| u.source.contains("--show-eee") && u.reason.contains("Operation not supported")), "{bad:?}");
+        assert!(
+            bad.iter().any(|u| u.source.contains("--show-eee") && u.reason.contains("Operation not supported")),
+            "{bad:?}"
+        );
         // No binary at all: one entry, nothing else.
         let (d, bad) = EthtoolCli::new(Box::new(Scripted::default())).query("lan0");
         assert_eq!(d, EthtoolData::default());
