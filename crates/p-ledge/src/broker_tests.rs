@@ -611,3 +611,74 @@ fn reconnecting_waits_longer_and_longer_up_to_a_minute_and_a_good_connection_sta
     assert_eq!(backoff(d(2.0), false, 1.0), d(5.0), "jitter adds up to a quarter");
     assert_eq!(json!(backoff(d(1.0), false, 5.0).as_millis() <= 2500), json!(true), "and no more");
 }
+
+#[test]
+fn a_blocked_approval_key_is_not_signed_with_and_the_record_says_which_and_why() {
+    let mut w = W::new();
+    let agent = w.agent();
+    w.ready();
+    for (role, mode_rating) in [("automatic", Rating::HARMLESS), ("confirmed", crate::approvals_tests::INTERNAL)] {
+        let key = w.lab.rig.shared.key_with_purpose(role).expect("key");
+        let mut content = w.content();
+        content.certificates = vec![w.certificate("confirmed"), w.certificate("automatic")];
+        content.blocked_keys = vec![key.fingerprint.parse().expect("fingerprint")];
+        w.send_standing(&content);
+        let (request, sig) = w.lab.make(&agent, &[role], mode_rating);
+        assert_eq!(
+            refusal(&w.lab.connect().ask(&request, &sig)),
+            PledgeReason::Blocked,
+            "{role}: the agent hears the coarse class"
+        );
+        let entry = w.lab.entries().into_iter().rev().find(|e| e["type"] == "request").expect("entry");
+        assert_eq!(entry["reason"], "blocked");
+        assert!(
+            entry["why"].as_str().is_some_and(|why| why.contains(role) && why.contains("blocked by the broker")),
+            "{entry}"
+        );
+        // Lifted by a newer standing that no longer lists it.
+        let mut lifted = w.content();
+        lifted.certificates = content.certificates.clone();
+        w.send_standing(&lifted);
+    }
+}
+
+#[test]
+fn a_blocked_delegation_key_issues_nothing_and_signs_nothing_under_what_it_issued() {
+    let mut w = W::new();
+    let agent = w.agent();
+    let key = w.lab.rig.shared.key_with_purpose("delegation").expect("key");
+    let mut content = w.content();
+    content.certificates = vec![w.certificate("confirmed"), w.certificate("automatic")];
+    content.blocked_keys = vec![key.fingerprint.parse().expect("fingerprint")];
+    w.send_standing(&content);
+    w.lab.rig.dialogs.push(yes());
+    assert_eq!(
+        crate::agents::start(&w.lab.rig.shared, Lab::start_args(&[], None, None, None)).err(),
+        Some(Code::Refused)
+    );
+    assert_eq!(w.events("issuing-refused").len(), 1);
+    let (request, sig) = w.lab.make(&agent, &["d"], Rating::HARMLESS);
+    assert_eq!(refusal(&w.lab.connect().ask(&request, &sig)), PledgeReason::Blocked);
+}
+
+#[test]
+fn a_refused_sign_in_for_a_blocked_connection_key_is_its_own_ending_and_not_one_to_retry_in_a_loop() {
+    let mut w = W::new();
+    w.challenge();
+    let blocked = ToPledge::Exchange(Box::new(Message::Error(p_act::exchange::ErrorMessage {
+        error: p_act::exchange::ErrorCode::Blocked,
+    })));
+    assert!(matches!(w.feed(&blocked), Err(End::Blocked)));
+    // The same word on a connection that is up is not a sign-in refusal.
+    let mut up = W::new();
+    up.sign_in();
+    assert!(matches!(up.feed(&blocked), Err(End::Protocol(_))));
+}
+
+#[test]
+fn the_tls_client_is_what_the_contract_names() {
+    // The version and provider the code builds are the words of p-act's constants.
+    assert_eq!(p_act::broker::TLS_PROTOCOL_VERSION, "TLSv1.3");
+    assert_eq!(p_act::broker::TLS_CRYPTO_PROVIDER, "ring");
+    crate::broker_link::client_config(include_str!("../testdata/tls_root.pem")).expect("config");
+}

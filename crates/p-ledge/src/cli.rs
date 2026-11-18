@@ -312,6 +312,7 @@ pub fn history_line(entry: &Value) -> String {
         Some("request") => {
             add("", text("result"));
             add("(", text("reason").map(|r| format!("{r})")));
+            add("why=", text("why"));
             add("mode=", text("mode"));
             add("peer-uid=", peer_uid(entry));
             add("person=", text("person"));
