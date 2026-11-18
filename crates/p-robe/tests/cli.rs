@@ -54,12 +54,12 @@ fn serve_says_what_is_wrong_with_its_settings() {
     std::fs::write(&file, r#"{"person":"jan"}"#).unwrap();
     let out = probe(&["serve", "--config", file.to_str().unwrap()], None);
     assert_eq!(out.status.code(), Some(64));
-    assert!(text(&out.stderr).contains("confirmed_key is needed"), "{}", text(&out.stderr));
+    assert!(text(&out.stderr).contains("missing field `confirmed_key`"), "{}", text(&out.stderr));
     // Writable by others: refused before it is read.
     std::fs::set_permissions(&file, std::os::unix::fs::PermissionsExt::from_mode(0o666)).unwrap();
     let out = probe(&["serve", "--config", file.to_str().unwrap()], None);
     assert_eq!(out.status.code(), Some(64));
-    assert!(text(&out.stderr).contains("writable by its group or by others"), "{}", text(&out.stderr));
+    assert!(text(&out.stderr).contains("can be written by someone other than its owner"), "{}", text(&out.stderr));
 }
 
 #[test]

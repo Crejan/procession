@@ -120,18 +120,17 @@ pub fn run(listen: &str, service: Arc<Service>) -> Result<(), String> {
 ///
 /// # Errors
 /// A settings file that exists and does not parse: a renewal does not guess then.
-pub fn setup_defaults(config_text: Option<&str>, hostname: &str) -> Result<(PathBuf, String, PathBuf), String> {
-    let Some(text) = config_text else {
+pub fn setup_defaults(config: Option<&Config>, hostname: &str) -> Result<(PathBuf, String, PathBuf), String> {
+    let Some(config) = config else {
         return Ok((PathBuf::from(crate::config::DEFAULT_HOST_KEY), hostname.to_string(), PathBuf::from("/etc/probe")));
     };
-    let config = Config::parse(text)?;
     let out = config.service_key.parent().map_or_else(|| PathBuf::from("."), Path::to_path_buf);
     if config.service_key.file_name().and_then(|n| n.to_str()) != Some("service-key") {
         return Err(
             "service_key must be named service-key: setup keeps the key and the certificate beside each other".into()
         );
     }
-    Ok((config.host_key, config.host.unwrap_or_else(|| hostname.to_string()), out))
+    Ok((config.host_key.clone(), config.host.clone().unwrap_or_else(|| hostname.to_string()), out))
 }
 
 /// `probe setup [--host-key <file>] [--host <name>] [--out <dir>]`. With no arguments it renews, from
@@ -156,14 +155,14 @@ pub fn setup(args: &[&str]) -> u8 {
         }
     }
     let hostname = crate::kit::hostname();
-    let text = match crate::config::read_checked(Path::new(crate::config::DEFAULT_FILE)) {
-        Ok(text) => text,
+    let config = match Config::load_optional(Path::new(crate::config::DEFAULT_FILE)) {
+        Ok(config) => config,
         Err(why) => {
             eprintln!("probe setup: {why}");
             return 64;
         }
     };
-    let (default_key, default_host, default_out) = match setup_defaults(text.as_deref(), &hostname) {
+    let (default_key, default_host, default_out) = match setup_defaults(config.as_ref(), &hostname) {
         Ok(defaults) => defaults,
         Err(why) => {
             eprintln!("probe setup: {}: {why}", crate::config::DEFAULT_FILE);
@@ -210,8 +209,8 @@ mod tests {
 
     const MINIMAL: &str = r#"{"person":"jan","confirmed_key":"/k/c.pub","automatic_key":"/k/a.pub","pledge_socket":"/run/p/service.sock"}"#;
 
-    fn with(extra: &str) -> String {
-        format!("{}, {extra}}}", MINIMAL.trim_end_matches('}'))
+    fn with(extra: &str) -> Config {
+        Config::parse(&format!("{}, {extra}}}", MINIMAL.trim_end_matches('}'))).unwrap()
     }
 
     #[test]
@@ -221,15 +220,15 @@ mod tests {
             (key, host.as_str(), out),
             (PathBuf::from("/etc/ssh/ssh_host_ed25519_key"), "h.example", PathBuf::from("/etc/probe"))
         );
-        let text = with(r#""host":"a.example","host_key":"/k/host","service_key":"/srv/probe/service-key""#);
-        let (key, host, out) = setup_defaults(Some(&text), "h.example").unwrap();
+        let config = with(r#""host":"a.example","host_key":"/k/host","service_key":"/srv/probe/service-key""#);
+        let (key, host, out) = setup_defaults(Some(&config), "h.example").unwrap();
         assert_eq!((key, host.as_str(), out), (PathBuf::from("/k/host"), "a.example", PathBuf::from("/srv/probe")));
-        assert_eq!(setup_defaults(Some(MINIMAL), "h.example").unwrap().2, PathBuf::from("/etc/probe"));
+        let minimal = Config::parse(MINIMAL).unwrap();
+        assert_eq!(setup_defaults(Some(&minimal), "h.example").unwrap().2, PathBuf::from("/etc/probe"));
     }
 
     #[test]
-    fn a_settings_file_that_does_not_parse_or_names_the_key_oddly_is_not_guessed_around() {
-        assert!(setup_defaults(Some("person"), "h").is_err());
+    fn a_key_that_is_not_named_service_key_is_not_guessed_around() {
         assert!(setup_defaults(Some(&with(r#""service_key":"/etc/probe/other""#)), "h").is_err());
     }
 }

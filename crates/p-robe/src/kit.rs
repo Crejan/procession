@@ -91,7 +91,7 @@ pub fn run(env: &Env, _args: &[String], answer: &mut Answer<'_>) -> Result<u8, F
     let test_verbs = cfg!(feature = "test-verbs");
     let lock_problem = lock::directory_problem(&env.lock_dir);
     let cert_path = config::certificate_path(
-        config::read_checked(std::path::Path::new(config::DEFAULT_FILE)).ok().flatten().as_deref(),
+        config::Config::load_optional(std::path::Path::new(config::DEFAULT_FILE)).ok().flatten().as_ref(),
     );
     let certificate = look_at_certificate(&cert_path, Timestamp::now().map_or(0, Timestamp::unix));
     let executable = std::env::current_exe().ok().map(|path| path.display().to_string());
