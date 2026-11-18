@@ -127,6 +127,18 @@ the call, which is all the Python original's timer did.
 - Every finding of any subcommand uses the `Finding` type below, so
   `analyze` and the single subcommands report alike.
 
+**What a wrapper may rely on** (p-robe calls `prover <subcommand> --format json`
+by absolute path with a cleared environment): the object's top-level members
+(`schema_version`, `subcommand`, `host`, `started_at`, `mode`, `cost`,
+`unreadable`, `records`, `restored`, `findings`), the `type` member of every
+record, the `id`, `severity`, `subject`, `evidence`, `recommendation` and
+`changes` of a finding, and the exit codes above (0, 1, 2 are results; 3 the
+diagnostic failed, 4 refused or a usage error). Records keep their field
+order. `procs` and `irq` bound their own answer: at most `--max` thread
+records and 100 findings (`procs`); at most `--top` unflagged IRQ records,
+100 flagged ones and 100 IRQ findings (`irq`); the summary record says
+`truncated`.
+
 ## Configuration
 
 `/etc/p-rover.toml`, every key optional; without it every subcommand runs
@@ -175,7 +187,10 @@ frame_bytes = 128
   covering the scheduler analyses.
 - External tools only where they are the reference implementation:
   cyclictest (`probe jitter`), chronyc (`clock`), the systemd journal
-  (`lastboot`, via `sd-journal` or `journalctl`). Everything else native:
+  (`lastboot`, via `sd-journal` or `journalctl`), `ethtool` (`nic`, `analyze`:
+  the reference implementation for driver settings and counters; `--json`
+  first, text where that is refused; an ioctl or netlink transport may replace
+  it behind the same trait). Everything else native:
   procfs, sysfs, ethtool over netlink, BPF, `AF_PACKET`.
 
 ## analyze

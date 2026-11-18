@@ -10,12 +10,21 @@ use serde::Deserialize;
 
 use crate::error::Error;
 
+/// The one place the settings file is read: through `p_act::settings`.
+fn read_toml(p: &Path) -> Result<Config, Error> {
+    p_act::settings::read_toml(p).map_err(|e| Error::Config { path: p.display().to_string(), detail: e.to_string() })
+}
+
+fn read_toml_optional(p: &Path) -> Result<Option<Config>, Error> {
+    p_act::settings::read_toml_optional(p).map_err(|e| Error::Config { path: p.display().to_string(), detail: e.to_string() })
+}
+
 /// Default location of the configuration.
 pub const DEFAULT_PATH: &str = "/etc/p-rover.toml";
 
 /// The configuration.
 #[derive(Clone, Debug, Default, Deserialize)]
-#[serde(default)]
+#[serde(default, deny_unknown_fields)]
 pub struct Config {
     /// Interface name globs of the fieldbus.
     pub fieldbus_interfaces: Vec<String>,
@@ -29,23 +38,104 @@ pub struct Config {
 
 /// `[irq]`.
 #[derive(Clone, Debug, Default, Deserialize)]
-#[serde(default)]
+#[serde(default, deny_unknown_fields)]
 pub struct IrqConfig {
     /// IRQ name glob to the expected affinity (a CPU list).
     pub expected: BTreeMap<String, String>,
 }
 
-/// `[probe]`.
+/// `[probe]`. Only `ledger_dir` is used by the observe subcommands; the rest is
+/// read and checked now so a configuration written for the probes is not refused.
 #[derive(Clone, Debug, Deserialize)]
-#[serde(default)]
+#[serde(default, deny_unknown_fields)]
 pub struct ProbeConfig {
+    /// Comm regexes that make every probe refuse.
+    pub guard_processes: Vec<String>,
+    /// Paths whose existence makes every probe refuse.
+    pub guard_paths: Vec<PathBuf>,
     /// Where probe ledgers live; an unrestored one is a finding of every subcommand.
     pub ledger_dir: PathBuf,
+    /// `[probe.jitter]`.
+    pub jitter: JitterConfig,
+    /// `[probe.nic_sweep]`.
+    pub nic_sweep: NicSweepConfig,
 }
 
 impl Default for ProbeConfig {
     fn default() -> Self {
-        Self { ledger_dir: PathBuf::from("/run/p-rover/probe") }
+        Self {
+            guard_processes: Vec::new(),
+            guard_paths: Vec::new(),
+            ledger_dir: PathBuf::from("/run/p-rover/probe"),
+            jitter: JitterConfig::default(),
+            nic_sweep: NicSweepConfig::default(),
+        }
+    }
+}
+
+/// `[probe.jitter]`.
+#[derive(Clone, Debug, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct JitterConfig {
+    /// Longest run accepted (`"5m"`).
+    pub max_duration: String,
+    /// SCHED_FIFO priority.
+    pub priority: u8,
+    /// cyclictest interval.
+    pub interval_us: u32,
+    /// Count samples over this latency.
+    pub threshold_us: u32,
+}
+
+impl Default for JitterConfig {
+    fn default() -> Self {
+        Self { max_duration: "5m".into(), priority: 80, interval_us: 1000, threshold_us: 100 }
+    }
+}
+
+/// `[probe.nic_sweep]`.
+#[derive(Clone, Debug, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct NicSweepConfig {
+    /// `[sender, receiver]`; empty: the probe refuses.
+    pub pair: Vec<String>,
+    /// Longest whole sweep.
+    pub max_duration: String,
+    /// One cell.
+    pub cell_duration: String,
+    /// Longest one cell.
+    pub cell_max_duration: String,
+    /// `quick` or `full`.
+    pub matrix: String,
+    /// RT hog priority.
+    pub hog_priority: u8,
+    /// The small ring size.
+    pub ring_small: u32,
+    /// The coalescing setting under test.
+    pub coalesce_us: u32,
+    /// Frames per second.
+    pub freq_hz: u32,
+    /// Frames per burst.
+    pub burst: u32,
+    /// Frame size.
+    pub frame_bytes: u32,
+}
+
+impl Default for NicSweepConfig {
+    fn default() -> Self {
+        Self {
+            pair: Vec::new(),
+            max_duration: "10m".into(),
+            cell_duration: "5s".into(),
+            cell_max_duration: "30s".into(),
+            matrix: "quick".into(),
+            hog_priority: 90,
+            ring_small: 256,
+            coalesce_us: 50,
+            freq_hz: 2000,
+            burst: 16,
+            frame_bytes: 128,
+        }
     }
 }
 
@@ -69,19 +159,16 @@ impl IrqExpectation {
 
 impl Config {
     /// Loads `path`, or [`DEFAULT_PATH`] when `None`. A missing default file
-    /// is the default configuration; a missing explicit file is an error.
+    /// is the default configuration; a missing explicit file is an error. The
+    /// file is read by `p_act::settings`: a regular file, owned by root or
+    /// the running user, not writable by group or others, no unknown key.
     ///
     /// # Errors
-    /// When the file cannot be read, is not valid TOML, or holds an invalid glob or CPU list.
+    /// When the file is refused, is not valid TOML, or holds an invalid glob or CPU list.
     pub fn load(path: Option<&Path>) -> Result<Self, Error> {
         let (p, explicit) = path.map_or((Path::new(DEFAULT_PATH), false), |p| (p, true));
         let fail = |detail: String| Error::Config { path: p.display().to_string(), detail };
-        let text = match std::fs::read_to_string(p) {
-            Ok(t) => t,
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound && !explicit => return Ok(Self::default()),
-            Err(e) => return Err(fail(e.to_string())),
-        };
-        let cfg: Self = toml::from_str(&text).map_err(|e| fail(e.to_string()))?;
+        let cfg = if explicit { read_toml(p)? } else { read_toml_optional(p)?.unwrap_or_default() };
         cfg.irq_expectations().map_err(fail)?;
         Ok(cfg)
     }
@@ -115,6 +202,8 @@ mod tests {
         let d = tempfile::tempdir().unwrap();
         let p = d.path().join("c.toml");
         std::fs::write(&p, text).unwrap();
+        // The reader refuses a file others can write: set the mode, do not lean on the umask.
+        std::fs::set_permissions(&p, std::os::unix::fs::PermissionsExt::from_mode(0o644)).unwrap();
         Config::load(Some(&p))
     }
 
@@ -136,6 +225,7 @@ mod tests {
     fn bad_values_are_errors() {
         assert!(load("[irq]\nexpected={\"a\"=\"x\"}").is_err());
         assert!(load("fieldbus_interfaces = 3").is_err());
+        assert!(load("typo_key = 1").is_err(), "unknown keys are refused");
         assert!(Config::load(Some(Path::new("/nonexistent/p-rover.toml"))).is_err());
     }
 }
