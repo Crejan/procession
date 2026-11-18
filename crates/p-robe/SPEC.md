@@ -198,6 +198,23 @@ are owned by root and cannot be written by group or others (`tool-unusable`). **
 at build time; never a setting: the dispatcher runs it as root, so nothing an account can edit may name it),
 installed beside `probe` by the roll-out. `sys kit` reports the path and, if it cannot be run, a warning. `rt jitter` stays unbuilt.
 
+**`host_text` through sudo (decided, to build).** A row whose output can carry text that is not the service's (`rt procs`,
+`rt irq`, `test read`, `sys kit`; later `run command`; not `rt jitter`) is marked `host_text: true` in the table, in
+`probe catalog` and in the tool's description. The request carries the mark, signed with the rating, and it goes through sudo as
+the **fourth token of `--within`**: `--within open,none,none,text|plain`. Four tokens are required: a value of three is refused
+(64) so that an old caller fails clearly, and the sudoers line, which has `--within *`, does not change. The dispatcher refuses (64) a call whose row is marked
+when the approved value is `plain`, as it refuses one above the approved rating.
+
+**Every string the dispatcher passes on is escaped** (`p_ermit::text::escape`: a refused character becomes visible literal text,
+a backslash is escaped, never dropped), at any depth, for every verb, whatever the tool did. A record with an escaped string has
+`"escaped": true`; the trailer counts such records by the dispatcher's own count, and gives the tool's `escaped_records` too when they differ. Each string field is clipped at **1024 bytes of escaped
+output** with `"clipped": {"<field>": <full length in bytes>}` on its record (a second, tighter bound than `prover`'s own; a field a row declares as content, such as
+the bytes `test read` returns, has the row's own limit and is data in a field, never spliced into anything). So a worst-case thread record is about 3 KB and **about 340 of them still
+fill the 1 MiB answer**: on a host with a process built to do that the answer is truncated, its trailer has the true counts, and that is the bound, not a fault.
+
+**What the dispatcher does not check:** that the action and parameters are the approved ones; it checks the rating (it re-rates a call's paths where it opens
+the files), the deadline, the call identifier and, with the above, `host_text`. That is accepted (`doc/approvals.md`, the trust table).
+
 The first table (`src/main.rs`); the ratings are proposals:
 
 | Verb | Runs | Exposure | Damage | Disruption |
@@ -232,7 +249,9 @@ nothing else.
      identifier before;
    - the clearance is a valid signature over this request, by the key the
      site CA certified as `broker`, and not older than 60 seconds (not in
-     stage 1).
+     stage 1), **and it names the approval this service holds**: the clearance's
+     `approval` is the hash of that approval's bytes (p-act's `verify_clearance`
+     takes the approval); a clearance for another approval is no clearance.
 5. It runs the dispatcher and returns its output to the agent.
 
 At the deadline without an approval it answers the agent's call with
