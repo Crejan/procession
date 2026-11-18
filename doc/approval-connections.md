@@ -406,6 +406,14 @@ one, then every request that waited (below). On failure: `error` with `signin`
 (or `blocked` for a person or a key that is blocked, after the signature
 verified), and close.
 
+**Between `hello` and a completed sign-in a peer hears one answer whatever it
+sends**: `error` with `signin`, and the close. That holds for a message of a
+type the broker does not know, for one that is not expected here, and for a
+line that is not JSON; `malformed-line` is not said in this phase, so that
+nobody who has not signed in can sound out what the broker understands. (A
+line that is too long is still `line-too-long`, and silence is still
+`timeout`.)
+
 A person has one live connection per connection key. A second sign-in with the
 same key closes the first with `superseded`.
 

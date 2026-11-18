@@ -295,6 +295,11 @@ local service ────┴──> service.sock ──────┤─ dialo
                                           └─ connection to the broker
 ```
 
+`pledge serve` binds the three sockets one after another and prints
+"serving" only when all three are bound. That line, or all three sockets
+taking a connection, is what anything that waits for pledge may rely on; one
+socket taking a connection says nothing about the others.
+
 - **The process that holds the keys parses nothing.** Signing requests and
   requests are read and checked in a separate process without access to
   keys; the key holder receives what to sign and with which key. This keeps
