@@ -194,6 +194,25 @@ functional_users = ["build"]
 alice = "alice.smith@example.org"   # wins over the recipient template
 ```
 
+### The configuration file is checked
+
+The file is read by `p-ermit`. p-usher runs with privileges, so a config
+somebody else could edit would let them steer it. **Refused now, read
+before:**
+
+- a file that group or others can write (`chmod 644` or `600` is fine, `664`
+  and `666` are refused);
+- a file owned by neither root nor the user running p-usher;
+- anything that is not a regular file (a directory, a FIFO, a device);
+- a file over 1 MiB;
+- a file with a byte order mark, or that is not UTF-8.
+
+Also, an error no longer prints the offending line of the file: it says what
+is wrong and where (line and column). A missing `/etc/p-usher.toml` is still
+fine; a missing file named with `--config` is still an error. The unit and
+the install command above (`install -m 644`, root-owned) already satisfy all
+of this.
+
 ## Building
 
 The `email` feature (on by default) pulls in lettre with rustls. Use
