@@ -1042,7 +1042,7 @@ mod tests {
             )
         };
         let json = format!(
-            r#"{{"persons":[{},{{"name":"off","enabled":false}},{}],"hosts":[{{"name":"a.example","key":"{}"}}]}}"#,
+            r#"{{"v":1,"persons":[{},{{"name":"off","enabled":false}},{}],"hosts":[{{"name":"a.example","key":"{}"}}]}}"#,
             person("jan", 1),
             person("eva", 9),
             key_line(30)

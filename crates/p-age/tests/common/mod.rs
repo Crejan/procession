@@ -158,7 +158,7 @@ impl World {
             )
         };
         let json = format!(
-            r#"{{"persons":[{},{}],"hosts":[{{"name":"a.example","key":"{}"}}]}}"#,
+            r#"{{"v":1,"persons":[{},{}],"hosts":[{{"name":"a.example","key":"{}"}}]}}"#,
             person("jan", &jan_connection, &jan_delegation, &jan_confirmed, &jan_automatic),
             person("eva", &eva_connection, &eva_delegation, &eva_confirmed, &eva_automatic),
             keys.public(&host_key)

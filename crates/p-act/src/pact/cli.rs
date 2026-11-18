@@ -210,13 +210,13 @@ fn cmd_call(options: &Options) -> Result<(), String> {
         _ => return Err("call takes a tool name and at most one JSON argument".into()),
     };
     let ctx = context(options)?;
-    println!("{}", call_once(&ctx, tool, &arguments));
+    println!("{}", super::canon::line(&call_once(&ctx, tool, &arguments)));
     Ok(())
 }
 
 fn cmd_tools(options: &Options) -> Result<(), String> {
     let ctx = context(options)?;
     let tools = ctx.catalogue.read().map_err(|_| "poisoned")?.to_mcp();
-    println!("{tools}");
+    println!("{}", super::canon::line(&tools));
     Ok(())
 }

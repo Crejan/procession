@@ -18,6 +18,10 @@ default = ["formats"]
 formats = ["dep:base64", "dep:serde", "dep:serde_json", "dep:ring", "dep:tempfile", "dep:thiserror"]
 # The agent-side signer `pact` (proposals/pact.md): the library the binary is made of, and the binary.
 pact = ["formats", "dep:ureq"]
+# For tests only, never for a release: turns on `serde_json`'s `preserve_order` for the whole build, which any crate
+# of a workspace can do to everyone. `cargo test -p p-act --features guard-preserve-order` fails if anything in `p-act`
+# depends on the order of a JSON map (see the report on member order).
+guard-preserve-order = ["formats", "serde_json/preserve_order"]
 # TOML settings files (`p_act::settings::read_toml`): `toml` 0.9 and `serde`, and nothing of `formats`. Off by default.
 toml = ["dep:toml", "dep:serde"]
 # TLS for `pact`'s HTTP client (stage 2). Without it `pact` speaks plain http only.

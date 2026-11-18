@@ -91,7 +91,7 @@ struct Out(Mutex<Box<dyn Write + Send>>);
 
 impl Out {
     fn send(&self, message: &Value) {
-        let mut line = message.to_string().into_bytes();
+        let mut line = super::canon::bytes(message);
         line.push(b'\n');
         if let Ok(mut w) = self.0.lock() {
             // A client that has gone is noticed by the reader; there is nobody to tell here.
@@ -154,13 +154,13 @@ pub fn serve(ctx: &Arc<Context>, input: impl Read, output: impl Write + Send + '
                 };
                 let token = CancelToken::default();
                 if let Ok(mut m) = inflight.lock() {
-                    m.insert(id.to_string(), token.clone());
+                    m.insert(super::canon::line(&id), token.clone());
                 }
                 let (ctx, out, inflight) = (Arc::clone(ctx), Arc::clone(&out), Arc::clone(&inflight));
                 workers.push(std::thread::spawn(move || {
                     let result = call(&ctx, &out, &name, &params, &token);
                     if let Ok(mut m) = inflight.lock() {
-                        m.remove(&id.to_string());
+                        m.remove(&super::canon::line(&id));
                     }
                     // A cancelled request gets no response (MCP, cancellation).
                     if !token.is_cancelled() {
@@ -170,7 +170,7 @@ pub fn serve(ctx: &Arc<Context>, input: impl Read, output: impl Write + Send + '
             }
             ("notifications/cancelled", None) => {
                 if let (Some(rid), Ok(m)) = (params.get("requestId"), inflight.lock())
-                    && let Some(t) = m.get(&rid.to_string())
+                    && let Some(t) = m.get(&super::canon::line(rid))
                 {
                     t.cancel();
                 }

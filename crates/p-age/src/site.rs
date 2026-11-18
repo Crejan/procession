@@ -24,6 +24,10 @@ pub enum SiteError {
     BadKey { what: &'static str, name: String, source: SignError },
     #[error("`{0}` appears twice")]
     Duplicate(String),
+    #[error("the site file is version {0}, which this broker does not know")]
+    Version(u32),
+    #[error("members of group `{group}`: {why}")]
+    BadMembers { group: String, why: String },
     #[error("`verified_on` of `{name}` is not a date (YYYY-MM-DD): {value}")]
     BadDate { name: String, value: String },
     #[error("`{0}` is not enabled and has keys: the view the broker is given has none for a person who is not enabled")]
@@ -88,8 +92,25 @@ struct HostFile {
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct SiteFile {
+    /// The version of the file's format: 1. An unknown one is refused.
+    v: u32,
     persons: Vec<PersonFile>,
     hosts: Vec<HostFile>,
+    /// Who is in which group: group -> logins. **Absent is not empty**: absent means the members are the
+    /// directory's, to come from the sync job; `{}` means nobody is in any group. `null` is refused, so that the
+    /// two cannot be confused by a writer.
+    #[serde(default, deserialize_with = "present")]
+    members: Option<BTreeMap<String, Vec<String>>>,
+}
+
+/// A member that is there is read as what it is; one that is not there stays `None`. `null` is an error (it would
+/// otherwise read as absent).
+fn present<'de, D, T>(d: D) -> Result<Option<T>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: Deserialize<'de>,
+{
+    T::deserialize(d).map(Some)
 }
 
 /// A person's four keys: the purposes are a closed vocabulary, each exactly once, and four different keys.
@@ -121,6 +142,9 @@ pub struct Person {
 pub struct Site {
     persons: BTreeMap<String, Person>,
     hosts: BTreeMap<String, PublicKey>,
+    /// Who is in which group, in **three states**: `None` (the file has no `members`: the directory's, to come from
+    /// the sync job), `Some` of an empty map (nobody is in any group) and `Some` of groups with logins.
+    members: Option<BTreeMap<String, Vec<String>>>,
 }
 
 fn key(what: &'static str, name: &str, line: &str) -> Result<PublicKey, SiteError> {
@@ -129,7 +153,7 @@ fn key(what: &'static str, name: &str, line: &str) -> Result<PublicKey, SiteErro
 
 impl Site {
     /// Read the site file: JSON, one object, an unknown member refused, the file refused if anyone but its owner or
-    /// root can write it (`p_act::settings`). `{"persons":[{"name","enabled","keys":{"confirmed":{"key"},"automatic":…,
+    /// root can write it (`p_act::settings`). `{"v":1,"persons":[{"name","enabled","keys":{"confirmed":{"key"},"automatic":…,
     /// "delegation":…,"connection":…}}],"hosts":[{"name","key"}]}`.
     pub fn read(path: &Path) -> Result<Site, SiteError> {
         Site::from_file(p_act::settings::read(path)?)
@@ -141,6 +165,9 @@ impl Site {
     }
 
     fn from_file(file: SiteFile) -> Result<Site, SiteError> {
+        if file.v != 1 {
+            return Err(SiteError::Version(file.v));
+        }
         let mut site = Site::default();
         for p in file.persons {
             if !valid_name(&p.name) {
@@ -214,6 +241,32 @@ impl Site {
                 return Err(SiteError::Duplicate(h.name));
             }
         }
+        if let Some(members) = file.members {
+            let mut checked = BTreeMap::new();
+            for (group, logins) in members {
+                let bad = |why: &str| SiteError::BadMembers { group: group.clone(), why: why.to_owned() };
+                // A group name is whatever a standing may carry as one, and a member is a person of the file.
+                let probe = StandingContent {
+                    to: "probe".to_owned(),
+                    nonce: [0; 32],
+                    n: 0,
+                    blocked: false,
+                    blocked_keys: Vec::new(),
+                    withdrawn: Vec::new(),
+                    certificates: Vec::new(),
+                    groups: vec![group.clone()],
+                };
+                Standing::compose(&probe).map_err(|_| bad("not a group name"))?;
+                let mut logins = logins;
+                logins.sort_unstable();
+                logins.dedup();
+                if let Some(unknown) = logins.iter().find(|l| !site.persons.contains_key(*l)) {
+                    return Err(bad(&format!("`{unknown}` is not a person of the file")));
+                }
+                checked.insert(group, logins);
+            }
+            site.members = Some(checked);
+        }
         // No key is another person's, and none is a host's.
         let mut seen: BTreeMap<String, String> = BTreeMap::new();
         for (name, person) in &site.persons {
@@ -232,6 +285,20 @@ impl Site {
             }
         }
         Ok(site)
+    }
+
+    /// Who is in which group, if the file says: `None` is **absent** (the directory's, from the sync job), `Some` of an
+    /// empty map is **nobody in any group**. They are never the same.
+    #[must_use]
+    pub fn members(&self) -> Option<&BTreeMap<String, Vec<String>>> {
+        self.members.as_ref()
+    }
+
+    /// Whether `person` is in `group`. **No when the file has no `members` part** (and no sync result exists yet):
+    /// a broker that does not know who is in a group answers no (R10).
+    #[must_use]
+    pub fn in_group(&self, person: &str, group: &str) -> bool {
+        self.members.as_ref().and_then(|m| m.get(group)).is_some_and(|logins| logins.iter().any(|l| l == person))
     }
 
     /// Every person's name.

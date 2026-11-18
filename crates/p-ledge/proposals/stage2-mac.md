@@ -185,6 +185,49 @@ The first five decide the design; do them before anything is built.
 | 15 | Add a finger in System Settings; sign with a `.biometryAny` key and a `.biometryCurrentSet` key made before. | The first still signs, the second is dead. |
 | 16 | Restart the Mac, log in, sign with each key before any Touch ID use. | Which keys sign, and whether the presence key asks for the password first. |
 
+### 1.6 Results of the hand checks
+
+Run by the owner on his Mac on 2026-11-18 with
+`stage2-mac-checks/sechecks.swift`; relayed by the designer. These are his
+observations. The table in `stage2-mac-checks/README.md` has them row by
+row. Not yet run: checks 1, 2, 4, 5 and the rest.
+
+| Check | Observed | What it settles |
+|---|---|---|
+| 0 (making the keys) | Five keys made (no presence, "after first unlock" and "when unlocked"; `.biometryAny`; `.userPresence`; `.biometryCurrentSet`), each with a public key line and a blob file. No prompt while making. No entitlement error | A program that is ad-hoc signed, with no bundle and no entitlement, can make and use Secure Enclave keys through CryptoKit. The **[U]** of section 4.2 about a program without an app bundle is answered for making keys and for raising the prompt (3b) |
+| 3a (a copied blob, another program, no presence) | `sechecks-other: SIGNED plain after 0.0 s`, no prompt | The **[U]** of section 1.1 is answered as expected: another program of the same user loads a copied blob and signs. A key without a presence check is exactly as protected as its blob file |
+| 3b (a copied blob, another program, Touch ID) | A Touch ID prompt that named the other program and carried its words; after the touch, `SIGNED touch after 2.6 s` | The presence check holds for a copied blob: no signature without the touch. But any program of the person can raise that prompt, under its own name and with its own text |
+
+**Decided on this (question 2):** blobs in files for stage 2, said plainly;
+the keychain with an access group is a step of its own before a site.
+
+Two consequences, both the designer's:
+
+1. **The blob files' mode and their directory are the only protection of
+   the keys without a presence check** (automatic approval, connection,
+   bound). So they follow the strictest file rule the workspace has. In
+   p-ledge that is `check_private` in `src/paths.rs`, which `KeyStore::open`
+   in `src/holder.rs` already applies to key files: not a symlink, owned by
+   this user, no permission for anyone else (0700 for the directory, 0600
+   for the file), and a key holder that refuses to start otherwise. The
+   Secure Enclave holder applies the same to its blobs, before every use
+   and not only when it starts. What this does not stop is another program
+   of the same user: check 3a is that case, and the rule cannot reach it.
+   It is what the threat table's row "malware in the person's session"
+   leaves, now observed and not only assumed.
+2. **The Touch ID prompt's text is the person's only way to see who asks.**
+   The system puts the asking program's name on the prompt (3b); the rest
+   is that program's own words. So pledge's key holder always puts its own
+   fixed words first, before anything that comes from a request, a login
+   or a delegation, and never lets such a field come before them or stand
+   alone. A prompt from any other program then differs in the name the
+   system shows and cannot be given pledge's name; a person who knows the
+   fixed words and the name can tell. Check 5 will say how much room the
+   prompt has; the fixed words must fit in what is always shown. This
+   narrows question 10's answer: the words there (service, host, action)
+   come after the fixed ones. It also makes the key holder's program name
+   matter: it is what the system shows (section 8.6, last paragraph).
+
 ## 2. The presence check
 
 ### 2.1 What a confirmed approval needs
@@ -291,9 +334,9 @@ stolen machine, says so now; what bounds it there is the delegation's end
 and the administrator's block.
 
 A consequence to state plainly: a key without presence in a blob file is as
-strong as the file. If check 3 shows that any program of the person can
-load the blob, then on a Mac the automatic approval key is protected
-against being carried off the machine and against nothing else. The threat
+strong as the file. Check 3a showed that any program of the person can
+load the blob (section 1.6), so on a Mac the automatic approval key is
+protected against being carried off the machine and against nothing else. The threat
 table already lists "Malware in the person's session: automatic approvals"
 as what remains.
 
@@ -752,7 +795,7 @@ them.
 | # | Question | Stands | What was said |
 |---|---|---|---|
 | 1 | Password in place of Touch ID | decided, by the owner | Touch ID only (`.biometryAny`) for confirmed approvals and delegations. A Mac that cannot offer Touch ID makes no confirmed approval. The shared key keeps Touch ID or password |
-| 2 | Blob in a file, or keychain with an access group | decided | After check 3, as recommended. `SPEC.md` section 11 is marked accordingly by the designer |
+| 2 | Blob in a file, or keychain with an access group | decided, after check 3 | Check 3 came out as expected (section 1.6). Blobs in files for stage 2, said plainly; the keychain with an access group is a step of its own before a site. `SPEC.md` section 11 and the threat table carry the designer's record of it |
 | 3 | One key holder or two | decided | Two: one for keys with a presence check, one for keys without |
 | 4 | Does a locked screen stop automatic approvals | decided, by the owner | It does not. The automatic key is "after first unlock". The threat table of `doc/approvals.md` (the row on a stolen machine) says so, bounded by the delegation's end and the administrator's block |
 | 5 | Dialog and touch as one step | decided | One step: the Touch ID prompt is raised with the dialog and the touch is the yes. Keys in files keep today's two steps. The limits (one dialog at a time, the queue limit, muting after declines) apply unchanged |
