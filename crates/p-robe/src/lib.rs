@@ -12,6 +12,7 @@ pub mod certificate;
 pub mod clock;
 pub mod config;
 pub mod dispatch;
+pub mod http;
 pub mod json;
 pub mod kit;
 pub mod lock;
