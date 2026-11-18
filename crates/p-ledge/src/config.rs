@@ -155,8 +155,34 @@ mod tests {
     fn load(text: &str) -> Result<Config> {
         let dir = TestDir::new("config");
         let path = dir.path().join("config.json");
-        fs::write(&path, text).expect("write");
+        crate::testing::write_settings(&path, text);
         Config::load(&path)
+    }
+
+    /// The premise of the umask tests: under `umask 002` a plain `fs::write` is 0664.
+    #[test]
+    fn umask_child_premise() {
+        if std::env::var_os("PLEDGE_UMASK_CHILD").is_none() {
+            return;
+        }
+        use std::os::unix::fs::PermissionsExt;
+        let dir = TestDir::new("config-umask");
+        let path = dir.path().join("plain");
+        fs::write(&path, "{}").expect("write");
+        assert_eq!(fs::metadata(&path).expect("meta").permissions().mode() & 0o777, 0o664);
+        assert!(matches!(Config::load(&path), Err(Error::Corrupt { .. })), "and that file is refused");
+    }
+
+    #[test]
+    fn the_files_the_tests_write_do_not_lean_on_the_umask() {
+        if std::env::var_os("PLEDGE_UMASK_CHILD").is_some() {
+            return;
+        }
+        crate::testing::run_under_umask_002(&[
+            "config::tests::umask_child_premise",
+            "config::tests::a_full_configuration_loads_and_finds_the_host_key",
+            "approvals_tests::a_harmless_request_is_approved_with_the_automatic_key_and_without_asking",
+        ]);
     }
 
     #[test]

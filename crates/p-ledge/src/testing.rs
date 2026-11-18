@@ -51,6 +51,29 @@ fn can_bind_socket(dir: &Path) -> bool {
     ok
 }
 
+/// Writes a settings file the way pledge's rules want one: mode 0600, whatever the umask says.
+#[cfg(test)]
+pub(crate) fn write_settings(path: &Path, text: &str) {
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::write(path, text).expect("write settings");
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600)).expect("chmod settings");
+}
+
+/// Runs the named tests of this binary in a child process under `umask 002` (what a system account or a
+/// shared-group setup often has), where a file made by `fs::write` is 0664. A process-wide umask in
+/// the test process itself would disturb the tests running beside it.
+#[cfg(test)]
+pub(crate) fn run_under_umask_002(tests: &[&str]) {
+    let exe = std::env::current_exe().expect("exe");
+    let mut args: Vec<String> =
+        vec!["-c".into(), "umask 002; exec \"$0\" --test-threads=1 --exact \"$@\"".into(), exe.display().to_string()];
+    args.extend(tests.iter().map(|t| (*t).to_owned()));
+    let out = std::process::Command::new("sh").args(&args).env("PLEDGE_UMASK_CHILD", "1").output().expect("sh");
+    let text = format!("{}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
+    assert!(out.status.success(), "under umask 002: {text}");
+    assert!(text.contains(&format!("{} passed", tests.len())), "every test ran: {text}");
+}
+
 #[cfg(test)]
 pub(crate) use rig::Rig;
 

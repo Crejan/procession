@@ -80,6 +80,25 @@ impl Sink for File {
 /// second `pledge serve` holds it for as long as it runs and is refused after the wait.
 pub const LOCK_WAIT: std::time::Duration = std::time::Duration::from_secs(2);
 
+/// What a failed `flock` means.
+#[derive(Debug, PartialEq, Eq)]
+enum LockFailure {
+    /// Somebody holds it (`EWOULDBLOCK`): worth waiting for.
+    Held,
+    /// A signal came in: try again at once.
+    Interrupted,
+    /// Anything else (`ENOLCK`, `EOPNOTSUPP`, ...): this will not go away by waiting.
+    Unsupported,
+}
+
+fn classify(errno: Option<i32>) -> LockFailure {
+    match errno {
+        Some(e) if e == libc::EWOULDBLOCK || e == libc::EAGAIN => LockFailure::Held,
+        Some(libc::EINTR) => LockFailure::Interrupted,
+        _ => LockFailure::Unsupported,
+    }
+}
+
 fn lock(file: &File, path: &Path, wait: std::time::Duration) -> Result<()> {
     let until = std::time::Instant::now() + wait;
     loop {
@@ -87,10 +106,25 @@ fn lock(file: &File, path: &Path, wait: std::time::Duration) -> Result<()> {
         if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } == 0 {
             return Ok(());
         }
-        if std::time::Instant::now() >= until {
-            return Err(Error::Locked(path.to_owned()));
+        let error = std::io::Error::last_os_error();
+        match classify(error.raw_os_error()) {
+            LockFailure::Interrupted => {}
+            LockFailure::Held => {
+                if std::time::Instant::now() >= until {
+                    return Err(Error::Locked(path.to_owned()));
+                }
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+            LockFailure::Unsupported => {
+                return Err(Error::Io {
+                    context: format!(
+                        "the file system of {} does not support the lock (flock) that keeps a second pledge serve out of the record; put the state directory on a local file system",
+                        path.display()
+                    ),
+                    source: error,
+                });
+            }
         }
-        std::thread::sleep(std::time::Duration::from_millis(10));
     }
 }
 
@@ -431,6 +465,17 @@ mod tests {
             matches!(Record::open_waiting(&path, at(NOW), std::time::Duration::ZERO), Err(Error::Locked(_))),
             "the new file is locked"
         );
+    }
+
+    #[test]
+    fn only_a_held_lock_is_worth_waiting_for() {
+        assert_eq!(classify(Some(libc::EWOULDBLOCK)), LockFailure::Held);
+        assert_eq!(classify(Some(libc::EAGAIN)), LockFailure::Held);
+        assert_eq!(classify(Some(libc::EINTR)), LockFailure::Interrupted);
+        for errno in [libc::ENOLCK, libc::EOPNOTSUPP, libc::EBADF, libc::EINVAL] {
+            assert_eq!(classify(Some(errno)), LockFailure::Unsupported, "{errno}");
+        }
+        assert_eq!(classify(None), LockFailure::Unsupported);
     }
 
     #[test]

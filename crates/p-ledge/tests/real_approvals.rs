@@ -60,7 +60,9 @@ fn start(name: &str, services: bool) -> Server {
         if services {
             config["services"] = json!([{"host": "a.example", "name": "probe", "url": "http://127.0.0.1:8443/mcp"}]);
         }
+        // Mode 0600 whatever the umask: pledge refuses a settings file others can write.
         fs::write(state.join("config.json"), config.to_string()).expect("config");
+        fs::set_permissions(state.join("config.json"), fs::Permissions::from_mode(0o600)).expect("chmod");
     })
 }
 
@@ -363,4 +365,23 @@ fn a_kill_with_a_dialog_open_leaves_received_and_the_next_start_records_lost() {
     // The text output carries the legend on standard error.
     let out = server.pledge(&["history"]);
     assert!(text(&out).contains("`approved` means this machine signed"), "{}", text(&out));
+}
+
+/// The same stage-1 run under `umask 002`, as a system account or a shared-group setup has it: the
+/// files this harness writes, and the files pledge writes, must not lean on the umask.
+#[test]
+fn the_harness_and_pledge_do_not_lean_on_the_umask() {
+    if std::env::var_os("PLEDGE_UMASK_CHILD").is_some() {
+        return;
+    }
+    let exe = std::env::current_exe().expect("exe");
+    let out = Command::new("sh")
+        .args(["-c", "umask 002; exec \"$0\" --test-threads=1 --exact \"$@\"", exe.to_str().expect("path")])
+        .arg("a_bundle_from_agents_start_signs_calls_pledge_approves_and_the_record_holds")
+        .arg("agents_start_refuses_without_services_and_a_delegation_it_could_not_deliver_never_exists")
+        .env("PLEDGE_UMASK_CHILD", "1")
+        .output()
+        .expect("sh");
+    let all = format!("{}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
+    assert!(out.status.success() && all.contains("2 passed"), "under umask 002: {all}");
 }

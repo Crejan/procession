@@ -126,7 +126,7 @@ impl Lab {
         let rig = Rig::live([], move |dir| {
             let mut config = json!({"person": "jan", "hosts": [{"host": "a.example", "key": host}]});
             config.as_object_mut().expect("object").extend(extra.as_object().expect("object").clone());
-            std::fs::write(dir.join("config.json"), config.to_string()).expect("config");
+            crate::testing::write_settings(&dir.join("config.json"), &config.to_string());
         });
         for purpose in ["delegation", "confirmed", "automatic"] {
             rig.shared

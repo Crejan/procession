@@ -706,3 +706,32 @@ captures and drops stderr sees only "agent.sock does not answer".
   108 bytes (`TestDir` picks short paths), a directory made 0755 by a harness, a file system
   without `flock`, a hidepid `/proc`, a noexec temp directory.
 Awaiting the owner's own stderr before anything is changed.
+
+## Linux, as the owner ran it (2026-11-18), and three small fixes
+
+**Owner's run, relayed by the designer (not run by me):** on Debian 13 (unprivileged LXC)
+`pledge serve` run by hand as `probe-svc` came up and served; `cargo test -p p-ledge` as
+root: 173 unit, 4 `real_approvals`, 6 `real_programs` passed, 0 failed. The sshd login test
+was not in strict mode (`PLEDGE_REQUIRE_SSHD=1` not set), so on Linux it may have skipped:
+the sshd login is verified on macOS only. The earlier start failure was p-robe's harness
+writing `config.json` under umask 002 (mode 0664), which pledge rightly refuses.
+
+1. `flock` failures: only `EWOULDBLOCK`/`EAGAIN` means another holder and is waited for
+   (2 s); `EINTR` retries at once; anything else (`ENOLCK`, `EOPNOTSUPP`, ...) fails at once
+   as an I/O error that says the file system does not support the lock and to put the state
+   directory on a local one (`record.rs`, `classify`, tested for the mapping; not exercised on a
+   real file system without `flock`).
+2. A failing peer lookup after "serving" (`serve.rs`, `check_peer`): one line on stderr
+   (`pledge: <socket>: could not read the peer's credentials (...): the connection was dropped`,
+   or `a connection from user N (not this user) was dropped`); on `service.sock` the request is
+   handled without the credentials and the line says so. Not in the record: a record entry is
+   for a request or a decision, and whatever can connect (this user only, the directory is 0700)
+   could otherwise fill it. The peer is told nothing. Tested with a non-socket fd.
+3. The harness leaned on the umask in two places: `config.json` written with `fs::write` in
+   the approvals unit-test lab (`approvals_tests.rs`) and in `real_approvals.rs` (0664 under umask
+   002, refused). Fixed by writing settings files 0600 explicitly (`testing::write_settings`).
+   Tests: a unit test and an integration test each run the stage-1 tests in a child process under
+   `umask 002` (`sh -c 'umask 002; exec ...'`), with a premise test that a plain `fs::write` is
+   0664 there and is refused (the unit one failed before the fix). pledge's own files (record,
+   answers, delegations, programs, keys, sockets) already set their modes explicitly. Unit
+   177, integration 5 + 6 pass; clippy clean.

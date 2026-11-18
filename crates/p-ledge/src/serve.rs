@@ -138,20 +138,39 @@ fn bind_service_socket(paths: &Paths, group: Option<&str>) -> Result<UnixListene
 fn accept_service(shared: &Arc<Shared>, listener: &UnixListener) {
     for stream in listener.incoming().flatten() {
         // The door is the file mode; who connects is information, not a decision.
-        let peer = peer::peer(&stream).ok().map(|p| (p.uid, p.pid));
+        let peer = match peer::peer(&stream) {
+            Ok(p) => Some((p.uid, p.pid)),
+            Err(e) => {
+                eprintln!(
+                    "pledge: service socket: could not read the peer's credentials ({e}): the request is handled without them"
+                );
+                None
+            }
+        };
         let shared = Arc::clone(shared);
         thread::spawn(move || crate::service_conn::serve(&shared, stream, peer));
     }
 }
 
-/// Whether the peer of `stream` is this user.
-fn is_own(stream: &UnixStream) -> Option<peer::Peer> {
-    peer::peer(stream).ok().filter(|peer| peer.uid == own_uid())
+/// Whether the peer of `socket` is this user. `Err` says why not, for a line on stderr; the peer is
+/// told nothing. This is not a record entry: it is not a request, and anything that can connect
+/// (only this user can: the directory is 0700) could otherwise fill the record with them.
+fn check_peer<S: std::os::unix::io::AsRawFd>(socket: &S, which: &str) -> std::result::Result<peer::Peer, String> {
+    match peer::peer(socket) {
+        Ok(peer) if peer.uid == own_uid() => Ok(peer),
+        Ok(peer) => Err(format!("{which}: a connection from user {} (not this user) was dropped", peer.uid)),
+        Err(e) => Err(format!("{which}: could not read the peer's credentials ({e}): the connection was dropped")),
+    }
+}
+
+/// The peer of `stream` if it is this user; otherwise one line on stderr and `None`.
+fn is_own(stream: &UnixStream, which: &str) -> Option<peer::Peer> {
+    check_peer(stream, which).map_err(|why| eprintln!("pledge: {why}")).ok()
 }
 
 fn accept_agent(shared: &Arc<Shared>, listener: &UnixListener) {
     for stream in listener.incoming().flatten() {
-        let Some(peer) = is_own(&stream) else { continue };
+        let Some(peer) = is_own(&stream, "SSH agent socket") else { continue };
         let shared = Arc::clone(shared);
         thread::spawn(move || {
             let program = peer.pid.and_then(peer::program_path);
@@ -162,7 +181,7 @@ fn accept_agent(shared: &Arc<Shared>, listener: &UnixListener) {
 
 fn accept_control(shared: &Arc<Shared>, listener: &UnixListener) {
     for stream in listener.incoming().flatten() {
-        if is_own(&stream).is_none() {
+        if is_own(&stream, "control socket").is_none() {
             continue;
         }
         let shared = Arc::clone(shared);
@@ -235,6 +254,19 @@ mod tests {
             bind_service_socket(&grouped, Some("no-such-group-here")),
             Err(Error::Locked(_) | Error::Refused(_))
         ));
+    }
+
+    #[test]
+    fn a_peer_that_cannot_be_read_is_reported_and_not_accepted() {
+        // A regular file is not a socket: asking it for peer credentials fails.
+        let dir = TestDir::new("serve-peer");
+        let file = fs::File::create(dir.path().join("not-a-socket")).expect("file");
+        let why = check_peer(&file, "SSH agent socket").expect_err("not readable");
+        assert!(why.starts_with("SSH agent socket: could not read the peer's credentials"), "{why}");
+        assert!(why.ends_with("the connection was dropped"), "{why}");
+        // A socket pair's peer is this very process: accepted.
+        let (a, _b) = UnixStream::pair().expect("pair");
+        assert!(check_peer(&a, "control socket").is_ok());
     }
 
     #[test]
