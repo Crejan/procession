@@ -4,14 +4,17 @@ Status: a proposal by the p-ledge agent, for the designer. Nothing is built
 on it, no source file was changed, and nothing was run: no key was made, no
 Touch ID was asked for. Terms are those of `doc/approvals.md`, section 1.
 
-**The reference.** I was told to compare with Atticus on its branch
-`agent/key-roles`. That branch does not exist in
-`/Users/jancre/dev/ws/atticus-develop`: `git branch -a` lists `develop`,
-`main` and five remote branches, none of that name, and `git log --all`
-has no commit that names it. Everything below that says "Atticus" is the
-checked-out `develop` tree at `a1ada83`. What a branch about keys with
-separate purposes would have added is therefore not in this comparison;
-`develop` holds only the seam for it (section 5, row 9).
+**The reference.** Everything below that says "Atticus" is the tree
+`develop` of `/Users/jancre/dev/ws/atticus-develop` as it stands, at
+`a1ada83`. Besides the files, five commits on it were read with `git show`:
+
+| Commit | What it is | Bears on this proposal |
+|---|---|---|
+| `ee481a4` | the Touch ID prompt moves from accepting a connection to each signature; its words come from the parsed data and the verified host | section 2.1; section 5, rows 4, 6, 7, 8 |
+| `d534f23` | review fixes for that work: a host counts as verified only for a hostbound login to the bound key; quotation marks stripped from shown fields; the buffer bounded while a prompt is open | section 5, rows 8, 11, 27 |
+| `343f9c8` | a second key that only Atticus's own processes are offered | section 5, row 9 |
+| `f18f7f6` | the snapshot browser runs one restic at a time | nothing: no key, SSH agent or confirmation code in it |
+| `e869251` | the overview names an overdue backup | nothing, likewise |
 
 **How to read the claims.** Each technical claim carries one of three
 marks:
@@ -578,7 +581,7 @@ All paths are under `/Users/jancre/dev/ws/atticus-develop`, tree `develop`.
 | 6 | One confirmation per signature, held back until the data is parsed; later messages wait | `SSHAgent.Outcome.confirm`; `SSHAgentServer.swift`, `ClientConnection.drainMessages` | as is, already there | `src/agent_conn.rs` `decide`: `CheckPresence` before `holder.sign` |
 | 7 | The confirmation's words from the signed bytes and the verified host | `Sources/Engine/SSHSignDescription.swift`, `describe` | as is, already there | `describe()` in `src/dialog.rs` |
 | 8 | Cleaning and cutting what is shown (drop characters, 64 and "…", two names) | `SSHSignDescription.sanitize`; `AgentPolicy.sanitizeDisplayName` | not | R9: show whole or refuse |
-| 9 | A second key for Atticus's own processes, withheld from others | `SSHAgent.backupIdentityProvider`, `provider(for:)` in `Sources/Engine/SSHAgent.swift` | already there, differently | Declared and never assigned anywhere under `Sources/` in `develop`. p-ledge has it as purposes: bound and shared (`src/policy.rs`) |
+| 9 | A second key for Atticus's own processes, withheld from others | `SSHAgent.backupIdentityProvider`, `provider(for:)` in `Sources/Engine/SSHAgent.swift` | already there, differently | Commit `343f9c8`. The mechanism is there and tested; no key is assigned to it anywhere under `Sources/` ("with no backup key set, behaviour is unchanged"). A request for the withheld key is refused without a prompt, as rule 2 of `SPEC.md` section 3 does. p-ledge has it as purposes: bound and shared (`src/policy.rs`) |
 | 10 | Refusing SSHSIG in a reserved namespace on the SSH agent socket | `SSHAgent.Refusal.reservedNamespace` (`atticus-`) | as is, already there | Here every namespace ending in `@procession` |
 | 11 | Only user authentication and SSHSIG parse; session binding; forwarded connections refused; host named from `known_hosts` | `SSHSignContent.swift`, `SSHSessionBinding.swift`, `SSHHostKey.swift`, `SSHSignDescription.swift` | as is, already there | Step 1 ported them (`src/agent/`) |
 | 12 | A setting that lets unbound logins through with a warning | `SSHAgent.requireHostBinding` | not | `SPEC.md` section 3: "there is no setting for it" |
@@ -596,6 +599,7 @@ All paths are under `/Users/jancre/dev/ws/atticus-develop`, tree `develop`.
 | 24 | A secret readable only by its own signed programs, through a keychain access group | `SECURITY.md`, "Defenses in place" (the restic password) | as an idea | Atticus does not do this for its key, only for a password. It is the known way to make a key "usable only by pledge's key holder" (question 2) |
 | 25 | The setup turns shared connections off; the server limits sessions | `SECURITY.md`, "A confirmation covers one login" | as is | `SPEC.md` section 3 says the same |
 | 26 | A manual checklist for what tests cannot reach (Touch ID, signed builds) | `tests/MANUAL_CHECKLIST.md`, items 26 to 29 | as is, as a form | Section 1.5 is the start of pledge's |
+| 27 | The rules for a login (session binding, verified host) apply to other programs only; Atticus's own backup signs without them | commit `d534f23`; `SSHAgent.swift`, the `.silent` arm of the sign handler | not | A bound key is for one login, fixed by the host key (`SPEC.md` section 2), so it needs the verified host more than any other key |
 
 ## 6. Where it attaches in p-ledge
 
@@ -874,7 +878,12 @@ issue tracking and has nothing on the design),
 `SSHSignDescription.swift`, `Resources/Atticus.entitlements`. In part:
 `Sources/Engine/SSHAgent.swift` (lines 1 to 140),
 `SSHCertificateService.swift` and `Sources/CLI/SSHCertCLI.swift` (heads),
-`SECURITY.md` (lines 28 to 120). Only searched: `Makefile` (for code
+`SECURITY.md` (lines 28 to 120). Commits, with `git show`: the messages
+and file lists of `ee481a4`, `d534f23`, `343f9c8`, `f18f7f6` and
+`e869251`; of the first three also the changes to `SSHAgent.swift`,
+`SSHAgentServer.swift`, `AgentPolicy.swift`, `SSHSignDescription.swift`
+and `ServiceContainer.swift`, not those to the tests, the host key and
+session binding code or the views. Only searched: `Makefile` (for code
 signing), `tests/MANUAL_CHECKLIST.md`, `tests/AtticImportTest.swift`.
 Not read: `CLAUDE.md`, `README.md`, `SPEC.md`, `SSHSignContent.swift`,
 `SSHSessionBinding.swift`, `SSHHostKey.swift`, `SSHAgentForwarder.swift`,
@@ -884,7 +893,7 @@ Not read: `CLAUDE.md`, `README.md`, `SPEC.md`, `SSHSignContent.swift`,
 files I read and on `SECURITY.md`. No `secrets/` directory and no `.env`
 file was opened. Nothing there was changed, built or checked out; the
 commands were `git branch -a`, `git log --all --oneline`, `git status
---short`, and reading files.
+--short`, `git show`, and reading files.
 
 No Apple documentation and no header was looked up. Every **[D]** is from
 memory, every **[U]** is a belief. In particular not checked: the names
