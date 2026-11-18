@@ -37,7 +37,31 @@ pub enum StateError {
     Parse { path: String, source: serde_json::Error },
     #[error("{path} is version {v} of the register, which this broker does not know")]
     Version { path: String, v: u32 },
+    #[error(
+        "there is no register at {path}: a deleted file and a damaged one are the same doubt (`page init` makes the first)"
+    )]
+    Missing { path: String },
+    #[error("there is a register at {path} already; `page init` does not replace one")]
+    Exists { path: String },
 }
+
+/// Whether a change to the register reached the disk.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Stored {
+    Yes,
+    /// In force in memory, but the write failed: why.
+    No(String),
+}
+
+/// The broker could not write its register; it goes on from memory and tries again.
+#[derive(Debug, Clone)]
+struct Degraded {
+    why: String,
+    last_try: SystemTime,
+}
+
+/// A degraded broker tries the whole write again at least this often.
+const RETRY_EVERY: Duration = Duration::from_secs(60);
 
 /// The broker's settings.
 #[derive(Debug, Clone)]
@@ -163,6 +187,7 @@ pub struct Core {
     crypto: Arc<dyn Crypto>,
     log: Box<dyn LogSink>,
     seq: u64,
+    degraded: Option<Degraded>,
 }
 
 impl Core {
@@ -174,22 +199,33 @@ impl Core {
         crypto: Arc<dyn Crypto>,
         log: Box<dyn LogSink>,
     ) -> Core {
-        Core { site, settings, register, state_path, held: HashMap::new(), links: HashMap::new(), crypto, log, seq: 0 }
+        Core {
+            site,
+            settings,
+            register,
+            state_path,
+            held: HashMap::new(),
+            links: HashMap::new(),
+            crypto,
+            log,
+            seq: 0,
+            degraded: None,
+        }
     }
 
-    /// The register as kept on disk. No file is a first start: an empty register. A file that cannot be read
-    /// whole (not JSON, a version this broker does not know, readable by others, in a directory open to
-    /// others) is an error: the broker does not start in its place with an empty register, which would drop
-    /// the blocks without a word.
+    /// The register as kept on disk. A file that cannot be read whole (not JSON, a version this broker does not
+    /// know, readable by others, in a directory open to others) is an error, and so is **no file**: a deleted
+    /// file and a damaged one are the same doubt, and an empty register in their place would drop the blocks
+    /// without a word. The first start is [`Core::init_state`].
     pub fn read_state(path: &std::path::Path) -> Result<Register, StateError> {
+        let shown = path.display().to_string();
         if let Some(dir) = path.parent().filter(|d| !d.as_os_str().is_empty()) {
             perm::ensure_private_dir(dir)?;
         }
         if !path.exists() {
-            return Ok(Register::default());
+            return Err(StateError::Missing { path: shown });
         }
         perm::check_private_file(path)?;
-        let shown = path.display().to_string();
         let bytes = std::fs::read(path).map_err(|source| StateError::Read { path: shown.clone(), source })?;
         let snapshot: Snapshot =
             serde_json::from_slice(&bytes).map_err(|source| StateError::Parse { path: shown.clone(), source })?;
@@ -199,15 +235,66 @@ impl Core {
         Ok(Register::restore(snapshot))
     }
 
-    fn persist(&self) {
-        let Some(path) = &self.state_path else { return };
+    /// The first start: make the empty register. Refused if there is one.
+    pub fn init_state(path: &std::path::Path) -> Result<(), StateError> {
+        if let Some(dir) = path.parent().filter(|d| !d.as_os_str().is_empty()) {
+            perm::ensure_private_dir(dir)?;
+        }
+        if path.exists() {
+            return Err(StateError::Exists { path: path.display().to_string() });
+        }
+        let bytes = serde_json::to_vec(&Register::default().snapshot())
+            .map_err(|source| StateError::Parse { path: path.display().to_string(), source })?;
+        perm::replace_private_file(path, &bytes)
+            .map_err(|source| StateError::Read { path: path.display().to_string(), source })
+    }
+
+    /// Write the whole register. The first failure makes the broker degraded (and says so on standard error);
+    /// a success while degraded ends that. Every attempt is the whole write.
+    fn try_store(&mut self, now: SystemTime) -> Result<(), String> {
+        let Some(path) = &self.state_path else { return Ok(()) };
         let result = serde_json::to_vec(&self.register.snapshot())
             .map_err(std::io::Error::other)
-            .and_then(|bytes| perm::replace_private_file(path, &bytes));
-        // The broker goes on in memory, and says so: a refused request is worse than a register not yet on disk.
-        if let Err(e) = result {
-            eprintln!("page: cannot keep the register in {}: {e}", path.display());
+            .and_then(|bytes| perm::replace_private_file(path, &bytes))
+            .map_err(|e| e.to_string());
+        match (&result, self.degraded.is_some()) {
+            (Ok(()), true) => {
+                eprintln!("page: the register is stored again; no longer degraded");
+                self.degraded = None;
+            }
+            (Err(why), false) => {
+                eprintln!(
+                    "page: DEGRADED: the register cannot be stored in {}: {why}; going on from memory",
+                    path.display()
+                );
+                self.degraded = Some(Degraded { why: why.clone(), last_try: now });
+            }
+            (Err(why), true) => self.degraded = Some(Degraded { why: why.clone(), last_try: now }),
+            (Ok(()), false) => {}
         }
+        result
+    }
+
+    /// A change that restricts is in force at once; this stores it, and says whether that worked.
+    fn store_restriction(&mut self, now: SystemTime) -> Stored {
+        match self.try_store(now) {
+            Ok(()) => Stored::Yes,
+            Err(why) => Stored::No(why),
+        }
+    }
+
+    /// A change that permits happens only if the register can be written: it is applied, stored, and undone if
+    /// the write fails. Nothing is permitted that would not survive a restart as recorded.
+    fn permit(&mut self, now: SystemTime, change: impl FnOnce(&mut Register)) -> Result<(), String> {
+        let before = self.register.clone();
+        change(&mut self.register);
+        self.try_store(now).inspect_err(|_| self.register = before)
+    }
+
+    /// Why the register could not be stored, if it cannot: the broker is degraded.
+    #[must_use]
+    pub fn degraded(&self) -> Option<&str> {
+        self.degraded.as_ref().map(|d| d.why.as_str())
     }
 
     fn log(&mut self, now: SystemTime, h: &HeldInfo, result: &str) {
@@ -506,8 +593,18 @@ impl Core {
         if self.crypto.check_agent_certificate(cert, &key).is_err() {
             return no(NotRegistered::BadCertificate);
         }
-        self.register.register(fp.as_str(), person, at(until));
-        self.persist();
+        // A certificate that is known changes nothing, so nothing needs writing.
+        if self.register.person_of(fp.as_str()).is_none() {
+            let change = |r: &mut Register| r.register(fp.as_str(), person, at(until));
+            if self.permit(now, change).is_err() {
+                // Registering permits: refused while the register cannot be written. The document has no
+                // answer for this (`not-registered` has no such reason); `error busy` is the nearest there is.
+                return vec![
+                    Effect::Pledge(conn, PledgeOut::Error(ErrorCode::Busy)),
+                    Effect::Pledge(conn, PledgeOut::Close),
+                ];
+            }
+        }
         reply(PledgeOut::Registered(fp))
     }
 
@@ -517,7 +614,8 @@ impl Core {
             return Vec::new();
         }
         self.register.withdraw(delegation.as_str());
-        self.persist();
+        // In force whether or not it is stored; pledge is told nothing either way (see the report).
+        let _ = self.store_restriction(now);
         let hashes: Vec<_> =
             self.held.iter().filter(|(_, h)| h.answer.is_none() && &h.agent == delegation).map(|(k, _)| *k).collect();
         self.refuse_held(hashes, BrokerReason::Delegation, now)
@@ -540,21 +638,21 @@ impl Core {
     }
 
     /// An administrator blocks a person: what waits for them is refused, and a connected pledge is told.
-    pub fn block_person(&mut self, person: &str, now: SystemTime) -> Vec<Effect> {
+    pub fn block_person(&mut self, person: &str, now: SystemTime) -> (Vec<Effect>, Stored) {
         self.register.block(person);
-        self.persist();
+        let stored = self.store_restriction(now);
         let hashes: Vec<_> =
             self.held.iter().filter(|(_, h)| h.answer.is_none() && h.person == person).map(|(k, _)| *k).collect();
         let mut fx = self.refuse_held(hashes, BrokerReason::Person, now);
         fx.extend(self.standing(person, now));
-        fx
+        (fx, stored)
     }
 
     /// An administrator lifts a block; a connected pledge is told.
-    pub fn unblock_person(&mut self, person: &str, now: SystemTime) -> Vec<Effect> {
-        self.register.unblock(person);
-        self.persist();
-        self.standing(person, now).into_iter().collect()
+    /// Lifting permits: refused (with why) while the register cannot be written.
+    pub fn unblock_person(&mut self, person: &str, now: SystemTime) -> Result<Vec<Effect>, String> {
+        self.permit(now, |r| r.unblock(person))?;
+        Ok(self.standing(person, now).into_iter().collect())
     }
 
     /// At the deadline the broker forgets the request: an unanswered one is answered `expired`, and an answer
@@ -570,7 +668,13 @@ impl Core {
                 fx.extend(h.conn.map(|c| Effect::Service(c, ServiceOut::Close)));
             }
         }
-        self.register.forget_ended(now);
+        // Forgetting a registration restricts: in force in memory, stored if it can be.
+        if self.register.forget_ended(now) > 0 {
+            let _ = self.store_restriction(now);
+        } else if self.degraded.as_ref().is_some_and(|d| now >= d.last_try + RETRY_EVERY) {
+            // Degraded: at least once a minute the whole write is tried again.
+            let _ = self.try_store(now);
+        }
         fx
     }
 
@@ -1053,7 +1157,8 @@ mod tests {
         let v = vetted("jan", AGENT_A, 1, 120);
         let hash = v.submit.hash();
         f.core.submit(SVC, v, now(0));
-        let fx = f.core.block_person("jan", now(1));
+        let (fx, stored) = f.core.block_person("jan", now(1));
+        assert_eq!(stored, Stored::Yes);
         assert_eq!(refusal_of(&fx), Some(BrokerReason::Person));
         let pledge = to_pledge(&fx, PLEDGE);
         assert!(matches!(pledge[0], PledgeOut::Cancel(h) if h == hash));
@@ -1062,7 +1167,7 @@ mod tests {
             (standing["blocked"].as_bool(), standing["n"].as_u64(), standing["to"].as_str()),
             (Some(true), Some(1), Some("jan"))
         );
-        let fx = f.core.unblock_person("jan", now(2));
+        let fx = f.core.unblock_person("jan", now(2)).unwrap();
         let standing = notice_json(&to_pledge(&fx, PLEDGE));
         assert_eq!((standing["blocked"].as_bool(), standing["n"].as_u64()), (Some(false), Some(2)));
         assert_eq!(f.core.held_count(), 1, "the refused request is held as an answer until its ack");
@@ -1101,6 +1206,144 @@ mod tests {
         assert_eq!((e.host.as_str(), e.service.as_str(), e.result.as_str()), ("-", "-", "refused:bad-request"));
     }
 
+    // --- a register that cannot be written ------------------------------------------------
+
+    /// A state directory that is made unwritable on request. `None` when the user running the tests can write
+    /// into it anyway (root), where these tests prove nothing.
+    struct Disk {
+        dir: tempfile::TempDir,
+    }
+
+    impl Disk {
+        fn new() -> Disk {
+            let dir = tempfile::tempdir().unwrap();
+            std::fs::set_permissions(dir.path(), std::os::unix::fs::PermissionsExt::from_mode(0o700)).unwrap();
+            Disk { dir }
+        }
+
+        fn path(&self) -> std::path::PathBuf {
+            self.dir.path().join("register.json")
+        }
+
+        fn lock(&self) -> bool {
+            std::fs::set_permissions(self.dir.path(), std::os::unix::fs::PermissionsExt::from_mode(0o500)).unwrap();
+            std::fs::File::create(self.dir.path().join("probe")).is_err()
+        }
+
+        fn unlock(&self) {
+            std::fs::set_permissions(self.dir.path(), std::os::unix::fs::PermissionsExt::from_mode(0o700)).unwrap();
+        }
+    }
+
+    fn fixture_on(disk: &Disk) -> Fixture {
+        let mut f = fixture(5);
+        f.core.state_path = Some(disk.path());
+        f
+    }
+
+    #[test]
+    fn a_block_that_cannot_be_stored_is_in_force_and_says_so_and_the_broker_is_degraded() {
+        let disk = Disk::new();
+        let mut f = fixture_on(&disk);
+        f.core.submit(SVC, vetted("jan", AGENT_A, 1, 120), now(0));
+        if !disk.lock() {
+            return;
+        }
+        let (fx, stored) = f.core.block_person("jan", now(1));
+        assert!(matches!(stored, Stored::No(_)), "{stored:?}");
+        assert_eq!(refusal_of(&fx), Some(BrokerReason::Person), "in force at once");
+        assert!(f.core.is_blocked("jan"));
+        assert!(f.core.degraded().is_some());
+        // and the broker goes on serving from memory: a request of another person is still held
+        f.core.submit(ConnId(4), vetted("eva", "SHA256:DDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDD", 2, 120), now(2));
+        assert_eq!(f.core.held_count(), 2);
+    }
+
+    #[test]
+    fn a_withdrawal_that_cannot_be_stored_is_in_force_too() {
+        let disk = Disk::new();
+        let mut f = fixture_on(&disk);
+        f.core.submit(SVC, vetted("jan", AGENT_A, 1, 120), now(0));
+        if !disk.lock() {
+            return;
+        }
+        let fx = f.core.withdraw("jan", &AGENT_A.parse().unwrap(), now(1));
+        assert_eq!(refusal_of(&fx), Some(BrokerReason::Delegation));
+        assert_eq!(
+            refusal_of(&f.core.submit(SVC, vetted("jan", AGENT_A, 2, 120), now(2))),
+            Some(BrokerReason::Delegation)
+        );
+        assert!(f.core.degraded().is_some());
+    }
+
+    #[test]
+    fn a_registration_that_ends_is_forgotten_in_memory_even_if_that_cannot_be_stored() {
+        let disk = Disk::new();
+        let mut f = fixture_on(&disk);
+        if !disk.lock() {
+            return;
+        }
+        f.core.sweep(now(9 * 3600));
+        assert!(f.core.degraded().is_some());
+        assert_eq!(
+            refusal_of(&f.core.submit(SVC, vetted("jan", AGENT_A, 1, 120), now(9 * 3600))),
+            Some(BrokerReason::Delegation)
+        );
+    }
+
+    #[test]
+    fn lifting_a_block_is_refused_while_the_register_cannot_be_written_and_the_block_stays() {
+        let disk = Disk::new();
+        let mut f = fixture_on(&disk);
+        let (_, stored) = f.core.block_person("jan", now(0));
+        assert_eq!(stored, Stored::Yes);
+        if !disk.lock() {
+            return;
+        }
+        assert!(f.core.unblock_person("jan", now(1)).is_err());
+        assert!(f.core.is_blocked("jan"), "undone: nothing is permitted that would not survive a restart");
+        disk.unlock();
+        assert!(f.core.unblock_person("jan", now(2)).is_ok());
+        assert!(!f.core.is_blocked("jan"));
+        assert_eq!(f.core.degraded(), None, "a write that succeeds ends the degraded state");
+        assert!(!Core::read_state(&disk.path()).unwrap().is_blocked("jan"));
+    }
+
+    #[test]
+    fn a_degraded_broker_tries_the_whole_write_again_at_least_once_a_minute_and_recovers() {
+        let disk = Disk::new();
+        let mut f = fixture_on(&disk);
+        if !disk.lock() {
+            return;
+        }
+        f.core.block_person("jan", now(0));
+        assert!(f.core.degraded().is_some());
+        disk.unlock();
+        f.core.sweep(now(30));
+        assert!(f.core.degraded().is_some(), "not yet a minute since the last try");
+        f.core.sweep(now(61));
+        assert_eq!(f.core.degraded(), None);
+        let on_disk = Core::read_state(&disk.path()).unwrap();
+        assert!(on_disk.is_blocked("jan"), "the whole register, with what was in force in memory, is written");
+    }
+
+    #[test]
+    fn every_later_change_tries_the_write_again() {
+        let disk = Disk::new();
+        let mut f = fixture_on(&disk);
+        if !disk.lock() {
+            return;
+        }
+        f.core.block_person("jan", now(0));
+        assert!(f.core.degraded().is_some());
+        disk.unlock();
+        let (_, stored) = f.core.block_person("eva", now(1));
+        assert_eq!(stored, Stored::Yes);
+        assert_eq!(f.core.degraded(), None);
+        let on_disk = Core::read_state(&disk.path()).unwrap();
+        assert!(on_disk.is_blocked("jan") && on_disk.is_blocked("eva"));
+    }
+
     #[test]
     fn the_register_survives_a_restart() {
         let dir = tempfile::tempdir().unwrap();
@@ -1114,7 +1357,11 @@ mod tests {
         assert!(register.is_blocked("eva"));
         assert_eq!(register.person_for(AGENT_A, now(1)), Err(Stopped::Withdrawn));
         assert_eq!(register.person_for(AGENT_B, now(1)), Ok("jan"));
-        // no file: a first start, an empty register
-        assert!(!Core::read_state(&dir.path().join("none")).unwrap().is_blocked("eva"));
+        // no file is no register: the start is refused, and `init` makes the first
+        let none = dir.path().join("none");
+        assert!(matches!(Core::read_state(&none), Err(StateError::Missing { .. })));
+        Core::init_state(&none).unwrap();
+        assert!(!Core::read_state(&none).unwrap().is_blocked("eva"));
+        assert!(matches!(Core::init_state(&none), Err(StateError::Exists { .. })), "init does not replace one");
     }
 }

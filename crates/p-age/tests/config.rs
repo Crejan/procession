@@ -51,6 +51,9 @@ fn a_configuration_builds_a_broker_with_defaults_for_what_is_left_out() {
         (config.max_waiting_per_agent, config.max_connections, config.max_connections_per_address),
         (5, 512, 16)
     );
+    // the first start is explicit: without a register the broker is not built
+    assert!(matches!(config.build(), Err(ConfigError::State(_))));
+    p_age::core::Core::init_state(&dir.path().join("register.json")).unwrap();
     let broker = config.build().unwrap();
     assert_eq!(broker.held_count(), 0);
     assert!(dir.path().join("log.jsonl").exists(), "the log is opened");
@@ -110,8 +113,12 @@ fn the_register_on_disk_is_private_versioned_and_never_replaced_by_an_empty_one(
     use p_age::core::{Core, StateError};
     let dir = private_dir();
     let path = dir.path().join("register.json");
-    // no file: a first start
+    // no file is no register: the start is refused, and `init` makes the first, once
+    assert!(matches!(Core::read_state(&path), Err(StateError::Missing { .. })));
+    Core::init_state(&path).unwrap();
     assert!(Core::read_state(&path).is_ok());
+    assert_eq!(std::fs::metadata(&path).unwrap().permissions().mode() & 0o777, 0o600);
+    assert!(matches!(Core::init_state(&path), Err(StateError::Exists { .. })));
     // a register that cannot be read whole is not started on
     std::fs::write(&path, "{ not json").unwrap();
     mode(&path, 0o600);
@@ -133,7 +140,7 @@ fn the_register_on_disk_is_private_versioned_and_never_replaced_by_an_empty_one(
     mode(dir.path(), 0o700);
     // a directory that is not there is made, 0700
     let nested = dir.path().join("a").join("b");
-    Core::read_state(&nested.join("register.json")).unwrap();
+    Core::init_state(&nested.join("register.json")).unwrap();
     assert_eq!(std::fs::metadata(&nested).unwrap().permissions().mode() & 0o777, 0o700);
 }
 

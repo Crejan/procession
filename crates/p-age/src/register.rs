@@ -159,10 +159,12 @@ impl Register {
         }
     }
 
-    /// Drop the delegations whose validity ended before `now`. A withdrawn
+    /// Drop the delegations whose validity ended before `now`, and say how many. A withdrawn
     /// one is kept until its end, so that it stays withdrawn.
-    pub fn forget_ended(&mut self, now: SystemTime) {
+    pub fn forget_ended(&mut self, now: SystemTime) -> usize {
+        let before = self.delegations.len();
         self.delegations.retain(|_, entry| entry.until > now);
+        before - self.delegations.len()
     }
 }
 

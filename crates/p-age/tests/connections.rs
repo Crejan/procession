@@ -700,3 +700,77 @@ async fn an_unauthenticated_peer_learns_nothing_about_the_site_beyond_a_coarse_c
         assert_eq!(c.recv().await["error"], "signin");
     }
 }
+
+// --- a register that cannot be written -------------------------------------------------
+
+fn lock_state_dir(w: &World) -> bool {
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(w.keys.dir.path(), std::fs::Permissions::from_mode(0o500)).unwrap();
+    // as root the lock proves nothing: say so and skip
+    std::fs::File::create(w.keys.path("probe")).is_err()
+}
+
+fn unlock_state_dir(w: &World) {
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(w.keys.dir.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+}
+
+#[tokio::test]
+async fn registering_is_refused_while_the_register_cannot_be_written_and_works_again_when_it_can() {
+    let w = World::new();
+    let mut pledge = open_pledge(&w).await;
+    pledge.connect_as("jan", &w.jan_connection).await;
+    let cert = w.keys.cert_line(&w.agent);
+    if !lock_state_dir(&w) {
+        return;
+    }
+    pledge.send_json(serde_json::json!({"schema_version":1,"type":"delegation","cert":cert})).await;
+    // the document has no answer for this; `error busy` and the end is the nearest existing one
+    assert_eq!(pledge.recv().await["error"], "busy");
+    pledge.expect_closed().await;
+    assert!(w.broker.degraded().is_some());
+    // nothing was permitted: a request under that delegation is refused
+    let mut s = open_service(&w);
+    s.send(&submit_line(&w.submit(1, 120))).await;
+    assert_eq!(refusal(&service_answer(&mut s).await), BrokerReason::Delegation);
+    // the disk comes back: registering works and the broker is no longer degraded
+    unlock_state_dir(&w);
+    let mut again = open_pledge(&w).await;
+    again.connect_as("jan", &w.jan_connection).await;
+    register(&w, &mut again).await;
+    assert_eq!(w.broker.degraded(), None);
+}
+
+#[tokio::test]
+async fn restricting_goes_on_while_the_register_cannot_be_written_and_pledge_is_told_nothing_extra() {
+    let w = World::new();
+    let mut pledge = open_pledge(&w).await;
+    pledge.connect_as("jan", &w.jan_connection).await;
+    register(&w, &mut pledge).await;
+    let submit = w.submit(1, 120);
+    let mut service = open_service(&w);
+    service.send(&submit_line(&submit)).await;
+    assert_eq!(pledge.recv_type().await, "submit");
+    let fp = p_act::sign::agent_certificate(&w.keys.cert_line(&w.agent)).unwrap().delegation;
+    if !lock_state_dir(&w) {
+        return;
+    }
+    // a withdrawal from pledge: in force, and the only thing pledge is sent is the cancel it always gets
+    pledge.send_json(serde_json::json!({"schema_version":1,"type":"withdraw","delegation":fp.to_string()})).await;
+    assert_eq!(refusal(&service_answer(&mut service).await), BrokerReason::Delegation);
+    assert_eq!(pledge.recv_type().await, "cancel");
+    pledge.send_json(serde_json::json!({"schema_version":1,"type":"ping"})).await;
+    assert!(tokio::time::timeout(Duration::from_millis(300), pledge.lines.read(None)).await.is_err(), "nothing else");
+    assert!(w.broker.degraded().is_some());
+    // an administrator's block: in force, and the answer says it is not stored
+    let stored = w.broker.block_person("jan".into()).await;
+    assert!(matches!(stored, p_age::core::Stored::No(_)), "{stored:?}");
+    let mut s = open_service(&w);
+    s.send(&submit_line(&w.submit(2, 120))).await;
+    assert!(matches!(refusal(&service_answer(&mut s).await), BrokerReason::Person | BrokerReason::Delegation));
+    // lifting is refused
+    assert!(w.broker.unblock_person("jan".into()).await.is_err());
+    unlock_state_dir(&w);
+    assert!(w.broker.unblock_person("jan".into()).await.is_ok());
+    assert_eq!(w.broker.degraded(), None);
+}

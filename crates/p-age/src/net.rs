@@ -21,7 +21,7 @@ use tokio::net::TcpListener;
 use tokio::sync::{OwnedSemaphorePermit, Semaphore, mpsc};
 use tokio_rustls::TlsAcceptor;
 
-use crate::core::{ConnId, Core, Effect, vet};
+use crate::core::{ConnId, Core, Effect, Stored, vet};
 use crate::crypto::Crypto;
 use crate::site::Site;
 use crate::tls;
@@ -250,9 +250,31 @@ impl Broker {
         lock(&self.core).held_count()
     }
 
-    /// An administrator blocks a person.
-    pub async fn block_person(self: &Arc<Self>, person: String) {
-        self.with_core(move |core, now| ((), core.block_person(&person, now))).await;
+    /// An administrator blocks a person: in force at once; whether it is stored is the answer.
+    pub async fn block_person(self: &Arc<Self>, person: String) -> Stored {
+        let outcome = self
+            .with_core(move |core, now| {
+                let (effects, stored) = core.block_person(&person, now);
+                (stored, effects)
+            })
+            .await;
+        outcome.unwrap_or_else(|| Stored::No("the broker could not be reached".to_owned()))
+    }
+
+    /// An administrator lifts a block: refused while the register cannot be written.
+    pub async fn unblock_person(self: &Arc<Self>, person: String) -> Result<(), String> {
+        let outcome = self
+            .with_core(move |core, now| match core.unblock_person(&person, now) {
+                Ok(effects) => (Ok(()), effects),
+                Err(why) => (Err(why), Vec::new()),
+            })
+            .await;
+        outcome.unwrap_or_else(|| Err("the broker could not be reached".to_owned()))
+    }
+
+    /// Why the register cannot be stored, if it cannot: the broker is degraded.
+    pub fn degraded(&self) -> Option<String> {
+        lock(&self.core).degraded().map(str::to_owned)
     }
 }
 

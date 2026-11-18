@@ -16,6 +16,7 @@ const VERBS: &[Verb] = &[
         name: "serve",
         summary: "run the broker: the connections of pledges and services, the checks, the register",
     },
+    Verb { name: "init", summary: "the first start: make the empty register; refused if there is one" },
     Verb { name: "load", summary: "take the site project's data: persons, groups, rules, hosts, keys" },
     Verb { name: "delegations", summary: "list the registered delegations; withdraw one" },
     Verb { name: "block", summary: "block a person or one of their keys; unblock" },
@@ -30,16 +31,40 @@ fn usage() -> String {
     text
 }
 
+/// The path after `--config`, or the default.
+fn config_path<'a>(verb: &str, args: &[&'a str]) -> Option<&'a str> {
+    match args {
+        [] => Some("/etc/page.json"),
+        ["--config", file] => Some(file),
+        _ => {
+            eprintln!("usage: page {verb} [--config FILE]");
+            None
+        }
+    }
+}
+
+/// `page init [--config FILE]`: make the empty register for the first start; refused if there is one.
+fn init(args: &[&str]) -> ExitCode {
+    let Some(path) = config_path("init", args) else { return ExitCode::from(2) };
+    let result =
+        p_age::config::Config::read(std::path::Path::new(path)).map_err(|e| e.to_string()).and_then(|config| {
+            p_age::core::Core::init_state(&config.state_dir.join("register.json")).map_err(|e| e.to_string())
+        });
+    match result {
+        Ok(()) => {
+            println!("page init: the register is made");
+            ExitCode::SUCCESS
+        }
+        Err(message) => {
+            eprintln!("page init: {message}");
+            ExitCode::FAILURE
+        }
+    }
+}
+
 /// `page serve [--config FILE]`: run the broker until stopped.
 fn serve(args: &[&str]) -> ExitCode {
-    let path = match args {
-        [] => "/etc/page.json",
-        ["--config", file] => file,
-        _ => {
-            eprintln!("usage: page serve [--config FILE]");
-            return ExitCode::from(2);
-        }
-    };
+    let Some(path) = config_path("serve", args) else { return ExitCode::from(2) };
     match run(std::path::Path::new(path)) {
         Ok(()) => ExitCode::SUCCESS,
         Err(message) => {
@@ -89,6 +114,7 @@ fn main() -> ExitCode {
             ExitCode::SUCCESS
         }
         ["serve", rest @ ..] => serve(rest),
+        ["init", rest @ ..] => init(rest),
         [verb, ..] if VERBS.iter().any(|known| known.name == *verb) => {
             eprintln!("page {verb}: not implemented yet");
             ExitCode::from(2)

@@ -155,7 +155,10 @@ impl World {
         let core = Core::new(
             Arc::clone(&site),
             settings,
-            Core::read_state(&state).unwrap(),
+            {
+                Core::init_state(&state).unwrap();
+                Core::read_state(&state).unwrap()
+            },
             Some(state.clone()),
             crypto.clone(),
             Box::new(log.clone()),
