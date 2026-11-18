@@ -71,7 +71,7 @@ impl<T> Default for Scan<T> {
 }
 
 pub(crate) fn read(path: &Path) -> Result<String, Error> {
-    fs::read_to_string(path).map_err(|e| Error::io(path, e))
+    crate::text::read_to_string(path).map_err(|e| Error::io(path, e))
 }
 
 /// Numeric directory entries (pids, tids), sorted.

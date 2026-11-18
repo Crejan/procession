@@ -438,7 +438,8 @@ pub fn pids_with_comm(root: &Root, comm: &str) -> Result<Vec<i32>, Error> {
     Ok(numeric_entries(&root.proc)?
         .into_iter()
         .filter(|pid| {
-            std::fs::read_to_string(root.proc.join(pid.to_string()).join("comm")).is_ok_and(|c| c.trim_end() == comm)
+            crate::text::read_to_string(root.proc.join(pid.to_string()).join("comm"))
+                .is_ok_and(|c| c.trim_end() == comm)
         })
         .collect())
 }
@@ -516,8 +517,7 @@ mod tests {
 #[must_use]
 pub fn cmdline(root: &Root, pid: i32) -> Option<Vec<String>> {
     let raw = std::fs::read(root.proc.join(pid.to_string()).join("cmdline")).ok()?;
-    let args: Vec<String> =
-        raw.split(|b| *b == 0).filter(|a| !a.is_empty()).map(|a| String::from_utf8_lossy(a).into_owned()).collect();
+    let args: Vec<String> = raw.split(|b| *b == 0).filter(|a| !a.is_empty()).map(crate::text::from_bytes).collect();
     (!args.is_empty()).then_some(args)
 }
 

@@ -119,13 +119,13 @@ pub fn run(env: &Env) -> Result<Report, Error> {
 
     let ptp = env.root.sys.join("class/ptp");
     let mut clocks: Vec<String> = std::fs::read_dir(&ptp)
-        .map(|rd| rd.filter_map(|e| Some(e.ok()?.file_name().to_string_lossy().into_owned())).collect())
+        .map(|rd| rd.filter_map(|e| Some(p_roc::text::entry_name(&e.ok()?))).collect())
         .unwrap_or_default();
     clocks.sort();
     for c in clocks {
         report.push(&Record::PtpClock {
             device: env.root.dev.join(&c).exists(),
-            clock_name: std::fs::read_to_string(ptp.join(&c).join("clock_name")).ok().map(|s| s.trim().to_string()),
+            clock_name: p_roc::text::read_to_string(ptp.join(&c).join("clock_name")).ok().map(|s| s.trim().to_string()),
             name: c,
         });
     }

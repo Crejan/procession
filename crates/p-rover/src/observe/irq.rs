@@ -77,8 +77,8 @@ enum Record {
 
 /// `CONFIG_HZ` from `/boot/config-<release>`.
 fn kernel_hz(env: &Env) -> Option<u32> {
-    let release = std::fs::read_to_string(env.root.proc.join("sys/kernel/osrelease")).ok()?;
-    let config = std::fs::read_to_string(env.boot.join(format!("config-{}", release.trim()))).ok()?;
+    let release = p_roc::text::read_to_string(env.root.proc.join("sys/kernel/osrelease")).ok()?;
+    let config = p_roc::text::read_to_string(env.boot.join(format!("config-{}", release.trim()))).ok()?;
     config.lines().find_map(|l| l.strip_prefix("CONFIG_HZ=")?.trim().parse().ok())
 }
 
@@ -135,7 +135,7 @@ pub fn run(env: &Env, args: &Args) -> Result<Report, Error> {
     let secs = args.duration.as_secs();
 
     let irqbalance = task::pids_with_comm(&env.root, "irqbalance")?;
-    let workqueue_cpumask = std::fs::read_to_string(env.root.sys.join("devices/virtual/workqueue/cpumask"))
+    let workqueue_cpumask = p_roc::text::read_to_string(env.root.sys.join("devices/virtual/workqueue/cpumask"))
         .ok()
         .map(|s| s.trim().to_string());
     report.push(&Record::Policy {
@@ -274,7 +274,12 @@ pub fn run(env: &Env, args: &Args) -> Result<Report, Error> {
     for r in rest.iter().filter(|r| matches!(r, Record::Irq { delta, .. } if *delta > 0)).take(args.top) {
         report.push(r);
     }
-    report.push(&Record::Summary { irqs: total, flagged: flagged_n, window_s: secs, truncated: flagged_n > FLAGGED_CAP });
+    report.push(&Record::Summary {
+        irqs: total,
+        flagged: flagged_n,
+        window_s: secs,
+        truncated: flagged_n > FLAGGED_CAP,
+    });
     finish(env, &mut report);
     Ok(report)
 }
