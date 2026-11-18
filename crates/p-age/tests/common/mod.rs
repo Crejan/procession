@@ -304,7 +304,7 @@ pub async fn open_pledge(w: &World) -> Client {
 /// The sign-in message for `person`, signed with `key`, for the nonce and binding given.
 pub fn signin_message(person: &str, key: &Path, nonce: &str, binding: [u8; 32]) -> serde_json::Value {
     let doc = ConnectionDoc::compose(person, nonce, &STANDARD.encode(binding));
-    let sig = p_age::keygen::sign(key, Namespace::Connection, &doc).unwrap();
+    let sig = p_act::sign::sign_connection(&Signer::plain(key), &doc).unwrap();
     serde_json::json!({"schema_version":1,"type":"signin","doc":STANDARD.encode(&doc),"doc_sig":signature_to_base64(&sig)})
 }
 
@@ -352,4 +352,18 @@ pub fn verify_as_broker(w: &World, namespace: Namespace, doc: &[u8], sig_b64: &s
 
 pub fn hash_of(s: &Submit) -> DocumentHash {
     s.request().hash()
+}
+
+/// Sign `data` in a namespace of the test's choosing, as another document type would.
+pub fn raw_sign(key: &Path, namespace: Namespace, data: &[u8]) -> String {
+    let mut child = Command::new("ssh-keygen")
+        .args(["-Y", "sign", "-n", namespace.as_str(), "-f"])
+        .arg(key)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+    std::io::Write::write_all(&mut child.stdin.take().unwrap(), data).unwrap();
+    String::from_utf8(child.wait_with_output().unwrap().stdout).unwrap()
 }

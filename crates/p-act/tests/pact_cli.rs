@@ -201,3 +201,20 @@ fn serve_refuses_to_replace_a_socket_and_needs_one() {
     assert_eq!(code, 1);
     assert!(stderr.contains("cannot connect"), "{stderr}");
 }
+
+#[cfg(not(feature = "pact-tls"))]
+#[test]
+fn an_https_bundle_is_refused_at_start_by_a_build_without_tls() {
+    let dir = tempfile::tempdir().unwrap();
+    let (good, _) = bundle(dir.path(), "20200101Z:20990101Z");
+    let text = String::from_utf8(good).unwrap();
+    let (first, rest) = text.split_once('\n').unwrap();
+    let https = first.replace("\"url\":\"http://127.0.0.1:1/mcp\"", "\"url\":\"https://a.example/mcp\"").replace(
+        "\"deadline_seconds\":5",
+        "\"deadline_seconds\":5,\"tls_root\":\"-----BEGIN CERTIFICATE-----\\nAAAA\\n-----END CERTIFICATE-----\\n\"",
+    );
+    let (code, stdout, stderr) = run(&["tools"], format!("{https}\n{rest}").as_bytes());
+    assert_eq!(code, 1, "{stderr}");
+    assert!(stdout.is_empty());
+    assert!(stderr.contains("without TLS") && stderr.contains("pact-tls"), "{stderr}");
+}

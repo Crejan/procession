@@ -14,7 +14,6 @@
 pub mod config;
 pub mod core;
 pub mod crypto;
-pub mod keygen;
 pub mod log;
 pub mod net;
 pub mod perm;

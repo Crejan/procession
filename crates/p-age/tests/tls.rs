@@ -77,7 +77,7 @@ async fn a_sign_in_made_for_another_tls_connection_is_refused() {
     let challenge: serde_json::Value = serde_json::from_slice(&lines.read(None).await.unwrap().unwrap()).unwrap();
     // a binding exported from some other connection (here: made up), correctly signed
     let doc = ConnectionDoc::compose("jan", challenge["nonce"].as_str().unwrap(), &STANDARD.encode([9u8; 32]));
-    let sig = p_age::keygen::sign(&w.jan_connection, p_act::sign::Namespace::Connection, &doc).unwrap();
+    let sig = p_act::sign::sign_connection(&p_act::sign::Signer::plain(&w.jan_connection), &doc).unwrap();
     let line = serde_json::json!({"schema_version":1,"type":"signin","doc":STANDARD.encode(&doc),"doc_sig":p_act::sign::signature_to_base64(&sig)});
     wr.write_all(&[serde_json::to_vec(&line).unwrap(), b"\n".to_vec()].concat()).await.unwrap();
     let reply: serde_json::Value = serde_json::from_slice(&lines.read(None).await.unwrap().unwrap()).unwrap();
