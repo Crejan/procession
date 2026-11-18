@@ -17,25 +17,19 @@ use p_act::exchange::{Answer, Approved, ClearancePolicy, Message, Outcome, Submi
 use p_act::rating::{Damage, Disruption, Exposure, Rating};
 use p_act::sign::{Namespace, PublicKey, Signer, sign_call, sign_request, signature_to_base64};
 use p_act::{Call, CallContent, CallId, Document, DocumentHash, Request, ServiceId, Timestamp};
-use p_age::core::{Core, Settings};
+use p_age::core::Settings;
 use p_age::crypto::SshCrypto;
 use p_age::log::MemoryLog;
 use p_age::net::{Broker, Clock, Lines, Timeouts, serve_connection};
-use p_age::site::Site;
+use p_age::testing::{BrokerSetup, PersonSpec, SiteBuilder};
 use tempfile::TempDir;
 use tokio::io::{AsyncWriteExt, DuplexStream, ReadHalf, WriteHalf, duplex};
 
 pub const VALID: &str = "20200101Z:20990101Z";
 
-/// Where the tests make their directories. A Unix socket is bound in one of them (the administrator's), and some
-/// sandboxes allow that only under one directory: `PAGE_TEST_DIR` if set, else `/tmp/claude` if it is there, else
-/// the system's temporary directory.
+/// Where the tests make their directories (a Unix socket is bound in one of them).
 pub fn socket_base() -> PathBuf {
-    if let Some(dir) = std::env::var_os("PAGE_TEST_DIR") {
-        return PathBuf::from(dir);
-    }
-    let sandbox = PathBuf::from("/tmp/claude");
-    if sandbox.is_dir() { sandbox } else { std::env::temp_dir() }
+    p_age::testing::socket_dir()
 }
 
 pub struct Keys {
@@ -136,6 +130,15 @@ impl World {
     }
 
     pub fn with(settings: Settings, timeouts: Timeouts) -> World {
+        World::with_crypto(settings, timeouts, |c| c)
+    }
+
+    /// As [`World::with`], the broker's signature work wrapped by `wrap` (a test that makes it slow).
+    pub fn with_crypto(
+        settings: Settings,
+        timeouts: Timeouts,
+        wrap: impl FnOnce(Arc<dyn p_age::crypto::Crypto>) -> Arc<dyn p_age::crypto::Crypto>,
+    ) -> World {
         let keys = Keys::new();
         let site_ca = keys.key("site-ca");
         let broker_key = keys.certified("broker", &site_ca, "broker", VALID, &[]);
@@ -147,39 +150,30 @@ impl World {
         let agent = keys.certified("agent", &jan_delegation, "jan", "-5m:+8h", &["extension:groups@procession=ops"]);
         let (jan_automatic, eva_confirmed, eva_automatic) =
             (keys.key("jan-automatic"), keys.key("eva-confirmed"), keys.key("eva-automatic"));
-        let row = |k: &Path| format!(r#"{{"key":"{}","verified_on":"2026-11-10"}}"#, keys.public(k));
-        let person = |name: &str, conn: &Path, deleg: &Path, confirmed: &Path, automatic: &Path| {
-            format!(
-                r#"{{"name":"{name}","enabled":true,"groups":["ops"],"keys":{{"confirmed":{},"automatic":{},"delegation":{},"connection":{}}}}}"#,
-                row(confirmed),
-                row(automatic),
-                row(deleg),
-                row(conn)
+        let line = |k: &Path| keys.public(k).to_string();
+        let site = SiteBuilder::new()
+            .person(
+                PersonSpec::new("jan")
+                    .keys(&line(&jan_confirmed), &line(&jan_automatic), &line(&jan_delegation), &line(&jan_connection))
+                    .groups(&["ops"]),
             )
-        };
-        let json = format!(
-            r#"{{"v":1,"persons":[{},{}],"hosts":[{{"name":"a.example","key":"{}"}}]}}"#,
-            person("jan", &jan_connection, &jan_delegation, &jan_confirmed, &jan_automatic),
-            person("eva", &eva_connection, &eva_delegation, &eva_confirmed, &eva_automatic),
-            keys.public(&host_key)
-        );
-        let site = Arc::new(Site::from_json(&json).unwrap());
+            .person(
+                PersonSpec::new("eva")
+                    .keys(&line(&eva_confirmed), &line(&eva_automatic), &line(&eva_delegation), &line(&eva_connection))
+                    .groups(&["ops"]),
+            )
+            .host("a.example", &line(&host_key))
+            .build()
+            .unwrap();
         let clock = TestClock::new();
-        let log = MemoryLog::default();
         let state = keys.path("register.json");
-        let crypto = Arc::new(SshCrypto::new(&broker_key));
-        let core = Core::new(
-            Arc::clone(&site),
-            settings,
-            {
-                Core::init_state(&state).unwrap();
-                Core::read_state(&state).unwrap()
-            },
-            Some(state.clone()),
-            crypto.clone(),
-            Box::new(log.clone()),
-        );
-        let broker = Broker::new(core, crypto, site, clock.clone(), timeouts, 8);
+        let started = BrokerSetup::new(site, &broker_key, keys.dir.path())
+            .settings(settings)
+            .timeouts(timeouts)
+            .clock(clock.clone())
+            .crypto(wrap(Arc::new(SshCrypto::new(&broker_key))))
+            .start();
+        let (log, broker) = (started.log, started.broker);
         World {
             keys,
             site_ca,
@@ -443,4 +437,71 @@ pub async fn page(config: &Path, args: &[&str]) -> (i32, String, String) {
     })
     .await
     .unwrap()
+}
+
+/// Signature work that takes `delay` before it answers: a loaded machine, on purpose.
+pub struct SlowCrypto {
+    pub inner: Arc<dyn p_age::crypto::Crypto>,
+    pub delay: Duration,
+}
+
+impl p_age::crypto::Crypto for SlowCrypto {
+    fn verify_request(&self, r: &p_act::Request, sig: &str, k: &PublicKey) -> Result<(), p_age::crypto::CryptoError> {
+        std::thread::sleep(self.delay);
+        self.inner.verify_request(r, sig, k)
+    }
+    fn verify_call(
+        &self,
+        c: &p_act::Call,
+        sig: &str,
+        k: &PublicKey,
+    ) -> Result<p_act::sign::Agent, p_age::crypto::CryptoError> {
+        self.inner.verify_call(c, sig, k)
+    }
+    fn verify_connection(
+        &self,
+        d: &p_act::broker::ConnectionDocument,
+        sig: &str,
+        k: &PublicKey,
+    ) -> Result<(), p_age::crypto::CryptoError> {
+        self.inner.verify_connection(d, sig, k)
+    }
+    fn check_agent_certificate(
+        &self,
+        l: &str,
+        k: &PublicKey,
+    ) -> Result<p_act::sign::Agent, p_age::crypto::CryptoError> {
+        self.inner.check_agent_certificate(l, k)
+    }
+    fn sign_clearance(&self, c: &p_act::Clearance) -> Result<String, p_age::crypto::CryptoError> {
+        self.inner.sign_clearance(c)
+    }
+    fn sign_standing(&self, s: &p_act::broker::Standing) -> Result<String, p_age::crypto::CryptoError> {
+        self.inner.sign_standing(s)
+    }
+}
+
+/// Wait until the broker holds `n` requests (the check of a request that was just sent has finished), or fail
+/// after `limit`. The tests wait for this and not for a fixed time: how long the signature work takes depends on
+/// the machine.
+pub async fn wait_held(w: &World, n: usize) {
+    let limit = Duration::from_secs(30);
+    let start = std::time::Instant::now();
+    while w.broker.held_count() != n {
+        assert!(
+            start.elapsed() < limit,
+            "the broker holds {} requests, not {n}, after {limit:?}",
+            w.broker.held_count()
+        );
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+}
+
+/// Wait until the log holds `n` entries (what the broker did with a request has been written), or fail after 30 s.
+pub async fn wait_logged(w: &World, n: usize) {
+    let start = std::time::Instant::now();
+    while w.log.entries().len() < n {
+        assert!(start.elapsed() < Duration::from_secs(30), "the log has {} entries, not {n}", w.log.entries().len());
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
 }
