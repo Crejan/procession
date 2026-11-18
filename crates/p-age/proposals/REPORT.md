@@ -135,3 +135,10 @@ Needs from p-act (listed in section 9): the codec for section 3, the standing an
 5. **One request per connection**: already so; a `submit` whose request does not parse is answered `refused` `bad-request` for the hash and the connection closes.
 
 Not run, as before: TCP (`listen`, the per-address limit, `page serve`), real timeout durations.
+
+## The silence rule, and p-act's API in place of `keygen.rs` (integration b040280 merged)
+
+- **The broker never speaks first.** A connection that sends nothing within 10 s, or begins a first line and does not finish it, is closed without a word. A first message that is neither `hello` nor `submit` (a `hello` with a member or another version, JSON that is not an object, a first line longer than 96 KiB) gets `error malformed-line` and nothing more, then the close. A pledge that has said `hello` and does not answer the challenge still gets `timeout`; a line that is too long after the first message still gets `line-too-long`. Tests: `a_connection_that_says_nothing_is_closed` (silence, an unfinished first line, a too long first line), `the_first_message_says_which_exchange_this_is` (version 2 hello now `malformed-line`).
+- **`src/keygen.rs` is gone.** `crypto.rs` uses `p_act::sign::{verify_connection, sign_broker, verify_agent_certificate}`; the standing is signed with `Signer::certified` and `sign_broker`. The async reader `net::Lines` is built on `p_act::exchange::LineBuffer`; it keeps only the waiting (the 10 s for a begun line and the wait for a line to begin) and the reads. The tests sign sign-ins with `sign_connection`; the two negative tests that need a signature in another namespace use a small `raw_sign` helper in `tests/common` (p-act has no function that signs arbitrary bytes in a namespace of the caller's choosing, and should not).
+- Nothing was missing from p-act's API. `wire.rs` stays until p-act has the connection document, the standing and the unsigned broker messages.
+- 62 tests pass, clippy clean.
