@@ -2,7 +2,7 @@
 name = "p-usher"
 version = "0.1.0"
 edition = "2024"
-rust-version = "1.85"
+rust-version = "1.91"
 description = "Keeps unprivileged SCHED_FIFO/SCHED_RR threads off the housekeeping CPUs of a realtime Linux host"
 license = "MIT OR Apache-2.0"
 readme = "README.md"

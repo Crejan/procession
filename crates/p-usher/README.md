@@ -83,7 +83,7 @@ non-root uid (`exempt_comm = ["^stalld$"]`).
 ## Installing
 
 p-usher runs on Linux only. Build it on the target host, which needs Rust
-1.85+ and a C compiler for the `email` feature (ring):
+1.91+ and a C compiler for the `email` feature (ring):
 
 ```
 cargo install p-usher                  # from crates.io, or from a checkout:

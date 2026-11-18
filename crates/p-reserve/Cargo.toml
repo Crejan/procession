@@ -2,7 +2,7 @@
 name = "p-reserve"
 version = "0.0.0"
 edition = "2024"
-rust-version = "1.85"
+rust-version = "1.91"
 description = "Backups of a host or a workstation into a restic-format repository: runs them, keeps them fresh, browses and restores them"
 license = "MIT OR Apache-2.0"
 keywords = ["backup", "restic", "rustic", "snapshot", "daemon"]

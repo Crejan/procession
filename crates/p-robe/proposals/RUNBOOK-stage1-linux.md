@@ -44,7 +44,7 @@ programs have today, and what is not yet there is marked.
 - Linux with `sudo` (1.9 or later is fine), `visudo`, `logger` (package
   `util-linux` or `bsdutils`), `ssh-keygen` (OpenSSH 8.x or later; the
   documents were checked with 10.2), `systemd` only for Stage B's unit, and a
-  Rust toolchain (1.85 or later, edition 2024) to build.
+  Rust toolchain (1.91 or later, edition 2024) to build.
 - A shell as root (`sudo -i`), and an ordinary login for you, called `alice`
   below, who owns a checkout of the workspace.
 - If `sudo` says "you must have a tty to run sudo", the host has `Defaults
