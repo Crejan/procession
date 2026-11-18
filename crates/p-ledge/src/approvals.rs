@@ -36,7 +36,6 @@ use crate::delegations::{Delegations, RatingWords};
 use crate::dialog::{Description, Outcome as Dialog, Wait};
 use crate::mute::Muter;
 use crate::shared::{KeyInfo, Shared};
-use crate::sshsig;
 
 /// The namespace of an approval.
 pub const APPROVAL_NAMESPACE: &str = "approval-v1@procession";
@@ -304,9 +303,7 @@ fn approval_key_blob(shared: &Shared, key: &KeyInfo, role: &str) -> Result<Vec<u
 }
 
 fn holder_sign(shared: &Shared, key: &KeyInfo, carried: &[u8], request: &Request) -> Option<String> {
-    let data = sshsig::signed_data(APPROVAL_NAMESPACE, request.as_bytes());
-    let signature = shared.holder.lock().ok()?.sign(&key.blob, &data).ok()?;
-    Some(sshsig::armour(carried, APPROVAL_NAMESPACE, &signature))
+    crate::seam::sign(shared, &key.blob, carried, p_act::sign::Namespace::Approval, request.as_bytes())
 }
 
 fn description(facts: &Facts, request: &Request) -> Description {

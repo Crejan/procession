@@ -34,7 +34,6 @@ use serde_json::json;
 use crate::approvals::Responder;
 use crate::broker_state::{Applied, Withdrawal};
 use crate::shared::Shared;
-use crate::sshsig;
 
 /// How often the link thread looks at its outgoing channel and its timers.
 pub const TICK: Duration = Duration::from_millis(50);
@@ -346,9 +345,7 @@ pub struct Session {
 
 fn sign_connection_document(shared: &Shared, document: &[u8]) -> Option<String> {
     let key = shared.key_with_purpose("connection")?;
-    let namespace = Namespace::Connection.as_str();
-    let signature = shared.holder.lock().ok()?.sign(&key.blob, &sshsig::signed_data(namespace, document)).ok()?;
-    Some(sshsig::armour(&key.blob, namespace, &signature))
+    crate::seam::sign(shared, &key.blob, &key.blob, Namespace::Connection, document)
 }
 
 impl Session {

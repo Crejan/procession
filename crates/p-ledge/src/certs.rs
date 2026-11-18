@@ -19,7 +19,7 @@ use p_act::sign::{PublicKey, signature_certificate};
 use crate::agent::host_key::fingerprint;
 use crate::approvals::APPROVAL_NAMESPACE;
 use crate::shared::Shared;
-use crate::sshsig;
+use p_act::sign::Namespace;
 
 const PROBE: &[u8] = b"pledge: certificate check, not a request";
 
@@ -75,13 +75,8 @@ pub fn check(shared: &Shared, line: &str, person: &str, site_ca: &PublicKey, now
         .ok_or("the certificate line does not read")?;
     for role in ["confirmed", "automatic"] {
         let Some(key) = shared.key_with_purpose(role) else { continue };
-        let signature = shared
-            .holder
-            .lock()
-            .map_err(|_| "the key holder is not there")?
-            .sign(&key.blob, &sshsig::signed_data(APPROVAL_NAMESPACE, PROBE))
-            .map_err(|_| "the key holder could not sign")?;
-        let armoured = sshsig::armour(&blob, APPROVAL_NAMESPACE, &signature);
+        // The seam refuses a blob that is not a key or certificate of the key's algorithm: not this pledge's.
+        let Some(armoured) = crate::seam::sign(shared, &key.blob, &blob, Namespace::Approval, PROBE) else { continue };
         let Ok(cert) = signature_certificate(&armoured) else { continue };
         if cert.fingerprint.as_str() != fingerprint(&key.blob) {
             continue; // not this role's key
