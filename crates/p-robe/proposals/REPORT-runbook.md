@@ -318,3 +318,31 @@ a long run does not drift past it; the "an hour ahead is refused" and "`--until 
 rule. **Built:** `tests/scripts.rs` reads every `--until` in the scripts (and the variables they use) and applies the dispatcher's own `until_too_far` to
 it: a literal must be a past one (under 1000), an expression `now + N` must not be too far unless its check is the one that expects the refusal. A
 fixed far constant, or a new check that mixes the two, fails the test.
+
+## Update: nothing leans on the umask (the owner's `su probe-svc -c umask` printed 0002)
+
+`pledge serve` refused the harness's `config.json` (written 0664 under umask 0002; `p_act::settings` refuses group write) and exited before
+binding a socket. **Every write that a program's rules judge, and the mode it gets now:**
+
+| File | Made by | Mode now | Judged by |
+|---|---|---|---|
+| pledge's `config.json` (harness) | `tests/common::write_private` | **0600**, created with `mode(0o600)` and set again | `p_act::settings` in pledge (was `fs::write`: 0664 under 0002; fixed) |
+| `/etc/probe.json` (hand step B3) | the owner, now `install -m 0644` | 0644 | `p_act::settings` in `probe` |
+| pledge's state and socket directories | harness (state: 0700 set explicitly); pledge (`run`: `DirBuilder::mode(0o700)`) | 0700 | pledge (`check_private`) |
+| the agent's bundle | pledge `agents start --output` | 0600, exclusive | pledge (it writes it) |
+| key files (host, delegation, service, agent) | `ssh-keygen` | 0600 private, 0644 `.pub`, whatever the umask | OpenSSH |
+| `/etc/probe/` (`probe setup`) | `setup::run` | **0755 when it creates it** (was the umask's: 0775 under 0002; fixed) | the owner / sudoers path checks |
+| `service-key` | `probe setup` | 0600 explicit | `ssh-keygen -Y sign` (refuses an open key) |
+| `service-key.pub` derived by `setup` when missing | `setup::run` | **0644 explicit** (was the umask's; fixed) | readers |
+| `service-key-cert.pub` | `probe setup` | 0644 explicit, chown to the key's owner | the service reads it |
+| used identifiers | `UsedStore` | directory 0700 (`set_permissions`), files `mode(0o600)` | the service |
+| lock files | the dispatcher | `mode(0o644)` | the dispatcher |
+| a test's `probe.json` in `tests/cli.rs` | the test | **0600 set explicitly** (was `fs::write`: the test would have failed under 0002) | `p_act::settings` |
+| the scripts: `a1` (rule via `install -m 0440`, directories via `install -d -m`), `a3` (`chmod -R u+rwX,go-rwx` after `cp`), `a2` (logs in `/var/tmp`, not judged) | | explicit | sudo, pledge |
+| `/etc/probe/alice-*.pub` (hand step) | the owner, now `install -m 0644` | 0644 | `probe` reads them |
+
+`a3` was left as it is: its modes are explicit; a `umask` line there would also be inherited by the test it runs (through `su`) and hide this class.
+**The test:** `tests/harness.rs::the_harness_starts_pledge_under_a_umask_of_0002` runs the harness's start in a child process whose umask is 0002 (`pre_exec`,
+so parallel tests are not disturbed): pledge must come up, and `config.json` must be 0600. **I put the old behaviour back once** (`fs::write` for
+`config.json`): the test failed with pledge's own words, `config.json can be written by someone other than its owner (mode 0664)`; restored, it passes.
+Runbook Stage B: the modes are written out and a paragraph says why (Debian's umask 0002 for an account with a group of its own name).

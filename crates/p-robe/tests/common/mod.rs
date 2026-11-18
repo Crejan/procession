@@ -45,6 +45,18 @@ pub fn dir_for(name: &str) -> PathBuf {
     dir
 }
 
+/// Writes a file that a program's rules will judge (pledge's `config.json`: no group or other write bit) with
+/// mode 0600, created that way: **nothing here leans on the umask**, which is 0002 for an account that has a
+/// group of its own name (Debian's default).
+pub fn write_private(path: &Path, bytes: &[u8]) {
+    use std::os::unix::fs::OpenOptionsExt;
+    let _ = fs::remove_file(path);
+    let mut file = fs::OpenOptions::new().write(true).create_new(true).mode(0o600).open(path).unwrap();
+    file.write_all(bytes).unwrap();
+    // `mode` is reduced by the umask but never raised: say it again.
+    fs::set_permissions(path, fs::Permissions::from_mode(0o600)).unwrap();
+}
+
 pub fn keygen(args: &[&str]) {
     let out = Command::new("ssh-keygen").args(args).stdin(Stdio::null()).output().expect("ssh-keygen");
     assert!(
@@ -110,7 +122,7 @@ impl Pledge {
             "hosts": [{"host": HOST, "key": host.trim()}],
             "services": [{"host": HOST, "name": "probe", "url": std::env::var("PROBE_STAGE1_URL").unwrap_or_else(|_| "http://127.0.0.1:8443/mcp".into())}],
         });
-        fs::write(state.join("config.json"), config.to_string()).unwrap();
+        write_private(&state.join("config.json"), config.to_string().as_bytes());
         let binary = pledge_binary();
         let (child, stdin, lines) = Pledge::spawn(&binary, dir, &state, &sockets);
         Pledge { child, stdin, lines, state, sockets, binary }
