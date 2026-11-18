@@ -110,6 +110,7 @@ struct Snap {
     ppid: i32,
     wchan: String,
     run_ns: Option<u64>,
+    stack: Option<Vec<String>>,
 }
 
 fn wchan(env: &Env, tgid: i32, tid: i32) -> String {
@@ -119,18 +120,36 @@ fn wchan(env: &Env, tgid: i32, tid: i32) -> String {
     if w == "0" { String::new() } else { w.to_string() }
 }
 
-fn sample(env: &Env, all: bool, report: &mut Report) -> Result<BTreeMap<i32, Snap>, Error> {
-    let scan = task::scan(&env.root, |s| s.state == 'D' || all)?;
+/// The kernel stack of a task (root only), cut to `lines`.
+fn stack(env: &Env, tgid: i32, tid: i32, lines: usize) -> Option<Vec<String>> {
+    let p = env.root.proc.join(tgid.to_string()).join("task").join(tid.to_string()).join("stack");
+    let text = std::fs::read_to_string(p).ok()?;
+    Some(text.lines().map(|l| l.trim().to_string()).filter(|l| !l.is_empty()).take(lines).collect())
+}
+
+fn sample(env: &Env, args: &Args, report: &mut Report) -> Result<BTreeMap<i32, Snap>, Error> {
+    let scan = task::scan(&env.root, |s| s.state == 'D' || args.all)?;
     report.unreadable(scan.unreadable);
-    Ok(scan
-        .items
-        .into_iter()
-        .map(|t| {
-            let w = wchan(env, t.tgid, t.tid);
-            let run_ns = task::read_counters(&env.root, t.tgid, t.tid).ok().map(|c| c.schedstat.run_ns);
-            (t.tid, Snap { tgid: t.tgid, comm: t.stat.comm, state: t.stat.state, uid: t.status.uid, ppid: t.stat.ppid, wchan: w, run_ns })
-        })
-        .collect())
+    let mut denied = 0usize;
+    let mut out = BTreeMap::new();
+    for t in scan.items {
+        let w = wchan(env, t.tgid, t.tid);
+        let wanted = t.stat.state == 'D' || NFS_WORDS.iter().any(|k| w.contains(k));
+        let stack = wanted.then(|| stack(env, t.tgid, t.tid, args.stack_lines)).flatten();
+        denied += usize::from(wanted && stack.is_none());
+        let run_ns = task::read_counters(&env.root, t.tgid, t.tid).ok().map(|c| c.schedstat.run_ns);
+        out.insert(
+            t.tid,
+            Snap { tgid: t.tgid, comm: t.stat.comm, state: t.stat.state, uid: t.status.uid, ppid: t.stat.ppid, wchan: w, run_ns, stack },
+        );
+    }
+    if denied > 0 {
+        report.unreadable([Unreadable {
+            source: "proc/<pid>/task/<tid>/stack".into(),
+            reason: format!("unreadable for {denied} tasks (needs root); wait class from wchan only"),
+        }]);
+    }
+    Ok(out)
 }
 
 /// `(mount point, fstype)` of the mounts, from `/proc/mounts`; `\040` escapes decoded.
@@ -176,9 +195,9 @@ pub fn run(env: &Env, args: &Args) -> Result<Report, Error> {
         hung_task_warnings: sysctl("hung_task_warnings"),
     });
 
-    let first = sample(env, args.all, &mut report)?;
+    let first = sample(env, args, &mut report)?;
     env.clock.pause(args.duration);
-    let second = sample(env, args.all, &mut report)?;
+    let second = sample(env, args, &mut report)?;
 
     let d_first = first.values().filter(|s| s.state == 'D').count();
     let nfsish = |s: &Snap| NFS_WORDS.iter().any(|w| s.wchan.contains(w));
@@ -194,23 +213,12 @@ pub fn run(env: &Env, args: &Args) -> Result<Report, Error> {
     picked.sort_by_key(|(tid, ..)| **tid);
 
     let mounts = mounts(env);
-    let (mut stack_denied, mut hung_n, mut nfs_n) = (0usize, 0usize, 0usize);
+    let (mut hung_n, mut nfs_n) = (0usize, 0usize);
     let (mut by_class, mut mounts_hit): (BTreeMap<WaitClass, usize>, BTreeSet<String>) = Default::default();
     let mut full_window_nfs = false;
     let mut shown = 0;
-    let read_stack = |report_denied: &mut usize, tgid: i32, tid: i32| -> Option<Vec<String>> {
-        let p = env.root.proc.join(tgid.to_string()).join("task").join(tid.to_string()).join("stack");
-        match std::fs::read_to_string(p) {
-            Ok(s) => Some(s.lines().map(|l| l.trim().to_string()).filter(|l| !l.is_empty()).take(args.stack_lines).collect()),
-            Err(_) => {
-                *report_denied += 1;
-                None
-            }
-        }
-    };
     for (tid, s, before) in &picked {
-        let stack_now = read_stack(&mut stack_denied, s.tgid, **tid);
-        let class = classify(&s.wchan, stack_now.as_deref().unwrap_or_default());
+        let class = classify(&s.wchan, s.stack.as_deref().unwrap_or_default());
         let in_d = s.state == 'D';
         hung_n += usize::from(in_d);
         nfs_n += usize::from(class == WaitClass::NfsRpc);
@@ -239,17 +247,11 @@ pub fn run(env: &Env, args: &Args) -> Result<Report, Error> {
                 cwd: cwd.map(|p| p.display().to_string()),
                 mount,
                 samples: vec![
-                    Sample { wchan: before.map(|b| b.wchan.clone()).unwrap_or_default(), stack: None },
-                    Sample { wchan: s.wchan.clone(), stack: stack_now },
+                    Sample { wchan: before.map(|b| b.wchan.clone()).unwrap_or_default(), stack: before.and_then(|b| b.stack.clone()) },
+                    Sample { wchan: s.wchan.clone(), stack: s.stack.clone() },
                 ],
             });
         }
-    }
-    if stack_denied > 0 {
-        report.unreadable([Unreadable {
-            source: "proc/<pid>/task/<tid>/stack".into(),
-            reason: format!("unreadable for {stack_denied} tasks (needs root); wait class from wchan only"),
-        }]);
     }
     report.push(&Record::Summary {
         d_state_first: d_first,

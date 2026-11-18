@@ -28,7 +28,12 @@
       "samples": [
         {
           "wchan": "rpc_wait_bit_killable",
-          "stack": null
+          "stack": [
+            "[<0>] rpc_wait_bit_killable+0x24/0x90 [sunrpc]",
+            "[<0>] __rpc_execute+0x1/0x2 [sunrpc]",
+            "[<0>] nfs4_proc_getattr+0x1/0x2 [nfsv4]",
+            "[<0>] do_syscall_64+0x5b/0x1d0"
+          ]
         },
         {
           "wchan": "rpc_wait_bit_killable",
@@ -57,7 +62,10 @@
       "samples": [
         {
           "wchan": "mutex_lock",
-          "stack": null
+          "stack": [
+            "[<0>] __mutex_lock+0x1/0x2",
+            "[<0>] do_syscall_64+0x5b/0x1d0"
+          ]
         },
         {
           "wchan": "mutex_lock",
