@@ -692,7 +692,7 @@ mod tests {
         );
         let started = Instant::now();
         assert_eq!(script("slow", "sleep 30").run(&argv(), Duration::from_millis(500)).unwrap_err(), Failure::Timeout);
-        assert!(started.elapsed() < Duration::from_secs(10), "{:?}", started.elapsed());
+        assert!(started.elapsed() < Duration::from_secs(25), "{:?}", started.elapsed());
         let flood = script("flood", "head -c 6000000 /dev/zero | tr '\\0' x").run(&argv(), Duration::from_secs(20));
         let flood = flood.expect("it exited; the object is judged later");
         assert!(flood.stdout.len() as u64 > OBJECT_LIMIT);

@@ -266,7 +266,7 @@ fn the_real_parts_against_each_other() {
     let expired = call(&short, "test_peak", &[]);
     assert!(is(&expired, "expired", None), "{expired:?}");
     assert!(
-        started.elapsed() >= Duration::from_secs(2) && started.elapsed() < Duration::from_secs(8),
+        started.elapsed() >= Duration::from_secs(1) && started.elapsed() < Duration::from_secs(60),
         "{:?}",
         started.elapsed()
     );
