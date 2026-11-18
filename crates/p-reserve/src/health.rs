@@ -134,6 +134,7 @@ fn reason_words(reason: &Reason) -> String {
         Reason::Overdue => "overdue".to_owned(),
         Reason::Stale => "stale".to_owned(),
         Reason::LastRun(outcome) => format!("last run {}", outcome.name()),
+        Reason::Interrupted => "the last run began and never ended".to_owned(),
         Reason::Unreadable(count) => format!("{count} files could not be read"),
         Reason::NeverRun => "no run on record".to_owned(),
     }

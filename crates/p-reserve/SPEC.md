@@ -77,7 +77,13 @@ preserve-gui ─────┼──> p-reserve.sock ──> preserve serve
   each has an identifier, goes on when the connection that started it closes, is
   cancelled only by an explicit message naming it, and a front end that connects
   later lists the running jobs and attaches to their events. The protocol is
-  `proposals/socket-protocol.md` (a proposal, for the designer).
+  `proposals/socket-protocol.md` (accepted by the designer as the protocol to
+  build on). Only the daemon's own uid is served. One thing about a job is
+  persisted: a start marker, written before a writing job begins and removed
+  with the ledger entry; a marker left behind becomes, at the next start, a
+  `failed` entry with the cause `interrupted` (`p_reserve_core::marker`).
+  `cancelled` means no snapshot was written and never touches the ledger; a
+  stored snapshot always does.
 - **The core decides, once.** What a run's outcome is called, which freshness
   band a source is in, which pair last succeeded: one function each, in
   `p-reserve-core`. A front end that needs words for a band maps the band,
@@ -129,6 +135,10 @@ Implemented, with tests:
   umask), read back strictly: a malformed file is an error and never an empty
   ledger (which would read as stale everywhere); a missing file is the first
   run.
+- **`marker`**: the start marker of a writing job (see "Architecture", jobs).
+  The ledger also records when the last run of any outcome was recorded
+  (`backup_last_attempt_timestamp_seconds`) and an optional cause (`interrupted`,
+  a label of `backup_last_outcome`).
 - **`health`**: the level of every declared pair, from one rule (below).
 
 ### Health
@@ -255,6 +265,9 @@ From Atticus:
 
 Where they disagree:
 
+- **A run that began and never ended** is a `failed` ledger entry with the
+  cause `interrupted`, found from the start marker at the next start; it keeps
+  the last success, so the pair ages, and `health` reports it as a warning.
 - **A snapshot with unreadable files.** Atticus counts it as a success
   ("complete with warnings"); fundament counts restic's exit 3 as a failure.
   Decided: it counts for freshness (a snapshot was made), is never shown as

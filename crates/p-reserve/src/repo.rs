@@ -143,7 +143,10 @@ impl From<EngineError> for Failure {
 }
 
 fn plain(detail: impl Into<String>) -> Failure {
-    Failure { outcome: Outcome::NotRun, detail: detail.into() }
+    Failure {
+        outcome: Outcome::NotRun,
+        detail: p_reserve_core::text::for_display(&detail.into(), p_reserve_core::text::MAX_DETAIL),
+    }
 }
 
 fn open(options: &Options) -> Result<(String, RusticEngine), Failure> {

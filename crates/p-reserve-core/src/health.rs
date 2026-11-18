@@ -19,7 +19,7 @@ use std::time::SystemTime;
 use serde::Serialize;
 
 use crate::freshness::{Freshness, Thresholds};
-use crate::ledger::{Ledger, Pair};
+use crate::ledger::{Cause, Ledger, Pair};
 use crate::outcome::{Level, Outcome};
 
 /// Why a pair is above `ok`.
@@ -30,6 +30,8 @@ pub enum Reason {
     Stale,
     /// The last run ended in this outcome, which is not `ok`.
     LastRun(Outcome),
+    /// The last run began and never ended (found at the next start).
+    Interrupted,
     /// The last successful run could not read this many files.
     Unreadable(u64),
     /// The pair is declared but the ledger has no record of it.
@@ -99,6 +101,9 @@ fn assess_pair(ledger: &Ledger, pair: &Pair, now: SystemTime, limits: &Threshold
         None => raise(Level::Ok, Reason::NeverRun),
         Some(outcome) if outcome.level() > Level::Ok => raise(outcome.level(), Reason::LastRun(outcome)),
         Some(_) => {}
+    }
+    if known.last_cause == Some(Cause::Interrupted) {
+        raise(Level::Warning, Reason::Interrupted);
     }
     if known.last_unreadable > 0 {
         raise(Level::Warning, Reason::Unreadable(known.last_unreadable));

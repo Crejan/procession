@@ -48,8 +48,8 @@ impl std::fmt::Debug for RusticEngine {
     }
 }
 
-fn fail(outcome: Outcome, detail: impl Into<String>) -> EngineError {
-    EngineError { outcome, detail: detail.into() }
+fn fail(outcome: Outcome, detail: impl AsRef<str>) -> EngineError {
+    EngineError { outcome, detail: crate::text::for_display(detail.as_ref(), crate::text::MAX_DETAIL) }
 }
 
 /// What a rustic error is called. Only the kinds that mean something to a

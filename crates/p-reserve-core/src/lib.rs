@@ -12,12 +12,16 @@ pub mod engine;
 pub mod freshness;
 pub mod health;
 pub mod ledger;
+pub mod marker;
 pub mod outcome;
 pub mod rustic;
 #[cfg(any(test, feature = "testing"))]
 pub mod testing;
+pub mod text;
 pub mod textfile;
+#[cfg(test)]
+mod umask;
 
 pub use freshness::{Freshness, Thresholds};
-pub use ledger::{Entry, Ledger, Pair, Run};
+pub use ledger::{Cause, Entry, Ledger, Pair, Run};
 pub use outcome::{Level, Outcome};
