@@ -171,6 +171,7 @@ mod tests {
             action: "rt procs".into(),
             title: None,
             description: "d".into(),
+            host_text: false,
             schema: json!({}),
             annotations: None,
             bounds: Bounds { max_items: 3, item_max_len: 20, claim_max_len: 200 },

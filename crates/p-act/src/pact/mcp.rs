@@ -296,11 +296,11 @@ mod tests {
     type Handler = dyn Fn(&Service, &Value, &CancelToken) -> Result<Value, TransportError> + Send + Sync;
 
     fn schema() -> Value {
-        json!({"type": "object", "properties": {"params": {"type": "array", "maxItems": 3, "items": {"type": "string", "maxLength": 64}}, "claim": {"type": "string", "maxLength": 200}, "wait_seconds": {"type": "integer"}}, "additionalProperties": false})
+        json!({"type": "object", "properties": {"params": {"type": "array", "maxItems": 3, "items": {"type": "string", "maxLength": 64}}, "claim": {"type": "string", "maxLength": 200}}, "additionalProperties": false})
     }
 
     fn listing() -> Value {
-        json!({"jsonrpc": "2.0", "id": 1, "result": {"tools": [{"name": "rt_procs", "description": "Rated: internal, none, none. Lists processes.", "inputSchema": schema()}]}})
+        json!({"jsonrpc": "2.0", "id": 1, "result": {"tools": [{"name": "rt_procs", "description": "Rated: internal, none, none. Lists processes.", "inputSchema": schema(), "_meta": {"procession/host_text": false}}]}})
     }
 
     fn done(request: &Value, rc: i64, text: &str) -> Value {
