@@ -46,6 +46,11 @@ path = "tests/stage1.rs"
 required-features = ["test-verbs"]
 
 [[test]]
+name = "harness"
+path = "tests/harness.rs"
+required-features = ["test-verbs"]
+
+[[test]]
 name = "stage1_http"
 path = "tests/stage1_http.rs"
 required-features = ["test-verbs"]
