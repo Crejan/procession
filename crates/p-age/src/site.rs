@@ -24,6 +24,12 @@ pub enum SiteError {
     BadKey { what: &'static str, name: String, source: SignError },
     #[error("`{0}` appears twice")]
     Duplicate(String),
+    #[error("`verified_on` of `{name}` is not a date (YYYY-MM-DD): {value}")]
+    BadDate { name: String, value: String },
+    #[error("`{0}` is not enabled and has keys: the view the broker is given has none for a person who is not enabled")]
+    KeysOnDisabled(String),
+    #[error("`{name}`'s keys: {why}")]
+    KeysClash { name: String, why: String },
 }
 
 /// A person's name or a host's name: `[A-Za-z0-9._-]+`, at most 64 characters.
@@ -34,19 +40,36 @@ pub fn valid_name(name: &str) -> bool {
         && name.bytes().all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'-'))
 }
 
+/// One of a person's four keys, as the fundament note has the row: `{key, verified_on?}`.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct KeyRow {
+    key: String,
+    /// A calendar date, `YYYY-MM-DD`. Checked for its shape and not used.
+    #[serde(default)]
+    verified_on: Option<String>,
+}
+
+/// The four keys, as one object with exactly these members: a partial set is refused (by `serde`: a member is
+/// missing).
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct KeysFile {
+    confirmed: KeyRow,
+    automatic: KeyRow,
+    delegation: KeyRow,
+    connection: KeyRow,
+}
+
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct PersonFile {
     name: String,
     enabled: bool,
-    connection_key: String,
-    delegation_key: String,
-    /// The person's approval keys as public keys (not their certificates): with the two above, the "four keys".
-    /// Optional; they let the broker tell whose a blocked key is.
+    /// The person's four keys. Absent for a person who has no approval keys at all (they can neither sign in nor
+    /// approve); never partial, and never on a person who is not enabled (the view the broker is given has none).
     #[serde(default)]
-    confirmed_key: Option<String>,
-    #[serde(default)]
-    automatic_key: Option<String>,
+    keys: Option<KeysFile>,
     /// Certificates of the person's approval keys as the issuer made them, to be carried to pledge.
     #[serde(default)]
     certificates: Vec<String>,
@@ -69,17 +92,26 @@ struct SiteFile {
     hosts: Vec<HostFile>,
 }
 
+/// A person's four keys: the purposes are a closed vocabulary, each exactly once, and four different keys.
+#[derive(Debug, Clone)]
+pub struct PersonKeys {
+    /// Signs approvals the person was asked for.
+    pub confirmed: PublicKey,
+    /// Signs approvals in mode `automatic`.
+    pub automatic: PublicKey,
+    /// What the person's delegations are certified by.
+    pub delegation: PublicKey,
+    /// What pledge signs in with.
+    pub connection: PublicKey,
+}
+
 /// A person of the site.
 #[derive(Debug, Clone)]
 pub struct Person {
     /// `enabled` in the site project.
     pub enabled: bool,
-    /// What pledge signs in with.
-    pub connection_key: PublicKey,
-    /// What the person's delegations are certified by.
-    pub delegation_key: PublicKey,
-    /// The confirmed and the automatic approval key, if the site file has them.
-    pub approval_keys: Vec<PublicKey>,
+    /// The four keys, if the person has any.
+    pub keys: Option<PersonKeys>,
     pub certificates: Vec<String>,
     pub groups: Vec<String>,
 }
@@ -97,8 +129,8 @@ fn key(what: &'static str, name: &str, line: &str) -> Result<PublicKey, SiteErro
 
 impl Site {
     /// Read the site file: JSON, one object, an unknown member refused, the file refused if anyone but its owner or
-    /// root can write it (`p_act::settings`). `{"persons":[{"name","enabled","connection_key","delegation_key"}],
-    /// "hosts":[{"name","key"}]}`.
+    /// root can write it (`p_act::settings`). `{"persons":[{"name","enabled","keys":{"confirmed":{"key"},"automatic":…,
+    /// "delegation":…,"connection":…}}],"hosts":[{"name","key"}]}`.
     pub fn read(path: &Path) -> Result<Site, SiteError> {
         Site::from_file(p_act::settings::read(path)?)
     }
@@ -133,17 +165,42 @@ impl Site {
                 groups: groups.clone(),
             };
             Standing::compose(&probe).map_err(|source| SiteError::BadStanding { name: p.name.clone(), source })?;
-            let person = Person {
-                enabled: p.enabled,
-                connection_key: key("connection key", &p.name, &p.connection_key)?,
-                delegation_key: key("delegation key", &p.name, &p.delegation_key)?,
-                approval_keys: [("confirmed key", &p.confirmed_key), ("automatic key", &p.automatic_key)]
-                    .into_iter()
-                    .filter_map(|(what, line)| line.as_ref().map(|l| key(what, &p.name, l)))
-                    .collect::<Result<_, _>>()?,
-                certificates,
-                groups,
+            let keys = match p.keys {
+                None => None,
+                Some(_) if !p.enabled => return Err(SiteError::KeysOnDisabled(p.name)),
+                Some(k) => {
+                    for row in [&k.confirmed, &k.automatic, &k.delegation, &k.connection] {
+                        if let Some(date) = &row.verified_on
+                            && !is_date(date)
+                        {
+                            return Err(SiteError::BadDate { name: p.name, value: date.clone() });
+                        }
+                    }
+                    let parsed = PersonKeys {
+                        confirmed: key("confirmed key", &p.name, &k.confirmed.key)?,
+                        automatic: key("automatic key", &p.name, &k.automatic.key)?,
+                        delegation: key("delegation key", &p.name, &k.delegation.key)?,
+                        connection: key("connection key", &p.name, &k.connection.key)?,
+                    };
+                    // One key under two names would make a confirmed approval of an automatic one (and a
+                    // delegation of a sign-in): the four are four different keys.
+                    let fingerprints: Vec<_> =
+                        [&parsed.confirmed, &parsed.automatic, &parsed.delegation, &parsed.connection]
+                            .iter()
+                            .map(|k| k.fingerprint())
+                            .collect();
+                    for (i, a) in fingerprints.iter().enumerate() {
+                        if fingerprints[i + 1..].contains(a) {
+                            return Err(SiteError::KeysClash {
+                                name: p.name,
+                                why: "two of the four are the same key".to_owned(),
+                            });
+                        }
+                    }
+                    Some(parsed)
+                }
             };
+            let person = Person { enabled: p.enabled, keys, certificates, groups };
             if site.persons.insert(p.name.clone(), person).is_some() {
                 return Err(SiteError::Duplicate(p.name));
             }
@@ -155,6 +212,23 @@ impl Site {
             let k = key("host key", &h.name, &h.key)?;
             if site.hosts.insert(h.name.clone(), k).is_some() {
                 return Err(SiteError::Duplicate(h.name));
+            }
+        }
+        // No key is another person's, and none is a host's.
+        let mut seen: BTreeMap<String, String> = BTreeMap::new();
+        for (name, person) in &site.persons {
+            for fp in person.key_fingerprints() {
+                if let Some(other) = seen.insert(fp.to_string(), name.clone()) {
+                    return Err(SiteError::KeysClash { name: name.clone(), why: format!("a key is also `{other}`'s") });
+                }
+            }
+        }
+        for (host, k) in &site.hosts {
+            if let Some(owner) = seen.get(&k.fingerprint().to_string()) {
+                return Err(SiteError::KeysClash {
+                    name: owner.clone(),
+                    why: format!("a key is also host `{host}`'s"),
+                });
             }
         }
         Ok(site)
@@ -187,13 +261,36 @@ impl Site {
 }
 
 impl Person {
-    /// The fingerprints of the person's keys the site file has: connection, delegation, and the approval keys.
+    /// The fingerprints of the person's keys: the four, or none.
     #[must_use]
     pub fn key_fingerprints(&self) -> Vec<p_act::sign::Fingerprint> {
-        [&self.connection_key, &self.delegation_key]
-            .into_iter()
-            .chain(&self.approval_keys)
+        self.keys
+            .iter()
+            .flat_map(|k| [&k.confirmed, &k.automatic, &k.delegation, &k.connection])
             .map(PublicKey::fingerprint)
             .collect()
     }
+
+    /// What pledge signs in with, if the person has keys.
+    #[must_use]
+    pub fn connection_key(&self) -> Option<&PublicKey> {
+        self.keys.as_ref().map(|k| &k.connection)
+    }
+
+    /// What the person's delegations are certified by, if the person has keys.
+    #[must_use]
+    pub fn delegation_key(&self) -> Option<&PublicKey> {
+        self.keys.as_ref().map(|k| &k.delegation)
+    }
+}
+
+/// A calendar date as `YYYY-MM-DD`: the shape and the ranges of month and day (not the month's length).
+fn is_date(s: &str) -> bool {
+    let b = s.as_bytes();
+    b.len() == 10
+        && b[4] == b'-'
+        && b[7] == b'-'
+        && b.iter().enumerate().all(|(i, c)| matches!(i, 4 | 7) || c.is_ascii_digit())
+        && (1..=12).contains(&s[5..7].parse::<u8>().unwrap_or(0))
+        && (1..=31).contains(&s[8..10].parse::<u8>().unwrap_or(0))
 }

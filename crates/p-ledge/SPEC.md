@@ -362,12 +362,23 @@ involved.
 
 - **The name.** `pledge` unless a better one turns up.
 - **Whether the Secure Enclave can hold keys with and without a presence
-  check side by side**, each usable only by pledge's key holder. Assumed,
-  and not to be claimed for the Mac form until it is checked: whether a key
-  kept as a blob in a file can be used by another program of the same
-  person is check 3 of `proposals/stage2-mac.md`, and decides between a blob
-  and the keychain with an access group. Nothing of step 4 is built before
-  the owner has run that proposal's checks 1 to 5.
+  check side by side.** They can (the owner's check of 2026-11-18,
+  `proposals/stage2-mac.md`, check 0). But a key kept as a blob in a file is
+  **not** usable only by pledge's key holder (check 3): another program of
+  the same person, with another signature, loaded a copied blob of a key
+  without a presence check and signed with it, with no prompt; with a key
+  that has a presence check it raised the Touch ID prompt under its own
+  name and signed after the touch. Decided: blobs in files for stage 2, and
+  said plainly. The automatic key and the connection key are then protected
+  only against leaving the machine: any program that runs as the person and
+  can read the blob can use them. So the blob files and their directory
+  follow the strictest file rule the workspace has (the directory 0700, the
+  files 0600, owned by the person, refused otherwise), since that is their
+  only protection. For a key with a presence check the touch is the only
+  barrier and the prompt's text the person's only way to see who asks, so
+  the key holder always puts its own fixed words first. The keychain with
+  an access group is a step of its own before a site uses this. Nothing of
+  step 4 is built before the owner has run the proposal's checks 1 to 5.
 - **One desktop app for p-reserve and p-ledge, or one each.** *Proposal:*
   one each; they are two programs with two purposes, and p-ledge's is small.
 - **The interfaces**: the three sockets, the record's format. After the
