@@ -1,0 +1,20 @@
+[package]
+name = "p-roc"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.91"
+description = "Reads, and where asked writes, what the Linux kernel exposes about CPUs, threads, IRQs, sockets and devices"
+license = "MIT OR Apache-2.0"
+keywords = ["realtime", "procfs", "sysfs", "affinity", "isolcpus"]
+categories = ["os::linux-apis"]
+include = ["src/**"]
+publish = false
+
+[dependencies]
+libc = "0.2"
+serde = { version = "1", features = ["derive"] }
+thiserror = "2"
+
+[dev-dependencies]
+serde_json = "1"
+tempfile = "3"

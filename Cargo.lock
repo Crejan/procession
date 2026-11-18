@@ -726,6 +726,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "p-roc"
+version = "0.1.0"
+dependencies = [
+ "libc",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror",
+]
+
+[[package]]
 name = "p-usher"
 version = "0.1.0"
 dependencies = [
@@ -734,6 +745,7 @@ dependencies = [
  "lettre",
  "libc",
  "nix",
+ "p-roc",
  "regex",
  "serde",
  "signal-hook",
