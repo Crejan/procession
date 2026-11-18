@@ -342,6 +342,16 @@ shows `Principals: probe@HOSTNAME` and a `Valid:` that ends in 30 days. Did not
 pass: it prints `probe setup: ssh-keygen: ...` (a host key it cannot read, a name
 that is not a key) and **leaves no key behind**. Undo: `rm -rf /etc/probe`.
 
+**Changes for a caller (p-act's `keygen`).** `probe setup` (and the renewal timer, and every signature the service makes or checks) no longer
+starts the `ssh-keygen` that `PATH` finds. It starts only `/usr/bin/ssh-keygen`, with a cleared environment (no `HOME`, no `SSH_AUTH_SOCK`), and only if that
+program, `/usr/bin/ssh` beside it, and every directory above them (links resolved) are owned by root and not writable by group or others, and OpenSSH is 8.9 or
+later. Otherwise `probe setup` refuses **before it makes or changes anything**, with `probe setup: ssh-keygen cannot be used: <path> is not trusted: <why>` (or
+`... does not exist: install the OpenSSH client`, or `OpenSSH 8.9 or later is needed (found: ...)`). So a setup that worked with an OpenSSH found through `PATH`
+(`/usr/local/bin`, Homebrew, nix) is now refused: install the distribution's client at `/usr/bin`. `sys kit` reports `ssh_keygen`, `ssh_keygen_version`,
+`ssh_keygen_usable` and `ssh_keygen_problem`, and warns when it cannot be used. **Not checked yet:** the Stage A container's `ssh-keygen` (Debian 13: expected
+`/usr/bin/ssh-keygen`, root-owned, OpenSSH 10.x; in an unprivileged container root inside is uid 0 and `/usr/bin` is root's); on this Mac `sys kit` says
+`"ssh_keygen":"/usr/bin/ssh-keygen","ssh_keygen_version":"10.2","ssh_keygen_usable":true`. Run `probe sys kit` as the first thing in Stage B and read those fields.
+
 **It is also the renewing command, and idempotent.** Run again (as root, with
 the same arguments or none once B3 is in place; with `--if-due` only when due) it keeps the key, makes a new
 certificate in a directory of its own and renames it over the old one, owned by

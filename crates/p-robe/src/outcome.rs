@@ -124,6 +124,10 @@ pub fn broker(reason: BrokerReason) -> Outcome {
         B::NotEntitled | B::Person | B::Delegation | B::Unknown => Outcome::Refused(Why::NotAllowed),
         B::BadRequest | B::Deadline => Outcome::Refused(Why::Invalid),
         B::TooManyWaiting | B::Busy => Outcome::Refused(Why::TryLater),
+        // The broker has no valid certificate of its own (also when an approval came back while it had none: no
+        // clearance). Nothing is wrong with the call, and nothing is asked again in a loop: the service says
+        // `unavailable` and logs `broker:not-ready`.
+        B::NotReady => Outcome::Unavailable,
     }
 }
 
@@ -183,6 +187,7 @@ mod tests {
             ("not-entitled", "refused/not-allowed"),
             ("too-many-waiting", "refused/try-later"),
             ("busy", "refused/try-later"),
+            ("not-ready", "unavailable"),
         ];
         assert_eq!(BrokerReason::ALL.len(), expected.len(), "a code was added: say what an agent sees");
         for (wire, agent) in expected {
@@ -223,5 +228,6 @@ mod tests {
     fn the_exact_code_names_who_said_it() {
         assert_eq!(refusal(Refused::Pledge(PledgeReason::Ceiling)).1, "pledge:ceiling");
         assert_eq!(refusal(Refused::Broker(BrokerReason::Busy)).1, "broker:busy");
+        assert_eq!(refusal(Refused::Broker(BrokerReason::NotReady)).1, "broker:not-ready");
     }
 }

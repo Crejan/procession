@@ -734,6 +734,13 @@ mod tests {
         assert!(lines.iter().any(|l| l.contains("\"type\":\"installation\"") && l.contains("\"identity\":\"jan\"")));
         assert!(lines.iter().any(|l| l.contains("\"noun\":\"rt\",\"verb\":\"jitter\",\"status\":\"unavailable\"")));
         assert!(lines.last().unwrap().contains("\"type\":\"summary\""));
+        // The program that makes and checks signatures: the fixed path, and whether it can be used.
+        assert!(
+            lines
+                .iter()
+                .any(|l| l.contains("\"ssh_keygen\":\"/usr/bin/ssh-keygen\"") && l.contains("\"ssh_keygen_usable\":")),
+            "{lines:?}"
+        );
     }
 
     #[test]

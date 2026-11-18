@@ -16,7 +16,7 @@
 
 use std::os::unix::fs::{MetadataExt, PermissionsExt};
 use std::path::Path;
-use std::process::{Command, Stdio};
+use std::process::Stdio;
 
 use crate::service::SERVICE_NAME;
 
@@ -137,6 +137,8 @@ pub fn run_if_due(host_key: &Path, host: &str, out: &Path, now: i64) -> Result<I
 /// # Errors
 /// What `ssh-keygen` said, or why a file could not be prepared.
 pub fn run(host_key: &Path, host: &str, out: &Path) -> Result<Done, String> {
+    // Before anything is made or changed: a program that cannot be trusted is refused with its reason.
+    system_keygen()?;
     let principal = format!("{SERVICE_NAME}@{host}");
     let created = !out.exists();
     std::fs::create_dir_all(out).map_err(|e| format!("{}: {e}", out.display()))?;
@@ -210,11 +212,20 @@ fn keygen(args: &[&str]) -> Result<(), String> {
     keygen_output(args).map(|_| ())
 }
 
+/// The system's `ssh-keygen`, or why it cannot be used: the fixed `/usr/bin/ssh-keygen`, it and every directory above
+/// it owned by root and not writable by group or others, OpenSSH 8.9 or later, started with a cleared environment
+/// (`p_act::keygen`). Not the one `PATH` would find.
+///
+/// # Errors
+/// What is wrong, in words that name the path and the reason.
+pub fn system_keygen() -> Result<&'static p_act::keygen::Keygen, String> {
+    p_act::keygen::Keygen::system().map_err(|e| format!("ssh-keygen cannot be used: {e}"))
+}
+
 fn keygen_output(args: &[&str]) -> Result<Vec<u8>, String> {
-    let output = Command::new("ssh-keygen")
+    let output = system_keygen()?
+        .command()
         .args(args)
-        .env("SSH_ASKPASS", "false")
-        .env("SSH_ASKPASS_REQUIRE", "force")
         .stdin(Stdio::null())
         .output()
         .map_err(|e| format!("cannot run ssh-keygen: {e}"))?;
