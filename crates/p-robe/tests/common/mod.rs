@@ -47,7 +47,13 @@ pub fn dir_for(name: &str) -> PathBuf {
 
 pub fn keygen(args: &[&str]) {
     let out = Command::new("ssh-keygen").args(args).stdin(Stdio::null()).output().expect("ssh-keygen");
-    assert!(out.status.success(), "ssh-keygen {args:?}: {}", String::from_utf8_lossy(&out.stderr));
+    assert!(
+        out.status.success(),
+        "ssh-keygen {args:?}: {}\n  standard output: {}\n  standard error: {}",
+        out.status,
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
 }
 
 /// `target/debug/pledge`, next to this test's `deps` directory.
@@ -60,6 +66,28 @@ pub fn pledge_binary() -> PathBuf {
         path.display()
     );
     path
+}
+
+/// Panics with everything a program that did not start said: its exit status (or that it is still running)
+/// and every line it wrote to standard output and standard error. A start failure always comes with the
+/// program's own words.
+pub fn start_failed(child: &mut Child, lines: &Receiver<String>, what: &str) -> ! {
+    std::thread::sleep(Duration::from_millis(300)); // what it wrote last, and its readers, get a moment
+    let status = match child.try_wait() {
+        Ok(Some(status)) => format!("exited: {status}"),
+        Ok(None) => "still running".to_string(),
+        Err(e) => format!("status unknown: {e}"),
+    };
+    let written: Vec<String> = std::iter::from_fn(|| lines.try_recv().ok()).collect();
+    panic!(
+        "pledge serve did not start: {what}\n  the process: {status}\n  what it wrote ({} lines):\n{}",
+        written.len(),
+        if written.is_empty() {
+            "    (nothing)".to_string()
+        } else {
+            written.iter().map(|l| format!("    {l}")).collect::<Vec<_>>().join("\n")
+        }
+    );
 }
 
 pub struct Pledge {
@@ -100,7 +128,7 @@ impl Pledge {
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .spawn()
-            .expect("pledge serve");
+            .unwrap_or_else(|e| panic!("cannot start {}: {e}", binary.display()));
         let stdin = child.stdin.take().unwrap();
         let (tx, lines) = mpsc::channel();
         let (out, err) = (child.stdout.take().unwrap(), child.stderr.take().unwrap());
@@ -117,10 +145,15 @@ impl Pledge {
         let started = Instant::now();
         for socket in ["agent.sock", "control.sock", "service.sock"] {
             while UnixStream::connect(sockets.join(socket)).is_err() {
-                assert!(
-                    started.elapsed() < Duration::from_secs(10),
-                    "pledge serve did not start: {socket} does not answer"
-                );
+                // If it has already gone, say so at once, with what it wrote; else after 10 seconds.
+                let exited = child.try_wait().ok().flatten();
+                if exited.is_some() || started.elapsed() > Duration::from_secs(10) {
+                    start_failed(
+                        &mut child,
+                        &lines,
+                        &format!("{socket} does not answer ({})", sockets.join(socket).display()),
+                    );
+                }
                 std::thread::sleep(Duration::from_millis(50));
             }
         }
@@ -178,7 +211,13 @@ impl Pledge {
 
     pub fn ok(&self, args: &[&str]) -> String {
         let out = self.run(args);
-        assert!(out.status.success(), "pledge {args:?}: {}", String::from_utf8_lossy(&out.stderr));
+        assert!(
+            out.status.success(),
+            "pledge {args:?}: {}\n  standard output: {}\n  standard error: {}",
+            out.status,
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr)
+        );
         String::from_utf8_lossy(&out.stdout).into_owned()
     }
 

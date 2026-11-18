@@ -49,10 +49,16 @@ fn pact_call(bundle: &[u8], tool: &str, arguments: &Value) -> Value {
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
-        .expect("pact");
+        .unwrap_or_else(|e| panic!("cannot start pact: {e}"));
     child.stdin.take().unwrap().write_all(bundle).unwrap();
     let out = child.wait_with_output().unwrap();
-    assert!(out.status.success(), "pact: {}", String::from_utf8_lossy(&out.stderr));
+    assert!(
+        out.status.success(),
+        "pact {tool}: {}\n  standard output: {}\n  standard error: {}",
+        out.status,
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
     serde_json::from_slice(&out.stdout).unwrap_or_else(|_| panic!("not JSON: {}", String::from_utf8_lossy(&out.stdout)))
 }
 
