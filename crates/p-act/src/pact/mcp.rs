@@ -385,7 +385,8 @@ mod tests {
 
         fn recv(&mut self) -> Value {
             let mut line = String::new();
-            self.r.read_line(&mut line).unwrap();
+            // A server that has closed may reset instead of ending the stream (macOS): either is "closed".
+            let _ = self.r.read_line(&mut line);
             assert!(!line.is_empty(), "the server closed");
             serde_json::from_str(&line).unwrap()
         }
@@ -592,9 +593,13 @@ mod tests {
 
     #[test]
     fn progress_is_pacts_own_fixed_text_and_only_for_a_client_that_asked() {
+        // The service holds each call until the test has heard what it wants to hear: no fixed wait, so no load
+        // can make the ticker late for it.
+        let (release, held) = std::sync::mpsc::channel::<()>();
+        let held = Mutex::new(held);
         let e = env_with(
-            |_, r, _| {
-                std::thread::sleep(Duration::from_millis(400));
+            move |_, r, _| {
+                let _ = held.lock().unwrap().recv_timeout(Duration::from_secs(60));
                 Ok(done(r, 0, "x"))
             },
             Duration::from_millis(40),
@@ -607,6 +612,9 @@ mod tests {
             let m = c.recv();
             if m["method"] == "notifications/progress" {
                 progress.push(m);
+                if progress.len() == 3 {
+                    let _ = release.send(());
+                }
             } else {
                 break m;
             }
@@ -631,7 +639,9 @@ mod tests {
             },
             json!(5)
         );
+        let _ = release.send(());
         c.finish();
+        // No token: the ticker never starts, however long the service takes (it takes a while, to give one the chance).
         let e = env_with(
             |_, r, _| {
                 std::thread::sleep(Duration::from_millis(200));

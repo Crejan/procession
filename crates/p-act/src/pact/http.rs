@@ -780,8 +780,11 @@ mod tests {
     fn a_cancel_closes_the_connection_which_is_the_services_cancel() {
         let (closed_tx, closed_rx) = mpsc::channel::<()>();
         let closed_tx = std::sync::Mutex::new(closed_tx);
+        let (held_tx, held_rx) = mpsc::channel::<()>();
+        let held_tx = std::sync::Mutex::new(held_tx);
         let Some(f) = fake(move |s| {
             send(s, "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nConnection: close\r\n\r\n: keepalive\n\n");
+            let _ = held_tx.lock().unwrap().send(()); // the call is in progress: now it may be cancelled
             // Hold the call; the client closing is how this service learns of a cancel.
             let mut buf = [0u8; 16];
             while s.read(&mut buf).unwrap_or(0) > 0 {}
@@ -793,7 +796,8 @@ mod tests {
         let cancel = CancelToken::default();
         let c2 = cancel.clone();
         let canceller = thread::spawn(move || {
-            thread::sleep(Duration::from_millis(300));
+            // Cancel when the service says it has the call, not after a fixed time.
+            let _ = held_rx.recv_timeout(Duration::from_secs(10));
             c2.cancel();
         });
         let started = std::time::Instant::now();
