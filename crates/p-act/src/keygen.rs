@@ -214,6 +214,14 @@ mod tests {
     use super::*;
     use std::os::unix::fs::PermissionsExt;
 
+    /// A temporary directory with mode 0755 set explicitly: what a directory is created with depends on the umask,
+    /// and under 002 it would come out group-writable and be refused, as it should be.
+    fn dir_0755() -> tempfile::TempDir {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o755)).unwrap();
+        dir
+    }
+
     fn own() -> u32 {
         // SAFETY: `geteuid` has no arguments and cannot fail.
         unsafe { libc::geteuid() }
@@ -261,7 +269,7 @@ mod tests {
 
     #[test]
     fn a_program_that_is_missing_writable_or_foreign_is_refused_with_the_reason() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = dir_0755();
         let tool = dir.path().join("tool");
         std::fs::write(&tool, "#!/bin/sh\n").unwrap();
         std::fs::set_permissions(&tool, std::fs::Permissions::from_mode(0o755)).unwrap();
@@ -289,7 +297,7 @@ mod tests {
 
     #[test]
     fn what_the_program_is_given_is_cleared_and_explicit() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = dir_0755();
         let tool = dir.path().join("env");
         std::fs::write(&tool, "#!/bin/sh\nexec /usr/bin/env\n").unwrap();
         std::fs::set_permissions(&tool, std::fs::Permissions::from_mode(0o755)).unwrap();
