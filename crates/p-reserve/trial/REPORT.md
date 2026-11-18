@@ -101,3 +101,49 @@ Open questions for the owner and designer: whether `forget` is its own verb, whe
 - Keep `rustic_core` and `rustic_backend` out of the default workspace build once they are used. The brief says to do this the way `p-lumber` is kept out; I made no workspace change.
 
 Not verified: any actual SFTP connection, the agent selection by public key, the memory and time to open, and whether the `rustic_core` program compiles.
+
+---
+
+# Owner's run, 2026-11-18 (outside the sandbox, on his Mac)
+
+Recorded as reported to me; I did not see the machine. This supersedes "not run" above for
+the items below. The script at that time was e372d50's; it has since been changed (see
+"Script changes").
+
+| Step | Result |
+|---|---|
+| Baseline: restic over SFTP, `sftp.command` with key, pinned known_hosts, strict | **Worked.** Snapshot dbc721c9, 2 files. |
+| A1: rustic through OpenDAL, strict, pinned known_hosts not passable | **Failed as predicted.** `failed to connect to the remote host: No ED25519 host key is known for [127.0.0.1]:22222 and you have requested strict checking. Host key verification failed.` Surfaced by rustic_core as an error "related to the backend ... Checking for the presence of `config` in the backend failed". |
+| A2: pinned entry appended to the real `~/.ssh/known_hosts` | **Worked.** `repository opendal:sftp:: password is correct`, 1 snapshot (dbc721c9, 2 files, 8 B). |
+| B: ssh-agent, `key` pointing at a public half only | **Worked**, same listing. That the signature came from the agent is the designer's reading (only the trial's key was authorised and the file had no private half); the output does not state it. |
+| C: the rustic_core program under `/usr/bin/time -l cargo run --release 2>&1 \| tail -30` | **No output for about 15 minutes, interrupted.** With `tail`, a long first release build and a hang look the same. The ssh-agent had been killed just before C, as the script does. **Unknown which.** |
+
+What this settles: key file and strict checking pass through OpenDAL; the agent route works
+with `key` = public half; a pinned known_hosts cannot be passed, only placed in the real
+`~/.ssh/known_hosts` (or `/etc/ssh/ssh_known_hosts`, or a `Host` stanza in `~/.ssh/config`).
+Unsettled: open time and memory (C), whether the program compiles at all, whether C hangs.
+A plausible but unproven reading of C: a first release build of rustic_core with OpenDAL's
+dependency closure is several minutes of compile; a hang in `open` would need ssh waiting
+(for example on a stale `SSH_AUTH_SOCK`; the new script unsets it before C).
+
+## Which versions he ran
+Not recorded. To know them, read off his machine:
+- `rustic --version`, and `cargo install --list | grep rustic` (the `rustic-rs` binary, resolved
+  on the day by `cargo install rustic-rs`);
+- for the trial program: `grep -A1 -E 'name = "rustic_(core|backend)"' crates/p-reserve/trial/Cargo.lock`
+  (the Cargo.toml pins `=0.13.0` and `=0.7.0`, so those, unless he edited it; the registry
+  holds 0.14.0 and 0.8.0 too);
+- `restic version`, `ssh -V`, `rustc --version`.
+The new script prints all of these at its start.
+
+## Script changes (after this run)
+- C builds first as its own visible step (`cargo build --release`, no `tail`); `sh run-trial.sh build`
+  builds only.
+- C runs from the built binary, with progress lines before opening, listing and restoring.
+- `sh run-trial.sh c` runs only C, against the sshd the script starts (and the repository it makes).
+- `INT`, `TERM`, `HUP` and normal exit all run one cleanup: kills the agent and sshd, removes
+  exactly the known_hosts line the script appended (only if it added it), kills leftover
+  `ssh-connection` master processes for 127.0.0.1. It prints three checks:
+  `grep -c '\[127.0.0.1\]:22222' ~/.ssh/known_hosts` (expect 0), `pgrep -fl 'p-reserve-trial|ssh-connection'`
+  (expect nothing), `lsof -nP -iTCP:22222 -sTCP:LISTEN` (expect nothing).
+- Not run by me: the script is still untested in the sandbox (it cannot bind a port). `/usr/bin/time -l` is the macOS form.
