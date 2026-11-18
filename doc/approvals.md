@@ -140,7 +140,14 @@ calls in mode automatic, and what it tells its person. A service returns
 results as structured content with named fields, never as prose it
 composed, and says of each action whether its result can carry such text;
 that is a courtesy to an honest model and a handle for a person, not a
-control.
+control. One place remains where a service addresses a model in words of its
+own: the description of each of its actions in the catalogue, one line of at
+most 600 characters under the character rule (an action whose description
+fails is dropped, never cut). Those are the service's words; a service that
+is taken over can lie in them as it can in its results, and what bounds the
+damage is the same. The sentence that says an action's result can carry
+text from the host is not among them: the signer adds it itself, in the
+same words for every service.
 
 **R3. An agent may have carried out at most what its person may.** A
 delegation names some of the person's groups and can only narrow. Nobody but
@@ -648,7 +655,9 @@ Open:
 - **TLS between an agent and a service on another host.** Not in stage 1.
   For stage 2: the service presents a certificate under the site's TLS root
   (or a pinned one), and the sandbox is given that root with the agent's
-  key.
+  key. More than privacy depends on it: what a service tells the signer of
+  a call's outcome is not signed, so what a model is told rests on this
+  connection. In stage 1 it is loopback.
 - **TLS for the broker on a site without a certificate authority.** The
   requirement is a certificate that pledge and services can verify: from the
   site's own where there is one, pinned otherwise. Left to the binding.
