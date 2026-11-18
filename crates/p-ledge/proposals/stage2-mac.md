@@ -71,15 +71,15 @@ process that set the prompt's text: software, not hardware (sections 2 and
 
 | Key (`doc/approvals.md` section 5; `SPEC.md` section 2) | In the Secure Enclave | Presence in the key | Accessible | Type |
 |---|---|---|---|---|
-| confirmed approval | yes | yes, each signature | when unlocked | P-256 |
-| automatic approval | yes | **none** | question 4 | P-256 |
-| delegation | yes | yes, each signature | when unlocked | P-256 |
+| confirmed approval | yes | yes, each signature: Touch ID only (`.biometryAny`) | when unlocked | P-256 |
+| automatic approval | yes | **none** | after first unlock | P-256 |
+| delegation | yes | yes, each signature: Touch ID only (`.biometryAny`) | when unlocked | P-256 |
 | connection | yes | **none** | after first unlock | P-256 |
-| shared (logins, `git`/`file` signatures) | yes | yes, each signature | when unlocked | P-256 |
+| shared (logins, `git`/`file` signatures) | yes | yes, each signature: Touch ID or password (`.userPresence`) | when unlocked | P-256 |
 | bound (one program's login) | yes | **none** | after first unlock | P-256 |
 
-Which presence flag ("Touch ID only" or "Touch ID or password") is question
-1; it differs per key.
+The presence flags and the automatic key's "after first unlock" are the
+owner's decisions of 2026-11-18 (questions 1 and 4).
 
 All six can be Secure Enclave keys as far as the formats go:
 
@@ -261,7 +261,10 @@ What follows for pledge, whatever question 1 decides:
   pledge over `control.sock`; the touch happens at the Mac. That is right:
   whoever only has the person's SSH login cannot start an agent.
 
-**Password in place of Touch ID, per key** (question 1):
+**Password in place of Touch ID, per key** (question 1, decided by the
+owner on 2026-11-18: Touch ID only for confirmed approvals and delegations,
+so a Mac that cannot offer Touch ID makes no confirmed approval and starts
+no agent; Touch ID or password for the shared key). The reasons were:
 
 - *confirmed approval, delegation:* a password is weaker in exactly the two
   threats the presence check is there for. A stolen machine: the thief may
@@ -281,10 +284,11 @@ awake", so also with the screen locked: "after first unlock") and for a
 bound key (a backup at night; Atticus's reason for the same choice,
 **[A]** `SEPKey.swift`, lines 72 to 78).
 
-What it may require is an unlocked screen. `doc/approvals.md`, section 4,
-on a stolen machine: "if the thief has the unlocked session: automatic
-approvals for agents already running". Read strictly, a locked Mac makes no
-automatic approval. That is question 4.
+It does not require an unlocked screen either (question 4, decided by the
+owner on 2026-11-18): the automatic key is "after first unlock" and signs
+while the screen is locked. `doc/approvals.md`, section 4, the row on a
+stolen machine, says so now; what bounds it there is the delegation's end
+and the administrator's block.
 
 A consequence to state plainly: a key without presence in a blob file is as
 strong as the file. If check 3 shows that any program of the person can
@@ -595,7 +599,7 @@ All paths are under `/Users/jancre/dev/ws/atticus-develop`, tree `develop`.
 | 20 | A user certificate for the login key | `Sources/SSHCertificate.swift`, `Sources/Engine/SSHCertificateService.swift`, `Sources/CLI/SSHCertCLI.swift` | not now | `SPEC.md` section 2: not in the first version. How the certificate rides with the key (row 2, section 1.3) is the same as stage 3 needs |
 | 21 | The access history and the decision trace in the system log | `SSHAgentServer.signEventSink`, `Sources/AgentDecisionLog.swift`, `Sources/AgentPolicyTrace.swift` | not | The record is the one place |
 | 22 | SSH agent, parser, key and windows in one process | `Sources/Engine/SSHAgentServer.swift` and the app | not | `SPEC.md` section 7: reader and key holder are two processes |
-| 23 | Signing with Developer ID, hardened runtime, pinned entitlements, no sandbox | `Makefile` (`CODESIGN_FLAGS`), `Resources/Atticus.entitlements`, `tools/check-entitlements.sh` | with changes | pledge's Mac parts must be signed the same way, or `control.sock` and a bound key have nothing to check. Which team: question 8 |
+| 23 | Signing with Developer ID, hardened runtime, pinned entitlements, no sandbox | `Makefile` (`CODESIGN_FLAGS`), `Resources/Atticus.entitlements`, `tools/check-entitlements.sh` | with changes | pledge's Mac parts must be signed the same way, or `control.sock` and a bound key have nothing to check. The owner's Developer ID team, with identifiers of pledge's own (question 8, decided) |
 | 24 | A secret readable only by its own signed programs, through a keychain access group | `SECURITY.md`, "Defenses in place" (the restic password) | as an idea | Atticus does not do this for its key, only for a password. It is the known way to make a key "usable only by pledge's key holder" (question 2) |
 | 25 | The setup turns shared connections off; the server limits sessions | `SECURITY.md`, "A confirmation covers one login" | as is | `SPEC.md` section 3 says the same |
 | 26 | A manual checklist for what tests cannot reach (Touch ID, signed builds) | `tests/MANUAL_CHECKLIST.md`, items 26 to 29 | as is, as a form | Section 1.5 is the start of pledge's |
@@ -747,14 +751,14 @@ them.
 
 | # | Question | Stands | What was said |
 |---|---|---|---|
-| 1 | Password in place of Touch ID | with the owner | The designer recommends this proposal's answer: Touch ID only for confirmed approvals and delegations, so a Mac with its lid closed and no Touch ID keyboard makes none |
+| 1 | Password in place of Touch ID | decided, by the owner | Touch ID only (`.biometryAny`) for confirmed approvals and delegations. A Mac that cannot offer Touch ID makes no confirmed approval. The shared key keeps Touch ID or password |
 | 2 | Blob in a file, or keychain with an access group | decided | After check 3, as recommended. `SPEC.md` section 11 is marked accordingly by the designer |
 | 3 | One key holder or two | decided | Two: one for keys with a presence check, one for keys without |
-| 4 | Does a locked screen stop automatic approvals | with the owner | The designer recommends this proposal's answer: it does not |
+| 4 | Does a locked screen stop automatic approvals | decided, by the owner | It does not. The automatic key is "after first unlock". The threat table of `doc/approvals.md` (the row on a stolen machine) says so, bounded by the delegation's end and the administrator's block |
 | 5 | Dialog and touch as one step | decided | One step: the Touch ID prompt is raised with the dialog and the touch is the yes. Keys in files keep today's two steps. The limits (one dialog at a time, the queue limit, muting after declines) apply unchanged |
 | 6 | "Admit generally" for which programs | decided | Only for Developer ID code with the hardened runtime; and, also accepted, an ad-hoc build may be admitted generally by its hash, which lasts until the binary changes |
 | 7 | Presence for what ends in no signature | decided | `LAContext.evaluatePolicy` in the key holder, said plainly to be software. Retiring a key with a presence check requires that key's signature first. No fifth key |
-| 8 | Who signs pledge's Mac programs, and as what | with the owner | Which signing identity and which identifiers |
+| 8 | Who signs pledge's Mac programs, and as what | decided, by the owner | His Developer ID team (the one Atticus is signed with), with identifiers of pledge's own for the reader, the key holder and the dialog process |
 | 9 | A request while no presence check is possible | decided | It waits until its deadline and ends `expired`; the record says why it could not be asked (locked, sensor locked out) |
 | 10 | What the Touch ID prompt says | decided, subject to check 5 | As recommended: service, host and action; user and host for a login; person, groups and validity for a delegation; never a parameter or the agent's claim |
 | 11 | A first Mac stage with `Terminal` and real keys | decided | Accepted, for the owner only |

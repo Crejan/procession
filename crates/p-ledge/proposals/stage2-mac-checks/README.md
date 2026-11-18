@@ -39,11 +39,51 @@ the checks then need a signed app (section 7).
 In this directory:
 
 ```
-swiftc -O sechecks.swift -o sechecks
-swiftc -O -D OTHER sechecks.swift -o sechecks-other
+swiftc -Onone sechecks.swift -o sechecks
+swiftc -Onone -D OTHER sechecks.swift -o sechecks-other
 codesign -dv ./sechecks 2>&1 | grep -E 'Identifier|Signature|TeamIdentifier'
 codesign -dv ./sechecks-other 2>&1 | grep -E 'Identifier|Signature|TeamIdentifier'
 ```
+
+**The first compile is slow and silent; that is not a hang.** Reported
+from the owner's Mac on 2026-11-18: `swiftc -O` seemed not to finish.
+What I found, without running the program:
+
+- The first Swift compile with these Command Line Tools builds the
+  compiler's own module cache: the modules of the standard library,
+  Foundation, CryptoKit, LocalAuthentication and what they import, about 25
+  modules and 100 MB. Here that took more than five minutes for a mere
+  `-typecheck`, with no output at all. It is paid once per user and
+  toolchain, with or without `-O`, and by any Swift file, not by this one.
+- With the cache built, this file takes: type-check 3 s, `-Onone
+  -emit-object` 4 s, `-O -emit-object` 35 s (wall time; an object file
+  written to a temporary directory, nothing linked, nothing run). So the
+  optimiser does not hang on this source, and it is slower for no gain.
+- The source has nothing known to slow the compiler: about 300 lines, no
+  large literal or table, the longest expression a sum of five `Data`
+  values, top-level code of some twenty lines.
+
+That the cache is what he saw is my reading from this machine, not
+something I observed on his build. So: build with `-Onone`, as above, and
+let the first compile run for up to ten minutes. To see that it is
+working, in a second terminal:
+
+```
+du -sh "$(getconf DARWIN_USER_CACHE_DIR)clang/ModuleCache"
+```
+
+The number grows while the cache is built. Adding `-v` to the `swiftc`
+line prints the compiler's steps. If the cache stops growing for minutes
+and the compiler still does not end, that is a fault of the toolchain on
+that machine and not of this file; `swiftc -Onone -typecheck
+sechecks.swift` is then the smaller thing to try.
+
+**`-Onone` is a sound substitute for these checks.** They observe what the
+frameworks and the Secure Enclave do: whether a prompt appears, which error
+comes back, whether a signature verifies. The same framework calls are made
+with the same arguments either way; optimisation changes only the speed of
+this program's own few lines. The seconds the program prints are waits for
+a person, not measurements.
 
 `sechecks-other` is the same program built as "another program" for check
 3: other name, other bytes. The two `codesign` lines should show
@@ -160,9 +200,14 @@ was not writable from where this ran; that changes nothing in the result.)
 
 `-typecheck` parses the file and checks every name and type against the
 SDK. It writes no binary, links nothing and runs nothing. So: every `API:`
-name in the source exists with the argument labels and types used. No
-binary was built by the author, so the `swiftc -O … -o …` lines of section
-3 are untried; a failure there would be a linker matter, not an API one.
+name in the source exists with the argument labels and types used. 
+
+Later the same day, to look into the slow build (section 3), two object
+files were also written into a temporary directory (`swiftc -Onone
+-emit-object` and `swiftc -O -emit-object`): both ended with exit 0.
+Nothing was linked and nothing was run, so the linking step of section 3's
+build lines is still untried; a failure there would be a linker matter, not
+an API one.
 
 ## 7. Check 3 and the keychain with an access group
 
