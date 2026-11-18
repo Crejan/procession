@@ -41,7 +41,6 @@ use thiserror::Error;
 
 const BEGIN: &str = "-----BEGIN SSH SIGNATURE-----\n";
 const END: &str = "\n-----END SSH SIGNATURE-----\n";
-const KEYGEN: &str = "ssh-keygen";
 /// The key types p-act accepts as public keys, and as the subject of a certificate it reads.
 const SUPPORTED_KEYS: [&str; 2] = ["ssh-ed25519", "ecdsa-sha2-nistp256"];
 
@@ -132,6 +131,8 @@ pub enum SignError {
     BadGroups(&'static str),
     #[error("`{0}` is not a fingerprint like SHA256:<43 base64 characters>")]
     MalformedFingerprint(String),
+    #[error("there is no ssh-keygen to trust: {0}")]
+    Keygen(#[from] crate::keygen::KeygenError),
     #[error("ssh-keygen reported success without having read all its input, so it did not check what was asked")]
     InputNotRead,
     #[error("the certificate has bytes after its signature, which the signature does not cover")]
@@ -321,27 +322,25 @@ impl Signer {
 
 /// Run `ssh-keygen args` with `stdin` as its input and no terminal input; its
 /// standard output on success.
+///
+/// The program is [`crate::keygen::Keygen::system`]: a fixed path, an ownership test, a cleared environment and a version
+/// check, once; if there is none the error is [`SignError::Keygen`] and nothing is verified.
 fn run(args: &[&OsStr], stdin: &[u8]) -> Result<Vec<u8>, SignError> {
-    run_program(OsStr::new(KEYGEN), args, stdin)
+    let keygen = crate::keygen::Keygen::system()?;
+    let mut command = keygen.command();
+    command.args(args);
+    run_command(command, stdin)
 }
 
-/// [`run`] for any program (the tests give a stand-in; nothing in a production build can).
+/// [`run`] for any command (the tests give a stand-in; nothing in a production build can).
 ///
 /// The input is written on the side, so that a full pipe cannot deadlock. A program that stops reading early closes
 /// its end and the write fails (`Broken pipe`); that is **never reported as an I/O error of its own**: the outcome is
 /// the program's. Non-zero is [`SignError::Tool`] with its status and standard error. Zero with a write that failed
 /// is [`SignError::InputNotRead`]: the program says it succeeded without having been given all its input, so what it
 /// checked is not what was asked, and it is a refusal, never a verified signature.
-fn run_program(program: &OsStr, args: &[&OsStr], stdin: &[u8]) -> Result<Vec<u8>, SignError> {
-    let mut child = Command::new(program)
-        .args(args)
-        // A key that wants a passphrase must fail, not ask on the terminal: the "askpass program" is `false`.
-        .env("SSH_ASKPASS", "false")
-        .env("SSH_ASKPASS_REQUIRE", "force")
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()?;
+fn run_command(mut command: Command, stdin: &[u8]) -> Result<Vec<u8>, SignError> {
+    let mut child = command.stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped()).spawn()?;
     let mut pipe = child.stdin.take().ok_or_else(|| io::Error::other("no stdin"))?;
     let (output, written) = std::thread::scope(|s| {
         let writer = s.spawn(move || pipe.write_all(stdin));
@@ -1119,7 +1118,9 @@ mod run_tests {
 
     /// A stand-in for `ssh-keygen`: `/bin/sh -c script`.
     fn stand_in(script: &str, input: &[u8]) -> Result<Vec<u8>, SignError> {
-        run_program(OsStr::new("/bin/sh"), &[OsStr::new("-c"), OsStr::new(script)], input)
+        let mut command = Command::new("/bin/sh");
+        command.args(["-c", script]);
+        run_command(command, input)
     }
 
     /// More than any pipe buffer holds, so that a program that does not read makes the write fail, whatever the timing.
