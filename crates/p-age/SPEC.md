@@ -110,6 +110,24 @@ a register that cannot be written holds for them: a restricting verb prints
 "blocked and stored" or "blocked, NOT stored: <why>" and exits non-zero in the
 second case; unblocking is refused while the register cannot be written.
 `page delegations` (a list) is not built.
+
+The verbs' exit codes have one meaning each; each verb's `--help` and usage
+print this table:
+
+| Code | Meaning |
+|---|---|
+| 0 | done (and stored, where something is stored) |
+| 1 | refused (an unknown person, key or delegation; unblocking while the register cannot be written) |
+| 2 | usage |
+| 3 | no broker answers |
+| 4 | in force but NOT stored (block, withdraw) |
+| 5 | the broker is degraded (`status` only; nothing else returns it) |
+
+The socket is `admin.sock` in the state directory (0600 set after `bind`); a
+peer is served only if `p_act::peer` read its credentials and its user is the
+broker's own or root (`Policy::OwnUserOrRoot`: the broker runs as the owner of
+its state directory, so no list of users is needed). A peer whose credentials
+cannot be read is dropped, told nothing.
 Blocking a key means: no request is passed to a pledge that signed in with
 it, and no approval by it is given a clearance.
 
@@ -161,6 +179,11 @@ passed, whichever is first, so that a connection lost at the last moment
 does not cost the person a second dialog. Never on disk, never past the
 deadline. An approval is not a secret and is of use only to the service
 whose request it signs.
+
+The register's `v`: `blocked_keys` was added with `v` still 1 and "a missing
+member is empty", **this one time**, because no register exists outside tests
+yet. From now on a member that is added is a new `v`, and a reader refuses a
+`v` it does not know (it does).
 
 A delegation is known in the register by the SHA-256 fingerprint of the
 agent's public key (`doc/approval-formats.md`, section 3.1).

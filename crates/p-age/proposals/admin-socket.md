@@ -82,10 +82,14 @@ Answers:
 | Answer | Output | Exit |
 |---|---|---|
 | `done`, `stored: true` | `blocked and stored: <what>` (`unblocked and stored`, `withdrawn and stored`) | 0 |
-| `done`, `stored: false` | `blocked, NOT stored: <why>` | 1 |
+| `done`, `stored: false` | `blocked, NOT stored: <why>` | 4 |
 | `refused` | `unblock refused: <reason>` | 1 |
-| cannot reach the broker | `page: no broker answers at <path>` | 3 |
 | usage | | 2 |
+| cannot reach the broker | `page: no broker answers at <path>` | 3 |
+| `status`, degraded | the status | 5 |
+
+(One meaning each: 0 done, 1 refused, 2 usage, 3 no broker, 4 in force but NOT
+stored, 5 degraded, `status` only; each verb's `--help` prints the table.)
 
 An unblock of a person or key that is not blocked is `done`, `stored` as the
 write goes (it is idempotent, as a repeated withdrawal is).
@@ -129,7 +133,7 @@ One answer:
 
 `degraded` and `why` are the broker's state (`SPEC.md`: from the first failed
 write until one succeeds). The numbers and lists are what the register and the
-queue hold. The verb prints them one per line and exits 1 when degraded, 0
+queue hold. The verb prints them one per line and exits 5 when degraded, 0
 otherwise, so a monitor can use it. Nothing about requests (hosts, services,
 parameters) is in it: that is the log's.
 
