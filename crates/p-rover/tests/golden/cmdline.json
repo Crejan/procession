@@ -27,12 +27,13 @@
     },
     {
       "type": "live",
-      "cmdline": "BOOT_IMAGE=/vmlinuz-6.8.0-rt root=/dev/sda1 ro isolcpus=managed_irq,domain,2-3 nohz_full=2-3 rcu_nocbs=2-3 irqaffinity=0-1 quiet",
+      "cmdline": "BOOT_IMAGE=/vmlinuz-6.8.0-rt root=/dev/sda1 ro isolcpus=managed_irq,domain,2-3 nohz_full=2-3 rcu_nocbs=2-3 irqaffinity=0-1 quiet console=ttyS0,115200",
       "rt": {
         "isolcpus": "managed_irq,domain,2-3",
         "nohz_full": "2-3",
         "rcu_nocbs": "2-3",
-        "irqaffinity": "0-1"
+        "irqaffinity": "0-1",
+        "console": "ttyS0,115200"
       }
     },
     {
@@ -58,7 +59,9 @@
         "threadirqs",
         "skew_tick=1"
       ],
-      "live_not_declared": [],
+      "live_not_declared": [
+        "console=ttyS0,115200"
+      ],
       "rt_value_differs": [],
       "in_sync": false,
       "isolated_live": "2-3",

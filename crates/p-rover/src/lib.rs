@@ -9,8 +9,10 @@ pub mod ethtool;
 pub mod observe;
 pub mod render;
 pub mod report;
+pub mod runner;
 
 pub use config::Config;
 pub use env::{Clock, Env, FakeClock, SystemClock};
 pub use error::Error;
+pub use runner::Runner;
 pub use report::{Cost, Finding, Metric, Report, Severity, Subject};

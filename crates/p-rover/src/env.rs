@@ -9,6 +9,7 @@ use p_roc::Root;
 
 use crate::config::Config;
 use crate::ethtool::{Ethtool, Unavailable};
+use crate::runner::{Runner, SystemRunner};
 
 /// Time, and waiting for it to pass. A fake lets a test change the fixture
 /// tree between two samples.
@@ -76,6 +77,8 @@ pub struct Env {
     pub clock: Box<dyn Clock>,
     /// Driver settings and counters that only `ethtool` knows.
     pub ethtool: Box<dyn Ethtool>,
+    /// External tools (`chronyc`, `journalctl`).
+    pub runner: Box<dyn Runner>,
 }
 
 impl Env {
@@ -90,6 +93,7 @@ impl Env {
             host: hostname(),
             clock: Box::new(SystemClock),
             ethtool: Box::new(Unavailable),
+            runner: Box::new(SystemRunner),
         }
     }
 }

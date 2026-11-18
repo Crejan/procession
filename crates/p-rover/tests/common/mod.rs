@@ -57,6 +57,7 @@ impl Host {
             host: "testhost".into(),
             clock: Box::new(FakeClock::new(1_794_000_000, on_pause)),
             ethtool: Box::new(p_rover::ethtool::Fixed::default()),
+            runner: Box::new(p_rover::runner::Scripted::default()),
         }
     }
 }

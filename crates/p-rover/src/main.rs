@@ -6,7 +6,7 @@ use std::process::ExitCode;
 use std::time::Duration;
 
 use clap::{Args, Parser, Subcommand, ValueEnum};
-use p_rover::observe::{cmdline, irq, nic, procs, sched};
+use p_rover::observe::{clock, cmdline, irq, nic, procs, sched, serial};
 use p_rover::{Config, Env, Error, Report, render};
 use p_roc::{CpuSet, Root};
 
@@ -88,6 +88,10 @@ enum Cmd {
         #[arg(long)]
         all_stats: bool,
     },
+    /// Serial ports: the console, IRQ, counters, modem lines, getty (cost: light).
+    Serial,
+    /// Who disciplines CLOCK_REALTIME: chrony, ptp4l, phc2sys, PTP clocks (cost: light).
+    Clock,
     /// Live kernel command line against the declared one, kernel flavour, sysctls (cost: light).
     Cmdline,
     /// IRQ affinity, /proc/interrupts delta, timer ticks (cost: light).
@@ -124,6 +128,8 @@ fn run(cli: &Cli) -> Result<Report, Error> {
         Cmd::Nic { iface, delta, all_stats } => {
             nic::run(&env, &nic::Args { iface: iface.clone(), delta: *delta, all_stats: *all_stats })
         }
+        Cmd::Serial => serial::run(&env),
+        Cmd::Clock => clock::run(&env),
         Cmd::Cmdline => cmdline::run(&env),
         Cmd::Irq { duration, top } => irq::run(&env, &irq::Args { duration: *duration, top: *top }),
     }

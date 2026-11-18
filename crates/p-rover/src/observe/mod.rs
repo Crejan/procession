@@ -1,10 +1,12 @@
 //! The observe subcommands: each reads, none changes anything.
 
+pub mod clock;
 pub mod cmdline;
 pub mod irq;
 pub mod nic;
 pub mod procs;
 pub mod sched;
+pub mod serial;
 
 use p_roc::cpus::{self, Isolation};
 use p_roc::{CpuSet, Unreadable};

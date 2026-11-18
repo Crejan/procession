@@ -510,3 +510,13 @@ mod tests {
         assert_eq!(irq_thread("kworker/0:1"), None);
     }
 }
+
+/// The argument vector of a process (`/proc/<pid>/cmdline`); `None` for a
+/// kernel thread, an empty command line or an unreadable one.
+#[must_use]
+pub fn cmdline(root: &Root, pid: i32) -> Option<Vec<String>> {
+    let raw = std::fs::read(root.proc.join(pid.to_string()).join("cmdline")).ok()?;
+    let args: Vec<String> =
+        raw.split(|b| *b == 0).filter(|a| !a.is_empty()).map(|a| String::from_utf8_lossy(a).into_owned()).collect();
+    (!args.is_empty()).then_some(args)
+}
