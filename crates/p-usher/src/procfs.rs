@@ -50,7 +50,7 @@ impl ProcFs {
     pub fn rt_threads(&self) -> Result<Vec<ThreadInfo>> {
         let scan = task::rt_threads(&self.root)?;
         for u in &scan.unreadable {
-            log_warn!("skipping task {}: {}", u.source, u.reason);
+            log_warn!("skipping task {}: {}", crate::text::clean(&u.source, 128), crate::text::clean(&u.reason, crate::text::ERROR_MAX));
         }
         Ok(scan.items)
     }

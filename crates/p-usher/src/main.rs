@@ -79,7 +79,7 @@ fn protect_self(cfg: &SelfProtection, pin: Option<u32>) {
 fn run() -> Result<()> {
     let Some(args) = parse_args()? else { return Ok(()) };
     let accounts = SystemAccounts;
-    let host = nix::unistd::gethostname()?.to_string_lossy().into_owned();
+    let host = p_usher::text::clean(&p_roc::text::from_os(&nix::unistd::gethostname()?), p_usher::text::NAME_MAX);
     if args.check {
         // Every file the daemon would read, every refusal; nothing is changed or started.
         let problems = p_usher::check::problems(&args.config, args.explicit, &host, &accounts);

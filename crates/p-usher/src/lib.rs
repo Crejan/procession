@@ -17,6 +17,7 @@ pub mod notify;
 pub mod procfs;
 pub mod secret;
 pub mod sys;
+pub mod text;
 pub mod throttle;
 
 pub use cpuset::CpuSet;

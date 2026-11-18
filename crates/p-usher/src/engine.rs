@@ -15,6 +15,7 @@ use crate::decide::{Decision, Exemptions, Sets, decide};
 use crate::model::{Action, Intervention, Mode, ThreadInfo};
 use crate::notify::Notifier;
 use crate::procfs::ProcFs;
+use crate::text::{COMM_MAX, NAME_MAX, clean, clean_error, clean_path};
 use crate::throttle::{Backoff, Clock, Throttle};
 
 /// `[notify]`: which actions reach the notifiers (stderr gets all of them).
@@ -85,6 +86,25 @@ pub struct Env {
     pub clock: Arc<dyn Clock>,
     pub accounts: Box<dyn Accounts>,
     pub notifiers: Vec<Box<dyn Notifier>>,
+}
+
+/// The log line of an intervention. Its host strings were cleaned when the event was made
+/// (`crate::text`), so it holds nothing that could act on a terminal or a log reader.
+#[must_use]
+pub fn describe(ev: &Intervention) -> String {
+    format!(
+        "{}{} tid {} (pid {}, \"{}\", user {}, {} prio {}): CPUs {} -> {}",
+        ev.action,
+        if ev.enforced { "" } else { " (report)" },
+        ev.tid,
+        ev.tgid,
+        ev.comm,
+        ev.user,
+        ev.policy,
+        ev.rt_priority,
+        ev.cpus_before,
+        ev.cpus_after
+    )
 }
 
 pub struct Engine {
@@ -164,7 +184,7 @@ impl Engine {
         let (now, allowed) = (self.env.clock.wall(), self.sets.as_ref().map(|s| s.allowed.clone()).unwrap_or_default());
         for n in &mut self.env.notifiers {
             if let Err(e) = n.tick(now, &allowed) {
-                log_warn!("notifier: {e:#}");
+                log_warn!("notifier: {}", clean_error(&e));
             }
         }
         Ok(events)
@@ -188,7 +208,7 @@ impl Engine {
                     if self.deadline_logged.insert(t.tid) && t.cpus.intersects(&sets.housekeeping) {
                         log_info!(
                             "leaving SCHED_DEADLINE thread {} (tid {}, uid {}) alone on CPUs {}",
-                            t.comm,
+                            clean(&t.comm, COMM_MAX),
                             t.tid,
                             t.uid,
                             t.cpus
@@ -241,7 +261,7 @@ impl Engine {
         let user = self
             .user_names
             .entry(t.uid)
-            .or_insert_with(|| accounts.user_name(t.uid).unwrap_or_else(|| t.uid.to_string()))
+            .or_insert_with(|| clean(&accounts.user_name(t.uid).unwrap_or_else(|| t.uid.to_string()), NAME_MAX))
             .clone();
         let mut gids: Vec<u32> = std::iter::once(t.gid).chain(t.groups.iter().copied()).collect();
         gids.sort_unstable();
@@ -251,8 +271,8 @@ impl Engine {
             at: self.env.clock.wall(),
             tgid: t.tgid,
             tid: t.tid,
-            comm: t.comm.clone(),
-            exe: self.env.procfs.exe(t.tgid),
+            comm: clean(&t.comm, COMM_MAX),
+            exe: self.env.procfs.exe(t.tgid).map(|p| clean_path(&p)),
             uid: t.uid,
             user,
             gids,
@@ -263,19 +283,7 @@ impl Engine {
             action,
             enforced,
         };
-        log_info!(
-            "{}{} tid {} (pid {}, {:?}, user {}, {} prio {}): CPUs {} -> {}",
-            action,
-            if enforced { "" } else { " (report)" },
-            ev.tid,
-            ev.tgid,
-            ev.comm,
-            ev.user,
-            ev.policy,
-            ev.rt_priority,
-            ev.cpus_before,
-            ev.cpus_after
-        );
+        log_info!("{}", describe(&ev));
         if self.settings.notify.enabled(action) {
             let fresh = self.throttle.allow((ev.user.clone(), ev.comm.clone(), action), self.env.clock.now());
             for n in &mut self.env.notifiers {
@@ -283,7 +291,7 @@ impl Engine {
                     continue;
                 }
                 if let Err(e) = n.notify(&ev) {
-                    log_warn!("notifier: {e:#}");
+                    log_warn!("notifier: {}", clean_error(&e));
                 }
             }
         }

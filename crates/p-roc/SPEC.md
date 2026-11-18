@@ -100,6 +100,19 @@ p-lumber uses `cpuset`, `sys`, `stats` and the reader for p-usher's allowed
 set; it builds on macOS, so these modules must compile there (writers
 return `Unsupported`).
 
+## Host strings: bytes, not text
+
+The kernel gives bytes (`comm`, command lines, link targets, file names), so
+every reader here reads files and names with `p_roc::text` (`read_to_string`,
+`from_os`, `entry_name`, `from_bytes`), which never fails on bytes that are not
+UTF-8 and never confuses two different byte strings. The **internal form**:
+UTF-8 text is itself; an invalid byte is U+10FFFF followed by U+10F700 plus
+the byte; a genuine U+10FFFF is doubled. `p_roc::text::to_bytes` reverses it
+exactly. A string in this form is for logic and for carrying only: **it must
+never be written anywhere (log, terminal, JSON, mail, metrics file) except
+through `p_ermit::text`**, as `escape_bytes` or `escape_bytes_clipped` applied
+to `to_bytes(s)`. `prover` does this in `sanitize`, p-usher in `p_usher::text::clean`.
+
 ## Extraction from p-usher
 
 1. Move `cpuset`, `procfs` (as `task` and `cpus`), `model::{Policy,
