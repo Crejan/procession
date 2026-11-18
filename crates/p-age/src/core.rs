@@ -485,6 +485,11 @@ impl Core {
             core.log(now, &info, &format!("refused:{}", reason.wire()));
             refused_to_service(conn, hash, reason)
         };
+        // Check 0 again, at the moment of holding: the signature work of `vet` takes time (more on a loaded
+        // machine), and a request whose deadline passed meanwhile is answered now, not held until a sweep.
+        if now >= at(call.deadline().unix()) {
+            return deny(self, Some(agent.person.clone()), BrokerReason::Deadline);
+        }
         let fingerprint = agent.delegation.clone();
         let person = match self.register.person_for(fingerprint.as_str(), now) {
             Ok(person) if person == agent.person => person.to_owned(),
@@ -1204,7 +1209,8 @@ mod tests {
     #[test]
     fn an_ended_or_withdrawn_delegation_is_refused_as_a_delegation() {
         let mut f = fixture(5);
-        let v = vetted("jan", AGENT_A, 1, 120);
+        // nine hours on, the request is still within its own deadline: it is the delegation that has ended
+        let v = vetted("jan", AGENT_A, 1, 9 * 3600 + 120);
         assert_eq!(refusal_of(&f.core.submit(SVC, v, now(9 * 3600))), Some(BrokerReason::Delegation));
         let fp: Fingerprint = AGENT_B.parse().unwrap();
         f.core.withdraw("jan", PLEDGE, &fp, now(0));
@@ -1224,6 +1230,20 @@ mod tests {
         assert_eq!(refusal_of(&f.core.submit(ConnId(9), a, now(1))), None);
         // another agent of the same person has its own count
         assert!(f.core.submit(SVC, vetted("jan", AGENT_B, 4, 120), now(0)).is_empty());
+    }
+
+    #[test]
+    fn a_request_whose_deadline_passed_while_it_was_being_checked_is_answered_at_once_and_not_held() {
+        let mut f = fixture(5);
+        let v = vetted("jan", AGENT_A, 1, 60);
+        // `vet` ran at NOW and took a while: the core sees the request when its deadline has come
+        let fx = f.core.submit(SVC, v, now(60));
+        assert_eq!(refusal_of(&fx), Some(BrokerReason::Deadline));
+        assert_eq!(f.core.held_count(), 0);
+        assert_eq!(f.log.entries()[0].result, "refused:deadline");
+        // a second before it, the request is held
+        assert!(f.core.submit(SVC, vetted("jan", AGENT_A, 2, 60), now(59)).is_empty());
+        assert_eq!(f.core.held_count(), 1);
     }
 
     #[test]
@@ -1599,7 +1619,7 @@ mod tests {
         f.core.sweep(now(9 * 3600));
         assert!(f.core.degraded().is_some());
         assert_eq!(
-            refusal_of(&f.core.submit(SVC, vetted("jan", AGENT_A, 1, 120), now(9 * 3600))),
+            refusal_of(&f.core.submit(SVC, vetted("jan", AGENT_A, 1, 9 * 3600 + 120), now(9 * 3600))),
             Some(BrokerReason::Delegation)
         );
     }
