@@ -1,7 +1,7 @@
 //! `page`: the broker of the approval system.
 //!
-//! The verbs are declared in [`VERBS`]; none of them does anything yet. What
-//! each will do is in `SPEC.md`.
+//! The verbs are declared in [`VERBS`]; `serve` runs the broker, the others do
+//! nothing yet. What each will do is in `SPEC.md`.
 
 use std::process::ExitCode;
 
@@ -30,6 +30,51 @@ fn usage() -> String {
     text
 }
 
+/// `page serve [--config FILE]`: run the broker until stopped.
+fn serve(args: &[&str]) -> ExitCode {
+    let path = match args {
+        [] => "/etc/page.json",
+        ["--config", file] => file,
+        _ => {
+            eprintln!("usage: page serve [--config FILE]");
+            return ExitCode::from(2);
+        }
+    };
+    match run(std::path::Path::new(path)) {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(message) => {
+            eprintln!("page serve: {message}");
+            ExitCode::FAILURE
+        }
+    }
+}
+
+fn run(path: &std::path::Path) -> Result<(), String> {
+    use p_age::config::Config;
+    use p_age::net::{ConnLimits, Kind, listen, sweep_forever};
+    use p_age::tls::server_config;
+
+    let config = Config::read(path).map_err(|e| e.to_string())?;
+    let read = |p: &std::path::Path| std::fs::read(p).map_err(|e| format!("cannot read {}: {e}", p.display()));
+    let tls = server_config(&read(&config.tls_cert)?, &read(&config.tls_key)?).map_err(|e| e.to_string())?;
+    let acceptor = tokio_rustls::TlsAcceptor::from(tls);
+    let broker = config.build().map_err(|e| e.to_string())?;
+    let runtime = tokio::runtime::Runtime::new().map_err(|e| e.to_string())?;
+    runtime.block_on(async {
+        let services = tokio::net::TcpListener::bind(&config.listen_services)
+            .await
+            .map_err(|e| format!("cannot listen on {}: {e}", config.listen_services))?;
+        let pledges = tokio::net::TcpListener::bind(&config.listen_pledges)
+            .await
+            .map_err(|e| format!("cannot listen on {}: {e}", config.listen_pledges))?;
+        let limits = ConnLimits::new(config.max_connections, config.max_connections_per_address);
+        tokio::spawn(sweep_forever(broker.clone()));
+        tokio::spawn(listen(services, acceptor.clone(), broker.clone(), limits.clone(), Kind::Service));
+        tokio::spawn(listen(pledges, acceptor, broker, limits, Kind::Pledge));
+        tokio::signal::ctrl_c().await.map_err(|e| e.to_string())
+    })
+}
+
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let args: Vec<&str> = args.iter().map(String::as_str).collect();
@@ -42,6 +87,7 @@ fn main() -> ExitCode {
             println!("page {}", env!("CARGO_PKG_VERSION"));
             ExitCode::SUCCESS
         }
+        ["serve", rest @ ..] => serve(rest),
         [verb, ..] if VERBS.iter().any(|known| known.name == *verb) => {
             eprintln!("page {verb}: not implemented yet");
             ExitCode::from(2)

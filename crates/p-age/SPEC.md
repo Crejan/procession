@@ -11,8 +11,12 @@ does.
 
 License: MIT OR Apache-2.0.
 
-Status: a skeleton. `src/register.rs` implements the register of
-delegations with tests. Nothing else exists. The name is a working name.
+Status: step 1 of the order of work is built: the register, the two
+connections over TLS (`doc/approval-connections.md`), passing a request
+through with persons and hosts from a file, the queue, the clearance and the
+log. Checks 0 to 3 are made; check 4 (R10), `page load`, blocking by key,
+the administrator's verbs and renewals are not built. The name is a working
+name.
 
 ## What it is for
 

@@ -6,7 +6,9 @@
 //! take effect with the next request, because every request is checked here.
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::time::SystemTime;
+use std::time::{Duration, SystemTime};
+
+use serde::{Deserialize, Serialize};
 
 /// Why a request is not passed on.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -26,6 +28,24 @@ struct Entry {
     person: String,
     until: SystemTime,
     withdrawn: bool,
+}
+
+/// One delegation as it is kept on disk.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SnapshotEntry {
+    pub fingerprint: String,
+    pub person: String,
+    /// Seconds since the Unix epoch.
+    pub until: u64,
+    pub withdrawn: bool,
+}
+
+/// The register as it is kept on disk: delegations until their end, and blocks until lifted.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Snapshot {
+    pub delegations: Vec<SnapshotEntry>,
+    pub blocked: Vec<String>,
 }
 
 /// Registered delegations, by the SHA-256 fingerprint of the agent's public key.
@@ -77,6 +97,63 @@ impl Register {
 
     pub fn unblock(&mut self, person: &str) {
         self.blocked.remove(person);
+    }
+
+    /// Whether the person is blocked.
+    #[must_use]
+    pub fn is_blocked(&self, person: &str) -> bool {
+        self.blocked.contains(person)
+    }
+
+    /// The person a delegation belongs to, whatever its state.
+    #[must_use]
+    pub fn person_of(&self, fingerprint: &str) -> Option<&str> {
+        self.delegations.get(fingerprint).map(|e| e.person.as_str())
+    }
+
+    /// The person's delegations that were withdrawn and have not ended: what a
+    /// pledge is told so that it stops signing for them.
+    #[must_use]
+    pub fn withdrawn_of(&self, person: &str, now: SystemTime) -> Vec<String> {
+        self.delegations
+            .iter()
+            .filter(|(_, e)| e.person == person && e.withdrawn && now < e.until)
+            .map(|(fp, _)| fp.clone())
+            .collect()
+    }
+
+    /// The register as data, to be kept across a restart.
+    #[must_use]
+    pub fn snapshot(&self) -> Snapshot {
+        Snapshot {
+            delegations: self
+                .delegations
+                .iter()
+                .map(|(fp, e)| SnapshotEntry {
+                    fingerprint: fp.clone(),
+                    person: e.person.clone(),
+                    until: e.until.duration_since(SystemTime::UNIX_EPOCH).map_or(0, |d| d.as_secs()),
+                    withdrawn: e.withdrawn,
+                })
+                .collect(),
+            blocked: self.blocked.iter().cloned().collect(),
+        }
+    }
+
+    /// The register from what [`Register::snapshot`] wrote.
+    #[must_use]
+    pub fn restore(snapshot: Snapshot) -> Register {
+        Register {
+            delegations: snapshot
+                .delegations
+                .into_iter()
+                .map(|e| {
+                    let until = SystemTime::UNIX_EPOCH + Duration::from_secs(e.until);
+                    (e.fingerprint, Entry { person: e.person, until, withdrawn: e.withdrawn })
+                })
+                .collect(),
+            blocked: snapshot.blocked.into_iter().collect(),
+        }
     }
 
     /// Drop the delegations whose validity ended before `now`. A withdrawn
