@@ -293,6 +293,10 @@ pub enum Message {
     Answer(Answer),
     Cancel(Cancel),
     Error(ErrorMessage),
+    /// pledge's first message on the broker's one address, so that the broker can tell it from a
+    /// service (`approval-connections.md` section 4). It is not part of the shared exchange between a
+    /// service and whoever answers; it is here so that one parser reads every first line.
+    Hello,
 }
 
 // ---------------------------------------------------------------------------
@@ -406,6 +410,7 @@ impl Message {
             "submit" => Message::Submit(parse_submit(&mut o)?),
             "answer" => Message::Answer(parse_answer(&mut o, policy)?),
             "cancel" => Message::Cancel(Cancel { request: take_hash(&mut o)? }),
+            "hello" => Message::Hello,
             "error" => Message::Error(ErrorMessage { error: ErrorCode::from_wire(&o.take_string("error")?) }),
             _ => return Err(ExchangeError::UnknownType),
         };
@@ -430,6 +435,7 @@ impl Message {
             Message::Error(e) => {
                 to_json(&ErrorWire { schema_version: SCHEMA_VERSION, kind: "error", error: e.error.wire() })
             }
+            Message::Hello => to_json(&HelloWire { schema_version: SCHEMA_VERSION, kind: "hello" }),
             Message::Answer(a) => encode_answer(a, policy),
         }?;
         line.push(b'\n');
@@ -489,6 +495,13 @@ struct SubmitWire {
     kind: &'static str,
     request: String,
     request_sig: String,
+}
+
+#[derive(Serialize)]
+struct HelloWire {
+    schema_version: u32,
+    #[serde(rename = "type")]
+    kind: &'static str,
 }
 
 #[derive(Serialize)]
@@ -1383,5 +1396,23 @@ mod tests {
         }
         assert!(b.finish().is_ok());
         assert!(matches!(messages.as_slice(), [Message::Submit(_), Message::Cancel(_)]));
+    }
+
+    #[test]
+    fn hello_is_pledges_first_line() {
+        let line = Message::Hello.encode(REFUSED).unwrap();
+        assert_eq!(line, b"{\"schema_version\":1,\"type\":\"hello\"}\n");
+        for policy in [REFUSED, REQUIRED] {
+            assert_eq!(parse(&line[..line.len() - 1], policy), Ok(Message::Hello));
+        }
+        // Nothing else belongs to it, and it is not a version it does not know.
+        assert_eq!(
+            parse(br#"{"schema_version":1,"type":"hello","x":1}"#, REFUSED),
+            Err(ExchangeError::Malformed(ParseError::UnknownMember("x".into())))
+        );
+        assert_eq!(parse(br#"{"schema_version":2,"type":"hello"}"#, REFUSED), Err(ExchangeError::UnsupportedVersion));
+        assert_eq!(parse(br#"{"schema_version":1,"type":"Hello"}"#, REFUSED), Err(ExchangeError::UnknownType));
+        // The first line of a service is a `submit`, of a pledge a `hello`: both parse with the same function.
+        assert!(matches!(parse(text(&submit(), REFUSED).trim_end().as_bytes(), REFUSED), Ok(Message::Submit(_))));
     }
 }
