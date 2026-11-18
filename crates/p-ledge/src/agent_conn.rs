@@ -51,18 +51,22 @@ fn showable_program(program: Option<&str>) -> Option<&str> {
     program.filter(|program| !program.is_empty() && is_showable(program))
 }
 
-fn list_identities(shared: &Shared, program: Option<&str>) -> Vec<u8> {
+pub(crate) fn list_identities(shared: &Shared, program: Option<&str>) -> Vec<u8> {
     let Some(program) = showable_program(program) else { return message::identities_reply(&[]) };
     let offered: Vec<String> = match shared.policy.lock() {
         Ok(policy) => policy.offered(program).into_iter().map(str::to_owned).collect(),
         Err(_) => return message::failure_reply(),
     };
     let Ok(keys) = shared.keys.read() else { return message::failure_reply() };
-    let identities: Vec<Identity<'_>> = keys
+    // A comment from a key file is outside text: it is offered escaped and bounded (an SSH string takes any bytes,
+    // `ssh-add -l` prints it as it is), never refused over its comment.
+    let comments: Vec<(&KeyInfo, String)> = keys
         .iter()
         .filter(|key| offered.contains(&key.fingerprint))
-        .map(|key| Identity { blob: &key.blob, comment: key.meta.as_ref().map_or("", |m| m.comment.as_str()) })
+        .map(|key| (key, crate::outside::bounded(key.meta.as_ref().map_or("", |m| m.comment.as_str()), 200)))
         .collect();
+    let identities: Vec<Identity<'_>> =
+        comments.iter().map(|(key, comment)| Identity { blob: &key.blob, comment: comment.as_str() }).collect();
     message::identities_reply(&identities)
 }
 

@@ -9,12 +9,12 @@ use std::sync::Arc;
 
 use serde_json::{Value, json};
 
-use crate::agent::text::escape_unshowable;
 use crate::config::Config;
 use crate::control::{Client, ClientError};
 use crate::dialog::Terminal;
 use crate::error::{Error, Result};
 use crate::holder::{KeyStore, serve_holder};
+use crate::outside;
 use crate::paths::Paths;
 use crate::record::read_and_verify;
 use crate::serve::{self, Config as ServeConfig};
@@ -100,22 +100,22 @@ pub fn main(mut args: Vec<String>) -> ExitCode {
         "history" => history_verb(args),
         "agents" => agents_verb(args),
         other => {
-            eprintln!("pledge: unknown verb '{other}'\n\n{}", usage());
+            eprintln!("pledge: unknown verb '{}'\n\n{}", outside::bounded(other, 64), usage());
             return ExitCode::from(2);
         }
     };
     match result {
         Ok(code) => ExitCode::from(code),
         Err(Failure::Usage(message)) => {
-            eprintln!("pledge {verb}: {message}\n\n{}", usage());
+            eprintln!("pledge {verb}: {}\n\n{}", outside::bounded(&message, 300), usage());
             ExitCode::from(2)
         }
         Err(Failure::Refused(message)) => {
-            eprintln!("pledge {verb}: {message}");
+            eprintln!("pledge {verb}: {}", outside::bounded(&message, 300));
             ExitCode::from(4)
         }
         Err(Failure::Failed(message)) => {
-            eprintln!("pledge {verb}: {message}");
+            eprintln!("pledge {verb}: {}", outside::bounded(&message, 300));
             ExitCode::from(3)
         }
     }
@@ -195,10 +195,10 @@ fn keys_verb(mut args: Vec<String>) -> Done {
         (Some("list"), None, None) => {
             let data = client(&paths)?.call("keys.list", json!({}))?;
             if json_out {
-                println!("{data}");
+                println!("{}", outside::json(&data));
             } else {
                 for key in data["keys"].as_array().into_iter().flatten() {
-                    let show = |name: &str| escape_unshowable(key[name].as_str().unwrap_or(""));
+                    let show = |name: &str| outside::text(key[name].as_str().unwrap_or(""));
                     println!("{:<7} {}  {}", show("purpose"), show("fingerprint"), show("public"));
                 }
             }
@@ -217,7 +217,7 @@ fn keys_verb(mut args: Vec<String>) -> Done {
                 }
             }
             let data = client(&paths)?.call("keys.create", create)?;
-            println!("{}", data["public"].as_str().map(escape_unshowable).unwrap_or_default());
+            println!("{}", data["public"].as_str().map(outside::text).unwrap_or_default());
             Ok(0)
         }
         (Some("retire"), Some(fingerprint), None) => {
@@ -236,13 +236,13 @@ fn programs_verb(mut args: Vec<String>) -> Done {
         (Some("list"), None, None) => {
             let data = client(&paths)?.call("programs.list", json!({}))?;
             if json_out {
-                println!("{data}");
+                println!("{}", outside::json(&data));
             } else {
                 for entry in data["programs"].as_array().into_iter().flatten() {
                     println!(
                         "{:<8} {}",
                         entry["state"].as_str().unwrap_or("?"),
-                        escape_unshowable(entry["program"].as_str().unwrap_or(""))
+                        outside::text(entry["program"].as_str().unwrap_or(""))
                     );
                 }
             }
@@ -256,7 +256,7 @@ fn programs_verb(mut args: Vec<String>) -> Done {
                     "admitting a program asks for its name to be typed, and there is no terminal".into(),
                 ));
             }
-            print!("Type the program's name to admit it generally ({}): ", escape_unshowable(program));
+            print!("Type the program's name to admit it generally ({}): ", outside::text(program));
             io::stdout().flush().map_err(Error::io("writing"))?;
             let mut typed = String::new();
             io::stdin().lock().read_line(&mut typed).map_err(Error::io("reading"))?;
@@ -281,8 +281,8 @@ fn peer_uid(entry: &Value) -> Option<String> {
 
 /// One line of `pledge history` for an entry.
 #[must_use]
-pub fn history_line(entry: &Value) -> String {
-    let text = |name: &str| entry[name].as_str().map(escape_unshowable);
+pub(crate) fn history_line(entry: &Value) -> String {
+    let text = |name: &str| entry[name].as_str().map(outside::text);
     let mut line =
         format!("{} #{} {}", text("time").unwrap_or_default(), entry["seq"], text("type").unwrap_or_default());
     let mut add = |label: &str, value: Option<String>| {
@@ -444,10 +444,10 @@ fn agents_verb(mut args: Vec<String>) -> Done {
         (Some("list"), None, None) => {
             let data = client(&paths)?.call("agents.list", json!({}))?;
             if json_out {
-                println!("{data}");
+                println!("{}", outside::json(&data));
             } else {
                 for d in data["delegations"].as_array().into_iter().flatten() {
-                    let show = |name: &str| escape_unshowable(d[name].as_str().unwrap_or("-"));
+                    let show = |name: &str| outside::text(d[name].as_str().unwrap_or("-"));
                     println!(
                         "{:<9} {}  until {}  groups {}  last asked {}",
                         show("state"),
@@ -522,7 +522,7 @@ fn history_verb(mut args: Vec<String>) -> Done {
             continue;
         }
         if json_out {
-            println!("{entry}");
+            println!("{}", outside::json(entry));
         } else {
             println!("{}", history_line(entry));
         }
@@ -531,7 +531,7 @@ fn history_verb(mut args: Vec<String>) -> Done {
         eprintln!("{HISTORY_LEGEND}");
     }
     for broken in &report.breaks {
-        eprintln!("pledge: the record breaks at line {}: {}", broken.line, broken.problem);
+        eprintln!("pledge: the record breaks at line {}: {}", broken.line, outside::bounded(&broken.problem, 200));
     }
     Ok(if verify && !report.breaks.is_empty() { 3 } else { 0 })
 }
@@ -586,7 +586,7 @@ mod tests {
             "program":"/usr/bin/curl\u{1B}[2J","use":"login","user":"jan","host":"a.example"});
         let line = history_line(&entry);
         assert!(line.contains("refused (blocked)"), "{line}");
-        assert!(line.contains("program=/usr/bin/curl\\u{001B}[2J"), "{line}");
+        assert!(line.contains("program=/usr/bin/curl\\u{1b}[2J"), "{line}");
         assert!(!line.contains('\u{1B}'));
         assert!(line.contains("user=jan host=a.example"), "{line}");
     }

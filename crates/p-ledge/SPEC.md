@@ -425,3 +425,10 @@ involved.
   one each; they are two programs with two purposes, and p-ledge's is small.
 - **The interfaces**: the three sockets, the record's format. After the
   call, request and approval of `doc/approvals.md`.
+
+**Strings from outside.** Nothing that came from outside (a file another writer could have touched counts) is written
+into JSON or text as it is. What a person is asked about is refused at entry; what is shown as data goes through the escape
+form of `p-ermit` (visible, reversible, bounded): `pledge history`, the lists (text and JSON, an object with an escaped string
+carries `"escaped": true`), the key comment on the SSH agent socket, the program path of a peer in the record (`escaped`,
+`clipped` at 200 characters), and errors (never the offending value, except escaped and bounded). `programs.json` is validated
+when read and refused whole if a name breaks the rule. ssh-keygen's stderr goes only to a log, escaped and bounded.
