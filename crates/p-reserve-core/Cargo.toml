@@ -10,9 +10,17 @@ categories = ["filesystem"]
 include = ["src/**"]
 publish = false
 
+[features]
+# `testing::make_repository`: makes a throwaway repository and writes a snapshot to it. For tests only; nothing
+# else in this crate writes to a repository.
+testing = []
+
 [dependencies]
 serde = { version = "1", features = ["derive"] }
 thiserror = "2"
+
+rustic_core = "0.14"
+rustic_backend = "0.8"
 
 [dev-dependencies]
 libc = "0.2"

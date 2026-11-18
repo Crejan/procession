@@ -47,6 +47,23 @@ pub struct Config {
     /// The declared (source, target) pairs. Without any, `health` reports
     /// every pair the ledger has.
     pub pair: Vec<PairConfig>,
+    /// The repositories `snapshots`, `ls` and `restore` read.
+    pub target: Vec<TargetConfig>,
+}
+
+/// A repository. The password is never here: `password_file` names a file of
+/// mode 0600 that holds it.
+#[derive(Debug, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct TargetConfig {
+    pub name: String,
+    /// A local path, or `opendal:sftp`, `rest:https://...`.
+    pub repository: String,
+    pub password_file: PathBuf,
+    /// The backend's options (for `opendal:sftp`: `endpoint`, `root`, `user`,
+    /// `key`, `known_hosts_strategy`).
+    #[serde(default)]
+    pub options: std::collections::BTreeMap<String, String>,
 }
 
 /// Limits as text (`"90m"`, `"3days"`); a key left out takes the default.
@@ -109,6 +126,47 @@ pub fn read_checked(path: &Path) -> Result<String, ConfigError> {
         return Err(ConfigError::TooLarge(shown));
     }
     String::from_utf8(bytes).map_err(|_| ConfigError::NotUtf8(shown))
+}
+
+/// The secret in the file at `path`, for a password: a regular file owned by
+/// the running user or root, with no permission for group or others (0600 or
+/// 0400), at most 4 KiB, UTF-8; one trailing newline is dropped. Errors name
+/// the file and never its content.
+pub fn read_secret(path: &Path) -> Result<String, ConfigError> {
+    let shown = path.display().to_string();
+    let mut file = File::open(path).map_err(|e| match e.kind() {
+        std::io::ErrorKind::NotFound => ConfigError::NotFound(shown.clone()),
+        _ => ConfigError::Io(shown.clone()),
+    })?;
+    let meta = file.metadata().map_err(|_| ConfigError::Io(shown.clone()))?;
+    if !meta.is_file() {
+        return Err(ConfigError::NotARegularFile(shown));
+    }
+    if meta.permissions().mode() & 0o077 != 0 {
+        return Err(ConfigError::Untrusted(
+            shown,
+            "a password file must not be accessible to group or others: run chmod 600 on it".to_owned(),
+        ));
+    }
+    if meta.uid() != 0 && meta.uid() != p_act::peer::own_uid() {
+        return Err(ConfigError::Untrusted(
+            shown,
+            "a password file must be owned by root or by the user running this program".to_owned(),
+        ));
+    }
+    let mut bytes = Vec::new();
+    (&mut file).take(4097).read_to_end(&mut bytes).map_err(|_| ConfigError::Io(shown.clone()))?;
+    if bytes.len() > 4096 {
+        return Err(ConfigError::TooLarge(shown));
+    }
+    let mut text = String::from_utf8(bytes).map_err(|_| ConfigError::NotUtf8(shown.clone()))?;
+    if text.ends_with('\n') {
+        text.pop();
+    }
+    if text.is_empty() {
+        return Err(ConfigError::Invalid(shown, "the password file is empty".to_owned()));
+    }
+    Ok(text)
 }
 
 /// What is wrong with a TOML document, without any value from it: the parser's
@@ -195,7 +253,20 @@ impl Config {
     /// Everything that can be checked without the ledger.
     fn check(&self) -> Result<(), String> {
         self.default_limits()?;
-        self.declared().map(|_| ())
+        self.declared()?;
+        let mut seen = std::collections::BTreeSet::new();
+        for target in &self.target {
+            check_name("target", &target.name)?;
+            if !seen.insert(&target.name) {
+                return Err("two targets have the same name".to_owned());
+            }
+        }
+        Ok(())
+    }
+
+    /// The target called `name`.
+    pub fn target(&self, name: &str) -> Option<&TargetConfig> {
+        self.target.iter().find(|t| t.name == name)
     }
 
     pub fn ledger_path(&self) -> &Path {

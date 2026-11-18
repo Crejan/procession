@@ -5,6 +5,7 @@
 
 mod config;
 mod health;
+mod repo;
 
 use std::process::ExitCode;
 
@@ -28,9 +29,9 @@ const VERBS: &[Verb] = &[
         summary: "the freshness of every source; exit code 0 ok, 1 warnings, 2 critical",
         implemented: true,
     },
-    Verb { name: "snapshots", summary: "list the snapshots of a target", implemented: false },
-    Verb { name: "ls", summary: "list a directory of a snapshot", implemented: false },
-    Verb { name: "restore", summary: "restore a file or a directory of a snapshot", implemented: false },
+    Verb { name: "snapshots", summary: "list the snapshots of a target", implemented: true },
+    Verb { name: "ls", summary: "list a directory of a snapshot", implemented: true },
+    Verb { name: "restore", summary: "restore a file or a directory of a snapshot", implemented: true },
     Verb { name: "prune", summary: "forget by the retention policy, then prune", implemented: false },
     Verb { name: "check", summary: "verify the repository", implemented: false },
     Verb { name: "verify", summary: "restore a sample and compare it with its source", implemented: false },
@@ -62,6 +63,10 @@ fn catalog_json() -> String {
     format!("{{\"schema_version\":{SCHEMA_VERSION},\"type\":\"catalog\",\"verbs\":[{}]}}", verbs.join(","))
 }
 
+fn run_repo(verb: repo::Verb, args: &[&str]) -> ExitCode {
+    ExitCode::from(repo::run(verb, args, &mut std::io::stdout().lock(), &mut std::io::stderr().lock()))
+}
+
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let args: Vec<&str> = args.iter().map(String::as_str).collect();
@@ -85,6 +90,9 @@ fn main() -> ExitCode {
         ["health", rest @ ..] => {
             ExitCode::from(health::run(rest, &mut std::io::stdout().lock(), &mut std::io::stderr().lock()))
         }
+        ["snapshots", rest @ ..] => run_repo(repo::Verb::Snapshots, rest),
+        ["ls", rest @ ..] => run_repo(repo::Verb::Ls, rest),
+        ["restore", rest @ ..] => run_repo(repo::Verb::Restore, rest),
         [verb, ..] if VERBS.iter().any(|known| known.name == *verb) => {
             eprintln!("preserve {verb}: not implemented yet");
             ExitCode::from(health::EXIT_USAGE)

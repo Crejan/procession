@@ -13,6 +13,9 @@ pub mod freshness;
 pub mod health;
 pub mod ledger;
 pub mod outcome;
+pub mod rustic;
+#[cfg(any(test, feature = "testing"))]
+pub mod testing;
 pub mod textfile;
 
 pub use freshness::{Freshness, Thresholds};

@@ -176,6 +176,29 @@ times, byte and file counts. A name is a short label (letters, digits and
 the root or into a home); the configuration refuses any other. It holds no
 repository address, no credential, no path from inside a home directory.
 
+### Reading a repository
+
+`preserve snapshots <target>`, `preserve ls <target> <snapshot> [path]` and
+`preserve restore <target> <snapshot> <path> --to <destination>` open the
+repository themselves (no daemon), through `RusticEngine` on `rustic_core`;
+`--format json` carries `schema_version` and one record type per verb
+(`snapshots`, `ls`, `restore`, and `error` with the outcome's name). Nothing
+here writes to a repository. A snapshot is `latest`, an id or a prefix of one.
+A target is a `[[target]]` of the configuration: `name`, `repository` (a local
+path, or `opendal:sftp`, `rest:...`), `password_file`, optional `options`.
+The password is only ever in the file named by `password_file`, which must be a
+regular file owned by root or the running user with no group or other
+permission; it is never an argument, an environment variable or in the
+configuration. A restore never overwrites or deletes: the destination is
+absolute and does not exist (a file) or does not exist or is empty (a
+directory, whose contents are restored into it).
+
+| Code | Meaning (snapshots, ls, restore) |
+|---|---|
+| 0 | done |
+| 3 | failed: the outcome is named (`no-repository`, `wrong-password`, `failed`, or `not-run` for a configuration or password file that was refused) |
+| 4 | usage error |
+
 To come, in the order of "Order of work":
 
 - The engine on `rustic_core`: open, snapshots, list, dump, restore; then
@@ -329,10 +352,10 @@ the owner on 2026-11-18 (`trial/REPORT.md`). The rest was not tried.
 |---|---|---|
 | SFTP | `rustic_backend` reaches SFTP through OpenDAL, which drives the system `ssh` (the `openssh` crate). Unix only; no password login; host keys through a `known_hosts` strategy. | Run: a key file with strict checking works; an agent works with `key` naming the public half (`SSH_AUTH_SOCK` is inherited). Read: OpenDAL's sftp takes only `endpoint`, `root`, `user`, `key`, `known_hosts_strategy`. **A pinned `known_hosts` file cannot be passed**: strict checking fails unless the host key is in the real `~/.ssh/known_hosts` (run, A1/A2); no `-F`, no extra `-o`. Open: open time and memory (the run did not finish), and whether to pin through the real `known_hosts` or write a backend of our own that spawns `ssh -s sftp` (below). |
 | Maturity | `rustic_core` 0.13.0 and `rustic_backend` 0.7.0 (August 2026). rustic's own comparison page lists few tests against restic's coverage. | Its current stability statement; an older README advised against production use. |
-| Toolchain | `rustic_core` and `rustic_backend` state a minimum rustc of 1.91. | Decided: the workspace has one `rust-version` for all crates, raised to what its dependencies need (1.91). |
+| Toolchain | `rustic_core` and `rustic_backend` state a minimum rustc of 1.91. | Decided: the workspace has one `rust-version` for all crates, raised to what its dependencies need (1.91). The dependency closure of `rustic_core` 0.14.0 and `rustic_backend` 0.8.0 (default features, OpenDAL included) builds offline from the unpacked registry; adding it took 4 min 17 s of a debug build on a loaded machine (about 700 crates in all), and a test build of the three p-reserve crates with optimised dependencies about 30 min on the same machine. Debug-build dependencies make the key derivation and the index load about 30 times slower (140 s against 4 s): the workspace wants `[profile.dev.package."*"] opt-level = 2` (requested from the orchestrator). |
 | Fresh snapshot mounts | restic needs `device-id-for-hardlinks`, or every run from a freshly mounted ZFS snapshot rewrites every tree. | Read from the source, not run: rustic's `set_devid` defaults to `hardlink` (the device id only for hardlinks), and its parent match compares size, mtime, ctime and inode, not the device. Run against a real fresh mount. |
 | macOS metadata | - | Extended attributes, ACLs, flags, resource forks, firmlinks, compared with restic. |
-| Index held open | - | Memory of a loaded index for a large repository (the Atticus test repository: about 1.4 million files, 233 index files), and how the daemon learns that another writer changed the repository. |
+| Index held open | Measured once, release build, a tiny local repository, on a machine with a load average of about 145: init and one snapshot 6.3 s, open and load the index 4.3 s (a debug build: 140 s, nearly all in dependencies, see the Toolchain row). Memory not measured. | Memory of a loaded index for a large repository (the Atticus test repository: about 1.4 million files, 233 index files), and how the daemon learns that another writer changed the repository. |
 
 If SFTP through the predecessors' SSH setups does not work, the fallbacks
 are, in order: a backend of our own on `rustic_core`'s backend trait that
@@ -351,6 +374,8 @@ loses the open index.
 3. **Read-only engine**: `snapshots`, `list`, `dump`, `restore` behind
    `Engine`; `preserve snapshots`, `ls`, `restore`. Verified with fundament's
    restore test (SHA-256 against the source snapshot) run through p-reserve.
+   (Built and tested against a local repository made in a temporary directory;
+   not yet against SFTP, a restic-written repository, or with the SHA-256 test.)
 4. **The daemon and the socket**; `ls` answered from an open repository.
    Measure open time and memory.
 5. **Ledger persistence and `preserve health`**; fundament's metrics from
