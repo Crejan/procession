@@ -27,7 +27,7 @@ service over HTTP. Nothing in it has been run on Linux. Terms are those of
 | `probe serve`: the service core (checks, request, wait, approval, run), the MCP layer | built; run in-process against the real pledge (`tests/stage1.rs`) |
 | `probe serve` over HTTP (`hyper`) | **built** (`src/http.rs`), tested over memory and over a Unix socket; **never run over TCP** (no port can be bound in the sandbox) |
 | `pact` composer, signer, catalogue, `pact call` / `pact tools` | built (p-act) |
-| `pact`'s HTTP client | p-act's, `ureq` 3, built in parallel; not in this runbook's tree until merged |
+| `pact`'s HTTP client | p-act's, `ureq` 3 (`pact::http::HttpTransport`), merged; its socket tests never ran over a real socket either |
 | the cross run through `SudoRunner` | **written, not run:** `tests/stage1_sudo.rs` |
 | the cross run over real HTTP with the real `pact` | **written, not run:** `tests/stage1_http.rs` (needs a TCP port and `pact`'s client) |
 | the scripts of Stage A (`stage1/*.sh`) | **written, not run** (syntax checked with `sh -n` on macOS) |
@@ -58,7 +58,7 @@ programs have today, and what is not yet there is marked.
   checkout is at `/home/alice/CHECKOUT`.
 - Build, as `alice`, in the checkout:
   ```
-  cargo build --workspace --features p-robe/test-verbs
+  cargo build --workspace --features p-robe/test-verbs,p-act/pact
   ```
   This gives `target/debug/probe`, `pledge` and `pact`. `probe` is built **with
   the test verbs** (`test echo`, `test peak`, `test read`) so that the cases
@@ -225,8 +225,7 @@ sh stage1/undo.sh
 ## 5. Stage B: pledge as the person, `probe serve` as its own account, `pact`, over HTTP
 
 `probe serve` now listens (`hyper`; the owner fetched the crates, section 6).
-What still waits is `pact`'s HTTP client (p-act's, in parallel): B1 to B4 can be
-followed today, B5 needs it. Nothing of Stage B has been run on Linux, and the
+`pact`'s HTTP client is merged too (p-act's): all of B1 to B5 can be followed. Nothing of Stage B has been run on Linux, and the
 HTTP transport has never been run over TCP by its author.
 
 ### B1. Pledge, as `alice`
@@ -434,21 +433,23 @@ Passed: `pact tools` lists `sys_kit`, `test_echo`, `test_peak`, `test_read`; the
 whose first text is `{"type":"outcome","outcome":"done",...}`; the third waits, pledge asks alice (dialog and
 presence check), and ends `done` or, if alice says no, `declined`. `pledge history --verify` shows the
 entries (`received` then the answer for the asked one); `journalctl -t probe | grep call=<uuid>` shows what
-ran. **This needs `pact` with its HTTP client** (p-act's, `ureq`, built in parallel): until it is merged,
-`pact call` ends `unavailable`. What I need from p-act: a `pact` binary built with that client (`cargo build
---workspace --features p-robe/test-verbs` is how this runbook builds it; if the client needs another feature,
-tell me which), `pact call TOOL ARGUMENTS < bundle` printing the normalised result as it does now, and
-confirmation that it sends `Accept: application/json, text/event-stream`, `Content-Type: application/json`,
+ran. **This needs `pact` with its HTTP client**, which is p-act's (`pact::http::HttpTransport`, `ureq` 3, merged): the
+`pact` binary is built only with p-act's `pact` feature, which is why the build command above names it
+(`p-act/pact`; for `https` between agent and service, stage 2, `p-act/pact-tls`). `pact call TOOL ARGUMENTS < bundle`
+prints the normalised result on one line. By its report it sends `Accept: application/json, text/event-stream`, `Content-Type: application/json`,
 `MCP-Protocol-Version: 2025-06-18` and no `Origin`, reads the stream as it arrives with its 45-second idle
-timeout, and that the HTTP/1.1 chunked decoding of `ureq` 3 hands a `text/event-stream` body to it piece by piece
-(not after it ends: the head of the response arrives at once and the comments every 15 seconds).
+timeout, reads the stream as it arrives with a 45-second idle timeout per read (no total limit), does not follow redirects,
+reads no proxy variables, and takes `http` only on loopback (`https` needs `pact-tls`): all of which the runbook's
+bundle (`http://127.0.0.1:8765/mcp`) satisfies. **Not yet shown by anyone: that `ureq`'s chunked decoding hands the
+stream over piece by piece** (the head at acceptance, the comments every 15 seconds). Its own socket tests skipped
+themselves in the sandbox, as mine did; if a call hangs until the deadline instead of returning, look there first.
 
 **The same, as a test.** `tests/stage1_http.rs` runs the real `pledge serve`, this crate's HTTP transport on a
 TCP port in the test process, and the real `pact` binary for each call; with `PROBE_STAGE1_SUDO=1` the verb is
 run through the sudo rule as in Stage A. It is ignored and gated:
 
 ```
-cargo build --workspace --features p-robe/test-verbs
+cargo build --workspace --features p-robe/test-verbs,p-act/pact
 PROBE_STAGE1_HTTP=1 cargo test -p p-robe --features test-verbs --test stage1_http -- --ignored --nocapture
 ```
 
