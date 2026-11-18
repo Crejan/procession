@@ -1,0 +1,11 @@
+[Unit]
+Description=probe: renew the service's certificate once 20 of its 30 days have passed
+
+[Timer]
+# Ten minutes after boot (a host that was off past its time catches up), then 20 days after each run.
+OnBootSec=10min
+OnUnitActiveSec=20d
+RandomizedDelaySec=1h
+
+[Install]
+WantedBy=timers.target

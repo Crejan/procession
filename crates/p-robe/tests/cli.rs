@@ -47,7 +47,7 @@ fn serve_says_what_is_wrong_with_its_settings_and_that_its_transport_is_not_buil
     assert_eq!(missing.status.code(), Some(64));
     assert!(text(&missing.stderr).contains("/nonexistent/probe.toml"), "{}", text(&missing.stderr));
     assert_eq!(probe(&["serve", "--bogus"], None).status.code(), Some(64));
-    assert_eq!(probe(&["setup"], None).status.code(), Some(64));
+    assert_eq!(probe(&["setup", "--bogus"], None).status.code(), Some(64));
     let dir = std::env::temp_dir().join(format!("probe-cli-serve-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
     let file = dir.join("probe.toml");

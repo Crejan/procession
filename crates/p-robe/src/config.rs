@@ -4,6 +4,13 @@
 
 use std::path::PathBuf;
 
+/// Where `probe` reads its settings.
+pub const DEFAULT_FILE: &str = "/etc/probe.toml";
+/// The host key of a Linux host that has an Ed25519 one.
+pub const DEFAULT_HOST_KEY: &str = "/etc/ssh/ssh_host_ed25519_key";
+/// Where the service's key and its certificate are when nothing says otherwise.
+pub const DEFAULT_SERVICE_KEY: &str = "/etc/probe/service-key";
+
 /// The service's settings as a file gives them.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Config {
@@ -19,6 +26,8 @@ pub struct Config {
     pub listen: String,
     pub max_waiting: usize,
     pub probe: PathBuf,
+    /// The host key `probe setup` certifies the service's key with.
+    pub host_key: PathBuf,
 }
 
 impl Config {
@@ -59,7 +68,7 @@ impl Config {
             person: need(take("person"), "person")?,
             confirmed_key: need(take("confirmed_key"), "confirmed_key")?.into(),
             automatic_key: need(take("automatic_key"), "automatic_key")?.into(),
-            service_key: take("service_key").unwrap_or_else(|| "/etc/probe/service-key".into()).into(),
+            service_key: take("service_key").unwrap_or_else(|| DEFAULT_SERVICE_KEY.into()).into(),
             pledge_socket: need(take("pledge_socket"), "pledge_socket")?.into(),
             pledge_uid: number(take("pledge_uid"), "pledge_uid")?
                 .map(|n| u32::try_from(n).map_err(|_| "pledge_uid: too large".to_string()))
@@ -69,6 +78,7 @@ impl Config {
             max_waiting: number(take("max_waiting"), "max_waiting")?
                 .map_or(Ok(16), |n| usize::try_from(n).map_err(|_| "max_waiting: too large".to_string()))?,
             probe: take("probe").unwrap_or_else(|| "/usr/local/bin/probe".into()).into(),
+            host_key: take("host_key").unwrap_or_else(|| DEFAULT_HOST_KEY.into()).into(),
         };
         if let Some(unknown) = values.keys().next() {
             return Err(format!("unknown key {unknown}"));
@@ -82,6 +92,17 @@ impl Config {
     }
 }
 
+/// The certificate beside the service's key (`<key>-cert.pub`), as `text` (the file's contents, if
+/// there is one and it parses) says where the key is, else the default.
+#[must_use]
+pub fn certificate_path(text: Option<&str>) -> PathBuf {
+    let key =
+        text.and_then(|t| Config::parse(t).ok()).map_or_else(|| PathBuf::from(DEFAULT_SERVICE_KEY), |c| c.service_key);
+    let mut cert = key.into_os_string();
+    cert.push("-cert.pub");
+    PathBuf::from(cert)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -93,6 +114,16 @@ mod tests {
         let config = Config::parse(MINIMAL).unwrap();
         assert_eq!((config.max_waiting, config.listen.as_str(), config.host.as_deref()), (16, "127.0.0.1:8765", None));
         assert_eq!(config.used_dir, PathBuf::from("/var/lib/probe/used"));
+    }
+
+    #[test]
+    fn the_certificate_is_beside_the_key_the_file_names_or_the_default() {
+        assert_eq!(certificate_path(None), PathBuf::from("/etc/probe/service-key-cert.pub"));
+        assert_eq!(certificate_path(Some("not a config")), PathBuf::from("/etc/probe/service-key-cert.pub"));
+        let text = format!("{MINIMAL}service_key = \"/k/svc\"\nhost_key = \"/k/host\"\n");
+        assert_eq!(certificate_path(Some(&text)), PathBuf::from("/k/svc-cert.pub"));
+        assert_eq!(Config::parse(&text).unwrap().host_key, PathBuf::from("/k/host"));
+        assert_eq!(Config::parse(MINIMAL).unwrap().host_key, PathBuf::from(DEFAULT_HOST_KEY));
     }
 
     #[test]

@@ -86,7 +86,15 @@ mod tests {
         assert!(matches!(first, Taken::Held(_)));
         assert_eq!(take(&dir, "jan").unwrap_err(), Fault::Busy);
         drop(first);
-        assert!(matches!(take(&dir, "jan").unwrap(), Taken::Held(_)));
+        // A process another test forks while the lock is held keeps a copy of the descriptor until it has exec'd.
+        let started = std::time::Instant::now();
+        loop {
+            match take(&dir, "jan") {
+                Ok(Taken::Held(_)) => break,
+                other => assert!(started.elapsed() < std::time::Duration::from_secs(3), "{other:?}"),
+            }
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
     }
 
     #[test]

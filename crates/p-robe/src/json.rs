@@ -52,6 +52,21 @@ impl Record {
         self.raw(key, &value.to_string())
     }
 
+    /// A signed integer member, or `null`.
+    #[must_use]
+    pub fn opt_int(self, key: &str, value: Option<i64>) -> Self {
+        match value {
+            Some(value) => self.int(key, value),
+            None => self.raw(key, "null"),
+        }
+    }
+
+    /// A signed integer member.
+    #[must_use]
+    pub fn int(self, key: &str, value: i64) -> Self {
+        self.raw(key, &value.to_string())
+    }
+
     /// A boolean member.
     #[must_use]
     pub fn bool(self, key: &str, value: bool) -> Self {

@@ -1,0 +1,13 @@
+[Unit]
+Description=probe: renew the certificate of the service's key (the host key certifies it)
+Documentation=file:///usr/local/share/doc/probe/RUNBOOK-stage1-linux.md
+
+[Service]
+Type=oneshot
+User=root
+# No arguments: it reads /etc/probe.toml (or takes the defaults), keeps the service's key and replaces its certificate.
+ExecStart=/usr/local/bin/probe setup
+ProtectSystem=strict
+ReadWritePaths=/etc/probe
+PrivateTmp=true
+NoNewPrivileges=true
