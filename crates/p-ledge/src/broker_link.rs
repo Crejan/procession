@@ -343,6 +343,7 @@ pub struct Session {
     generation: u64,
     responder_id: u64,
     carried_noted: bool,
+    not_ready_noted: bool,
     /// What the session sends first: the lines of the sign-in.
     pub signed_in: bool,
 }
@@ -369,6 +370,7 @@ impl Session {
             generation,
             responder_id,
             carried_noted: false,
+            not_ready_noted: false,
             signed_in: false,
         }
     }
@@ -420,6 +422,18 @@ impl Session {
                 out.extend(self.withdrawals());
             }
             (ToPledge::Notice(signed), Phase::Ready) => self.standing(&signed),
+            // The broker is signed in but cannot vouch just now (no valid certificate of its own): connected without a
+            // verified standing. Nothing is issued; the restrictions on disk stay; the connection stays open.
+            (ToPledge::NotReady, Phase::Ready) => {
+                self.link.standing.store(false, Ordering::SeqCst);
+                if !self.not_ready_noted {
+                    self.not_ready_noted = true;
+                    self.shared.event("broker-not-ready", json!({}));
+                    self.shared.dialogs.tell(
+                        "the broker cannot vouch right now (its certificate is not valid): nothing can be issued until it can; restrictions already known stay in force",
+                    );
+                }
+            }
             (ToPledge::Registered(id), Phase::Ready) => self.registration(&id, Registration::Registered),
             (ToPledge::NotRegistered { delegation, reason }, Phase::Ready) => {
                 self.registration(&delegation, Registration::NotRegistered(reason))
@@ -545,6 +559,7 @@ impl Session {
             Err(e) => return ignored(&format!("it could not be kept: {e}")),
         };
         self.link.standing.store(true, Ordering::SeqCst);
+        self.not_ready_noted = false;
         self.shared.event("standing-accepted", json!({"n": content.n}));
         // What is waiting is refused now, with the reason that fits.
         if changes.newly_blocked {

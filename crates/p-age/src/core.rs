@@ -32,6 +32,8 @@ use crate::site::Site;
 #[derive(Debug, Clone)]
 pub enum ServiceOut {
     Answer(Answer),
+    /// `refused` with the broker's reason `not-ready` for this request (written by `net`, until p-act has the code).
+    NotReady(DocumentHash),
     Error(ErrorCode),
     /// Close after what was queued before.
     Close,
@@ -52,6 +54,8 @@ pub enum PledgeOut {
     NotRegistered(Fingerprint, NotRegisteredReason),
     /// The answer to a withdrawal: whether it is stored (`true`) or in force in memory only.
     Withdrawn(Fingerprint, bool),
+    /// The broker is up and cannot vouch for anything (written by `net`, until p-act has the message).
+    NotReady,
     Error(ErrorCode),
     /// Close after what was queued before.
     Close,
@@ -70,7 +74,8 @@ impl PledgeOut {
             PledgeOut::NotRegistered(fp, reason) => ToPledge::NotRegistered { delegation: fp.clone(), reason: *reason },
             PledgeOut::Withdrawn(fp, stored) => ToPledge::Withdrawn { delegation: fp.clone(), stored: *stored },
             PledgeOut::Error(code) => ToPledge::Exchange(Box::new(Message::Error(ErrorMessage { error: *code }))),
-            PledgeOut::Close => return None,
+            // not in p-act's `ToPledge` yet: `net` writes it
+            PledgeOut::NotReady | PledgeOut::Close => return None,
         })
     }
 }
@@ -178,13 +183,15 @@ pub struct Status {
     pub blocked_keys: Vec<String>,
     /// The certificate input, if one is configured.
     pub certificates: Option<CertificateStatus>,
-    /// The broker's own certificate, if it is checked.
-    pub broker_certificate: Option<BrokerCertificateStatus>,
+    /// The broker's own certificate, which is always checked.
+    pub broker_certificate: BrokerCertificateStatus,
 }
 
 /// What `page status` says of the broker's own certificate.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BrokerCertificateStatus {
+    /// Where it is: `<broker_key>-cert.pub`, beside the key.
+    pub path: String,
     /// Valid now: the broker issues clearances.
     pub valid: bool,
     /// Whole days until it ends, when it is valid.
@@ -309,6 +316,8 @@ struct Held {
     conn: Option<ConnId>,
     /// The answer, held in memory until the service's `ack` or the deadline.
     answer: Option<Answer>,
+    /// The answer is `refused` `not-ready` (p-act's `Answer` cannot say it yet; `answer` holds a placeholder).
+    not_ready: bool,
 }
 
 #[derive(Debug)]
@@ -317,6 +326,8 @@ struct Link {
     nonce: Secret32,
     /// The counter of the next standing on this connection.
     next_n: u64,
+    /// Whether this pledge has been given a standing and is being served (`false`: it was told `not-ready`).
+    vouched: bool,
 }
 
 /// What the broker knows and holds. Sync, with no I/O but the register's file and the log.
@@ -333,8 +344,8 @@ pub struct Core {
     degraded: Option<Degraded>,
     /// The certificates the broker carries to pledge, if that input is configured.
     certs: Option<CertState>,
-    /// The broker's own certificate, if it is checked (it always is in `page serve`).
-    broker_cert: Option<BrokerCertState>,
+    /// The broker's own certificate, checked at start and once a minute. There is no mode in which it is not.
+    broker_cert: BrokerCertState,
 }
 
 /// What was found when the broker's own certificate was last checked.
@@ -351,6 +362,13 @@ struct CertState {
     last_check: SystemTime,
 }
 
+/// What a broker needs to know to vouch for itself: the site CA's key, and the time it starts.
+#[derive(Debug, Clone)]
+pub struct Trust {
+    pub site_ca: PublicKey,
+    pub now: SystemTime,
+}
+
 /// The certificates are looked at again this often.
 const CERTIFICATES_EVERY: Duration = Duration::from_secs(60);
 
@@ -362,7 +380,11 @@ impl Core {
         state_path: Option<PathBuf>,
         crypto: Arc<dyn Crypto>,
         log: Box<dyn LogSink>,
+        trust: Trust,
     ) -> Core {
+        let result = crypto.check_broker_certificate(&trust.site_ca, trust.now);
+        report_broker_certificate(None, &result);
+        let broker_cert = BrokerCertState { site_ca: trust.site_ca, last_check: trust.now, result };
         Core {
             site,
             settings,
@@ -375,39 +397,25 @@ impl Core {
             seq: 0,
             degraded: None,
             certs: None,
-            broker_cert: None,
+            broker_cert,
         }
-    }
-
-    /// Check the broker's own certificate now and once a minute: a broker without a valid one issues no clearance and
-    /// no standing (nothing a service or a pledge could verify as `broker`), and `page status` says so.
-    #[must_use]
-    pub fn with_broker_certificate_check(mut self, site_ca: PublicKey, now: SystemTime) -> Core {
-        let result = self.crypto.check_broker_certificate(&site_ca, now);
-        report_broker_certificate(None, &result);
-        self.broker_cert = Some(BrokerCertState { site_ca, last_check: now, result });
-        self
     }
 
     /// Whether the broker may sign in its own name at `now`: its certificate is valid (or is not checked at all).
     fn may_sign(&self, now: SystemTime) -> bool {
         let secs = u64::try_from(unix(now)).unwrap_or(0);
-        self.broker_cert
-            .as_ref()
-            .is_none_or(|s| s.result.as_ref().is_ok_and(|c| c.valid_after <= secs && secs < c.valid_before))
+        self.broker_cert.result.as_ref().is_ok_and(|c| c.valid_after <= secs && secs < c.valid_before)
     }
 
     fn recheck_broker_certificate(&mut self, now: SystemTime) {
-        let Some(state) = &self.broker_cert else { return };
+        let state = &self.broker_cert;
         if now < state.last_check + CERTIFICATES_EVERY {
             return;
         }
         let result = self.crypto.check_broker_certificate(&state.site_ca, now);
         report_broker_certificate(Some(&state.result), &result);
-        if let Some(state) = self.broker_cert.as_mut() {
-            state.last_check = now;
-            state.result = result;
-        }
+        self.broker_cert.last_check = now;
+        self.broker_cert.result = result;
     }
 
     /// The certificates the broker carries to pledge come from a directory (a separate input), checked against the site
@@ -621,7 +629,9 @@ impl Core {
                 fx.push(Effect::Service(old, ServiceOut::Error(ErrorCode::Superseded)));
                 fx.push(Effect::Service(old, ServiceOut::Close));
             }
-            if let Some(answer) = h.answer.clone() {
+            if h.not_ready {
+                fx.push(Effect::Service(conn, ServiceOut::NotReady(hash)));
+            } else if let Some(answer) = h.answer.clone() {
                 fx.push(Effect::Service(conn, ServiceOut::Answer(answer)));
             }
             return fx;
@@ -659,7 +669,7 @@ impl Core {
         self.seq += 1;
         let deadline = at(call.deadline().unix());
         let mut fx = Vec::new();
-        if let Some(link) = self.links.get(&person) {
+        if let Some(link) = self.links.get(&person).filter(|l| l.vouched) {
             fx.push(Effect::Pledge(link.conn, PledgeOut::Submit(Box::new(submit.clone()))));
         }
         self.held.insert(
@@ -674,6 +684,7 @@ impl Core {
                 seq: self.seq,
                 conn: Some(conn),
                 answer: None,
+                not_ready: false,
             },
         );
         fx
@@ -751,26 +762,35 @@ impl Core {
 
     /// A pledge signed in: it is told it is ready, then the standing, then every request that waited.
     pub fn pledge_signed_in(&mut self, person: &str, conn: ConnId, nonce: &Secret32, now: SystemTime) -> Vec<Effect> {
-        // A broker that cannot sign in its own name makes no standing a pledge could verify: the new connection is
-        // refused before anything else, and a pledge already connected is left as it is.
-        if !self.may_sign(now) {
-            return vec![
-                Effect::Pledge(conn, PledgeOut::Error(ErrorCode::Busy)),
-                Effect::Pledge(conn, PledgeOut::Close),
-            ];
-        }
         let mut fx = Vec::new();
-        if let Some(old) = self.links.insert(person.to_owned(), Link { conn, nonce: *nonce, next_n: 0 }) {
+        let vouch = self.may_sign(now);
+        if let Some(old) = self.links.insert(person.to_owned(), Link { conn, nonce: *nonce, next_n: 0, vouched: vouch })
+        {
             fx.push(Effect::Pledge(old.conn, PledgeOut::Error(ErrorCode::Superseded)));
             fx.push(Effect::Pledge(old.conn, PledgeOut::Close));
         }
         fx.push(Effect::Pledge(conn, PledgeOut::Ready));
+        if vouch {
+            fx.extend(self.greet(person, conn, now));
+        } else {
+            // Let in, without a standing: the broker cannot vouch for anything. Only what restricts is served; the
+            // standing comes when the certificate is valid again, without a new sign-in.
+            fx.push(Effect::Pledge(conn, PledgeOut::NotReady));
+        }
+        fx
+    }
+
+    /// What a pledge is sent once the broker can vouch: the standing, then every request that waited.
+    fn greet(&mut self, person: &str, conn: ConnId, now: SystemTime) -> Vec<Effect> {
+        let mut fx = Vec::new();
         match self.standing(person, now) {
             Ok(notice) => fx.push(notice),
             Err(()) => {
-                self.links.remove(person);
-                fx.push(Effect::Pledge(conn, PledgeOut::Error(ErrorCode::Busy)));
-                fx.push(Effect::Pledge(conn, PledgeOut::Close));
+                // The standing could not be made or signed after all: not ready, and the connection stays.
+                if let Some(link) = self.links.get_mut(person) {
+                    link.vouched = false;
+                }
+                fx.push(Effect::Pledge(conn, PledgeOut::NotReady));
                 return fx;
             }
         }
@@ -778,6 +798,29 @@ impl Core {
             self.held.values().filter(|h| h.person == person && h.answer.is_none() && now < h.deadline).collect();
         waiting.sort_by_key(|h| h.seq);
         fx.extend(waiting.into_iter().map(|h| Effect::Pledge(conn, PledgeOut::Submit(Box::new(h.submit.clone())))));
+        fx
+    }
+
+    /// When the broker's readiness changes, the pledges that are connected are told: `not-ready` once when it ends, and
+    /// the standing (and what waited) when it is valid again.
+    fn track_readiness(&mut self, now: SystemTime) -> Vec<Effect> {
+        let ready = self.may_sign(now);
+        let mut fx = Vec::new();
+        let persons: Vec<(String, ConnId, bool)> =
+            self.links.iter().map(|(p, l)| (p.clone(), l.conn, l.vouched)).collect();
+        for (person, conn, vouched) in persons {
+            if ready && !vouched {
+                if let Some(link) = self.links.get_mut(&person) {
+                    link.vouched = true;
+                }
+                fx.extend(self.greet(&person, conn, now));
+            } else if !ready && vouched {
+                if let Some(link) = self.links.get_mut(&person) {
+                    link.vouched = false;
+                }
+                fx.push(Effect::Pledge(conn, PledgeOut::NotReady));
+            }
+        }
         fx
     }
 
@@ -826,6 +869,9 @@ impl Core {
                     // An approval that comes late is worthless.
                     return self.finish(hash, Outcome::Expired(By::Broker), "expired", now);
                 }
+                if !self.may_sign(now) {
+                    return self.approval_lost(hash, person, now);
+                }
                 match self.clearance_for(hash, approved.approval(), now) {
                     Ok(outcome) => self.finish(hash, outcome, "approval-returned", now),
                     Err(()) => {
@@ -845,6 +891,25 @@ impl Core {
             Outcome::Expired(_) => self.finish(hash, Outcome::Expired(By::Pledge), "expired", now),
             Outcome::Unknown => self.ignore(now, Some(person), hash, "answer"),
         }
+    }
+
+    /// An approval came back while the broker cannot vouch for anything: the service is answered `refused`
+    /// `not-ready`, there is no clearance, and the broker logs that a person's approval was lost to its own state.
+    fn approval_lost(&mut self, hash: DocumentHash, person: &str, now: SystemTime) -> Vec<Effect> {
+        eprintln!("page: an approval by {person} was lost: the broker has no valid certificate and is not ready");
+        // The answer is held (and given again to a service that comes back) like any other; `Answer` cannot carry the
+        // reason yet, so the request is marked and `ServiceOut::NotReady` is what is sent.
+        let mut fx =
+            self.finish(hash, Outcome::Refused(Refused::Broker(BrokerReason::Unknown)), "approval-lost:not-ready", now);
+        for e in &mut fx {
+            if let Effect::Service(_, out) = e {
+                *out = ServiceOut::NotReady(hash);
+            }
+        }
+        if let Some(h) = self.held.get_mut(&hash) {
+            h.not_ready = true;
+        }
+        fx
     }
 
     fn clearance_for(&self, hash: DocumentHash, approval: &str, now: SystemTime) -> Result<Outcome, ()> {
@@ -917,6 +982,10 @@ impl Core {
         let (agent, cert) = (&message.agent, message.certificate.as_str());
         let fp = agent.delegation.clone();
         let no = |why| reply(PledgeOut::NotRegistered(fp.clone(), why));
+        // Registering permits: nothing that permits is served while the broker is not ready.
+        if !self.may_sign(now) {
+            return no(NotRegisteredReason::Unavailable);
+        }
         if agent.person != person {
             return no(NotRegisteredReason::NotYours);
         }
@@ -1086,19 +1155,21 @@ impl Core {
             withdrawn,
             blocked_persons: self.register.blocked_persons(),
             blocked_keys: self.register.blocked_keys(),
-            broker_certificate: self.broker_cert.as_ref().map(|s| {
+            broker_certificate: {
                 let secs = u64::try_from(unix(now)).unwrap_or(0);
-                match &s.result {
+                let path = self.crypto.broker_certificate_file().display().to_string();
+                match &self.broker_cert.result {
                     Ok(c) if c.valid_after <= secs && secs < c.valid_before => BrokerCertificateStatus {
+                        path,
                         valid: true,
                         days_left: Some(i64::try_from((c.valid_before - secs) / 86_400).unwrap_or(i64::MAX)),
                         failure: None,
                     },
                     // valid when last checked, ended since
-                    Ok(_) => BrokerCertificateStatus { valid: false, days_left: None, failure: Some("expired") },
-                    Err(f) => BrokerCertificateStatus { valid: false, days_left: None, failure: Some(f.code()) },
+                    Ok(_) => BrokerCertificateStatus { path, valid: false, days_left: None, failure: Some("expired") },
+                    Err(f) => BrokerCertificateStatus { path, valid: false, days_left: None, failure: Some(f.code()) },
                 }
-            }),
+            },
             certificates: self.certs.as_ref().map(|s| CertificateStatus {
                 carried: s.loaded.carried_count(now),
                 not_carried: s.loaded.not_carried.len(),
@@ -1122,6 +1193,7 @@ impl Core {
             }
         }
         self.recheck_broker_certificate(now);
+        fx.extend(self.track_readiness(now));
         fx.extend(self.reload_certificates(now));
         // Forgetting a registration restricts: in force in memory, stored if it can be.
         if self.register.forget_ended(now) > 0 {
@@ -1214,6 +1286,9 @@ mod tests {
         ) -> Result<BrokerCertificate, BrokerCertificateFailure> {
             Ok(BrokerCertificate { valid_after: 0, valid_before: u64::MAX })
         }
+        fn broker_certificate_file(&self) -> std::path::PathBuf {
+            std::path::PathBuf::from("/fake/broker-cert.pub")
+        }
         fn sign_clearance(&self, _: &Clearance) -> Result<String, CryptoError> {
             Ok(SIG.to_owned())
         }
@@ -1274,6 +1349,7 @@ mod tests {
             None,
             Arc::new(Fake),
             Box::new(log.clone()),
+            Trust { site_ca: PublicKey::parse(&key_line(40)).unwrap(), now: now(0) },
         );
         Fixture { core, log }
     }

@@ -72,6 +72,8 @@ pub fn bind_socket(path: &Path) -> Result<UnixListener> {
 /// record another pledge serve holds, a key that cannot be loaded.
 pub fn run(config: Config) -> Result<()> {
     eprintln!("{WARNING}");
+    // Every signature is checked, and every delegation issued, by one ssh-keygen: the system's, at its fixed path.
+    p_act::keygen::Keygen::system().map_err(|e| Error::Refused(e.to_string()))?;
     ensure_private_dir(&config.paths.state)?;
     let settings = Settings::load(&config.paths.state.join("config.json"))?;
     ensure_socket_dir(&config.paths.sockets, settings.service_group.is_some())?;

@@ -504,6 +504,9 @@ impl p_age::crypto::Crypto for SlowCrypto {
     ) -> Result<p_act::sign::ApprovalCertificate, p_age::crypto::CryptoError> {
         self.inner.check_approval_certificate(l, ca)
     }
+    fn broker_certificate_file(&self) -> PathBuf {
+        self.inner.broker_certificate_file()
+    }
     fn check_broker_certificate(
         &self,
         ca: &PublicKey,
