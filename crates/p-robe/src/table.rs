@@ -246,6 +246,33 @@ pub fn parse_rating(text: &str) -> Option<Rating> {
     Some(Rating::new(exposure, damage, disruption))
 }
 
+/// What a call was approved for, as it goes through sudo in `--within`: the rating and whether the verb's output may
+/// carry text from the host (`host_text`, signed in the request with the rating).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Within {
+    pub rating: Rating,
+    pub host_text: bool,
+}
+
+/// `exposure,damage,disruption,text|plain`: `--within`'s value. Four tokens, always.
+#[must_use]
+pub fn format_within(within: Within) -> String {
+    format!("{},{}", format_rating(within.rating), if within.host_text { "text" } else { "plain" })
+}
+
+/// The inverse of [`format_within`]. A value of three tokens is not accepted: one form everywhere, so that an old caller
+/// fails with a clear refusal and is never read as `plain`.
+#[must_use]
+pub fn parse_within(text: &str) -> Option<Within> {
+    let (rating, mark) = text.rsplit_once(',')?;
+    let host_text = match mark {
+        "text" => true,
+        "plain" => false,
+        _ => return None,
+    };
+    Some(Within { rating: parse_rating(rating)?, host_text })
+}
+
 #[must_use]
 pub fn exposure(value: Exposure) -> &'static str {
     match value {

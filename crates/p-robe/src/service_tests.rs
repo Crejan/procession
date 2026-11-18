@@ -875,7 +875,7 @@ struct Fixed {
 impl crate::runner::Runner for Fixed {
     fn run(
         &self,
-        _: Rating,
+        _: crate::table::Within,
         call_id: &str,
         until: i64,
         _: &str,
@@ -931,7 +931,7 @@ struct Canned(Mutex<Option<Result<crate::runner::RunOutput, crate::runner::RunEr
 impl crate::runner::Runner for Canned {
     fn run(
         &self,
-        _: Rating,
+        _: crate::table::Within,
         _: &str,
         _: i64,
         _: &str,
@@ -1177,6 +1177,15 @@ mod with_test_verbs {
 
         let sent = rig.jan("test echo", &[]);
         let (c, s) = (sent.call.clone(), sent.call_sig.clone());
+        // `wait_seconds` is `pact`'s (it shows it to the model and strips it before it composes the call): a call that
+        // carries it is refused like any argument the tool does not have, and nothing is asked of anybody.
+        let carrying = post(json!({
+            "jsonrpc": "2.0", "id": 7, "method": "tools/call",
+            "params": {"name": "test_echo", "arguments": {"params": sent.params, "wait_seconds": 30},
+                       "_meta": {"procession/call": c, "procession/call_sig": s}}
+        }));
+        let refused = value(mcp.handle(&carrying, &cancel));
+        assert_eq!(refused["error"]["code"], -32602, "{refused}");
         for (meta, why) in [
             (json!({"procession/call": c}), "both keys"),
             (

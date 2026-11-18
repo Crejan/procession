@@ -290,7 +290,9 @@ impl Service {
             return Err(Stop::Cancelled(hash.clone()));
         }
         // 5. Run the dispatcher, refusing above what was approved.
-        let (outcome, exact) = self.run(rating, call.id().as_str(), deadline.unix(), call.action(), call.params());
+        // What was approved is what the request said: the rating and whether the output may carry host text.
+        let approved = crate::table::Within { rating: request.rating(), host_text: request.host_text() };
+        let (outcome, exact) = self.run(approved, call.id().as_str(), deadline.unix(), call.action(), call.params());
         Ok((outcome, format!("{exact} approval={}", ApprovalKindWord(kind)), hash.clone()))
     }
 
@@ -308,7 +310,7 @@ impl Service {
         })
     }
 
-    fn run(&self, within: p_act::rating::Rating, call_id: &str, until: i64, action: &str, params: &[String]) -> Ended {
+    fn run(&self, within: crate::table::Within, call_id: &str, until: i64, action: &str, params: &[String]) -> Ended {
         let _one_at_a_time = self.run_lock.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         match self.runner.run(within, call_id, until, action, params) {
             Err(RunError::NotStarted(why)) => unavailable(format!("run:{why}")),
