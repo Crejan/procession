@@ -145,8 +145,8 @@ them.
 |---|---|---|---|---|
 | 0 | | The five `make` lines above | Whether any `make` shows a prompt (expected: none), and whether all five print `MADE` | **Owner, 2026-11-18:** all five printed `MADE`, each with an `ecdsa-sha2-nistp256` public key line and a blob under `sechecks-keys/`. No prompt during `make`. No entitlement error |
 | 1a | 1 | `./sechecks sign plain` | `SIGNED`, no prompt | **Owner, 2026-11-18:** signed, no prompt |
-| 1b | 1 | `./sechecks sign touch` and touch | A Touch ID prompt; `SIGNED` only after the touch. Copy the prompt's whole text, with the program name it shows | **Owner, 2026-11-18:** a prompt "sechecks trying to sign ..." (the full text was not copied); signed after the touch |
-| 1c | 1 | `./sechecks sign touchpw` and touch | The same. Whether the prompt offers "Use Password" | **Owner, 2026-11-18:** signed. Whether "Use Password" was offered was not reported: **still open** |
+| 1b | 1 | `./sechecks sign touch` and touch | A Touch ID prompt; `SIGNED` only after the touch. Copy the prompt's whole text, with the program name it shows | **Owner, 2026-11-18:** a prompt "sechecks trying to sign ..."; signed after the touch. Later the same day: the prompt's text was as expected (not pasted) |
+| 1c | 1 | `./sechecks sign touchpw` and touch | The same. Whether the prompt offers "Use Password" | **Owner, 2026-11-18:** signed; and, reported later the same day, the prompt did offer "Use Password" |
 | 2a | 2 | `./sechecks sign touch`, press Cancel | `NOT SIGNED`; the `domain` and `code` | **Owner, 2026-11-18:** `NOT SIGNED touch after 12.0 s: error domain=com.apple.LocalAuthentication code=-2 ... Canceled by user.` |
 | 2b | 2 | `./sechecks sign touch`, do nothing | How many seconds until it ends by itself, if it does (wait 5 minutes at most); `domain` and `code` | not run |
 | 2c | 2 | `./sechecks sign touch --invalidate-after 10`, do nothing | The prompt closes after 10 s; `NOT SIGNED`; `domain` and `code`. If the prompt stays: a dialog cannot be closed at a deadline this way | **Owner, 2026-11-18,** run with `--invalidate-after 2`: `invalidating the context now`, then `NOT SIGNED touch after 2.1 s: error domain=com.apple.LocalAuthentication code=-9 ... Invalidated by client.` |
@@ -179,8 +179,7 @@ Check 15 changes your enrolled fingers; do it last or leave it out. Check
 
 Run by the owner on his Mac on 2026-11-18, from this source as it is on
 `integration`; relayed by the designer. They are his observations, not the
-author's. Not yet run: 1c's question whether a password is offered, 2b,
-2d, 3c, and 6 to 16.
+author's. Not yet run: 2b, 2d, 3c, and 6 to 16.
 
 - **Check 0.** An ad-hoc signed command line program without a bundle and
   without entitlements can make and use Secure Enclave keys through
@@ -196,6 +195,8 @@ author's. Not yet run: 1c's question whether a password is offered, 2b,
 
 - **Checks 1a, 1b.** Keys with and without a presence check exist side by
   side and each behaves as made.
+- **Check 1c.** A key made with `.userPresence` offers "Use Password": it
+  falls back to the account password.
 - **Check 2.** The person's cancel is code -2, the program's own closing
   of the prompt is code -9 (`com.apple.LocalAuthentication`). A prompt
   can be closed at a deadline.

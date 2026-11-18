@@ -191,8 +191,7 @@ The first five decide the design; do them before anything is built.
 Run by the owner on his Mac on 2026-11-18 with
 `stage2-mac-checks/sechecks.swift`; relayed by the designer. These are his
 observations. The table in `stage2-mac-checks/README.md` has them row by
-row. Not yet run: 1c's question whether a password is offered, 2b, 2d,
-3c, and checks 6 to 16.
+row. Not yet run: 2b, 2d, 3c, and checks 6 to 16.
 
 | Check | Observed | What it settles |
 |---|---|---|
@@ -200,8 +199,8 @@ row. Not yet run: 1c's question whether a password is offered, 2b, 2d,
 | 3a (a copied blob, another program, no presence) | `sechecks-other: SIGNED plain after 0.0 s`, no prompt | The **[U]** of section 1.1 is answered as expected: another program of the same user loads a copied blob and signs. A key without a presence check is exactly as protected as its blob file |
 | 3b (a copied blob, another program, Touch ID) | A Touch ID prompt that named the other program and carried its words; after the touch, `SIGNED touch after 2.6 s` | The presence check holds for a copied blob: no signature without the touch. But any program of the person can raise that prompt, under its own name and with its own text |
 
-| 1a, 1b (keys side by side) | `sign plain`: signed, no prompt. `sign touch`: a prompt that began "sechecks trying to sign ..." (the full text was not copied), signed after the touch | `SPEC.md` section 11's assumption holds: keys with and without a presence check exist side by side in one program, and each behaves as made |
-| 1c (`.userPresence`) | `sign touchpw`: signed. Whether "Use Password" was offered was not reported | That part of 1c is still open |
+| 1a, 1b (keys side by side) | `sign plain`: signed, no prompt. `sign touch`: a prompt that began "sechecks trying to sign ..."; its text was as expected, he reported later (not pasted); signed after the touch | `SPEC.md` section 11's assumption holds: keys with and without a presence check exist side by side in one program, and each behaves as made |
+| 1c (`.userPresence`) | `sign touchpw`: signed, and the prompt offered "Use Password" | A key made with user presence falls back to the password. The **[D]** on `.userPresence` in section 1.1 is observed. This is why the confirmed approval key and the delegation key use biometry only and only the shared key keeps the fallback (question 1) |
 | 2a (cancel) | `NOT SIGNED touch after 12.0 s: error domain=com.apple.LocalAuthentication code=-2 ... Canceled by user.` | The person's cancel has a code of its own |
 | 2c (the program ends the prompt; run with `--invalidate-after 2`) | `invalidating the context now`, then `NOT SIGNED touch after 2.1 s: error domain=com.apple.LocalAuthentication code=-9 ... Invalidated by client.` | A prompt can be closed by the program at a deadline, and that ending is told apart from the person's cancel. The **[D]** on `LAContext.invalidate()` in section 2.2 is now observed |
 | 4a (two signatures, a fresh context each) | Two prompts: `SIGNED first after 3.0 s`, `second after 1.4 s` | One touch, one signature, with fresh contexts |
@@ -404,7 +403,9 @@ What follows for pledge, whatever question 1 decides:
 **Password in place of Touch ID, per key** (question 1, decided by the
 owner on 2026-11-18: Touch ID only for confirmed approvals and delegations,
 so a Mac that cannot offer Touch ID makes no confirmed approval and starts
-no agent; Touch ID or password for the shared key). The reasons were:
+no agent; Touch ID or password for the shared key). Check 1c has since
+shown that a `.userPresence` key does offer "Use Password" (section 1.6),
+so the fallback is real and not only documented. The reasons were:
 
 - *confirmed approval, delegation:* a password is weaker in exactly the two
   threats the presence check is there for. A stolen machine: the thief may
@@ -943,7 +944,7 @@ them.
 
 | # | Question | Stands | What was said |
 |---|---|---|---|
-| 1 | Password in place of Touch ID | decided, by the owner | Touch ID only (`.biometryAny`) for confirmed approvals and delegations. A Mac that cannot offer Touch ID makes no confirmed approval. The shared key keeps Touch ID or password |
+| 1 | Password in place of Touch ID | decided, by the owner | Touch ID only (`.biometryAny`) for confirmed approvals and delegations. A Mac that cannot offer Touch ID makes no confirmed approval. The shared key keeps Touch ID or password. Check 1c (section 1.6) showed what is at stake: a key made with `.userPresence` does offer "Use Password", so with that flag a confirmed approval could be had by whoever knows the password; hence biometry only for those two keys, and the fallback for the shared key alone |
 | 2 | Blob in a file, or keychain with an access group | decided, after check 3 | Check 3 came out as expected (section 1.6). Blobs in files for stage 2, said plainly; the keychain with an access group is a step of its own before a site. `SPEC.md` section 11 and the threat table carry the designer's record of it |
 | 3 | One key holder or two | decided | Two: one for keys with a presence check, one for keys without |
 | 4 | Does a locked screen stop automatic approvals | decided, by the owner | It does not. The automatic key is "after first unlock". The threat table of `doc/approvals.md` (the row on a stolen machine) says so, bounded by the delegation's end and the administrator's block |
