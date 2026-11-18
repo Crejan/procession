@@ -22,6 +22,20 @@ pub fn bounded(text: &str, max_chars: usize) -> String {
     if clipped.clipped { format!("{}...", clipped.text) } else { clipped.text }
 }
 
+/// What is wrong with a JSON file, without repeating anything the file said: serde's own text quotes member names
+/// and values (`unknown field `x``, `invalid type: string "..."`), so only its category and place are kept.
+#[must_use]
+pub fn json_problem(error: &serde_json::Error) -> String {
+    use serde_json::error::Category;
+    let what = match error.classify() {
+        Category::Io => "cannot be read",
+        Category::Syntax => "is not valid JSON",
+        Category::Data => "has a member of the wrong type, a member it does not know or a missing member",
+        Category::Eof => "ends too early",
+    };
+    format!("it {what} (line {}, column {})", error.line(), error.column())
+}
+
 /// `value` with every string (and every member name) escaped; an object that holds a string that had to be
 /// escaped gets `"escaped": true` (absent otherwise). Numbers, booleans and structure are untouched.
 #[must_use]

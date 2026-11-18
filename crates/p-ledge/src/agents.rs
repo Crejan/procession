@@ -262,5 +262,5 @@ pub fn list(shared: &Shared) -> Value {
             })
         })
         .collect();
-    json!({"delegations": delegations})
+    json!({"delegations": delegations, "broker_as_of": shared.broker_state.as_of()})
 }

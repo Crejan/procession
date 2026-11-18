@@ -244,7 +244,18 @@ impl Lab {
     }
 
     pub(crate) fn request(&self, call: &Call, call_sig: &str, rating: Rating, service: &str) -> (Request, String) {
-        let request = Request::compose(call, call_sig, rating).expect("request");
+        self.request_with_host_text(call, call_sig, rating, service, false)
+    }
+
+    pub(crate) fn request_with_host_text(
+        &self,
+        call: &Call,
+        call_sig: &str,
+        rating: Rating,
+        service: &str,
+        host_text: bool,
+    ) -> (Request, String) {
+        let request = Request::compose(call, call_sig, rating, host_text).expect("request");
         let sig = sign_request(&self.material.signer(service), &request).expect("sign request");
         (request, sig)
     }

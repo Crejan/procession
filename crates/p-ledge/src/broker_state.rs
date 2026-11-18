@@ -72,6 +72,9 @@ pub struct Persisted {
     /// When that standing came (Unix time).
     #[serde(default)]
     pub groups_as_of: Option<i64>,
+    /// The `at` of that standing: when the broker made it, as it wrote it (UTC to the second). Shown, never decided on.
+    #[serde(default)]
+    pub standing_at: Option<String>,
     /// pledge's own withdrawals.
     #[serde(default)]
     pub withdrawals: BTreeMap<String, Withdrawal>,
@@ -102,6 +105,8 @@ pub struct Applied<'a> {
     pub groups: &'a [String],
     /// When it came (Unix time).
     pub now: i64,
+    /// The standing's own `at`, for showing.
+    pub at: Option<&'a str>,
 }
 
 /// What a standing changed, for the record and for what is waiting.
@@ -142,8 +147,10 @@ impl BrokerState {
     ///
     /// As [`open`](Self::open).
     pub fn open_unverified(path: PathBuf) -> Result<Self> {
-        let read = p_act::settings::read_optional::<Persisted>(&path)
-            .map_err(|e| Error::Corrupt { path: path.clone(), problem: e.to_string() })?;
+        let read = p_act::settings::read_optional::<Persisted>(&path).map_err(|e| Error::Corrupt {
+            path: path.clone(),
+            problem: crate::outside::bounded(&e.to_string(), 200),
+        })?;
         let persisted = read.unwrap_or(Persisted { v: 1, ..Persisted::default() });
         if persisted.v != 1 {
             return Err(Error::Corrupt { path, problem: "the file's version is not 1".into() });
@@ -222,7 +229,7 @@ impl BrokerState {
     ///
     /// [`Error::Io`] if it cannot be saved.
     pub fn apply(&self, standing: &Applied<'_>, verify: &dyn Fn(&str) -> Option<String>) -> Result<Changes> {
-        let Applied { blocked, blocked_keys, withdrawn, certificates, groups, now } = *standing;
+        let Applied { blocked, blocked_keys, withdrawn, certificates, groups, now, at } = *standing;
         let kept: Vec<Cert> =
             certificates.iter().filter_map(|line| verify(line).map(|role| Cert { role, line: line.clone() })).collect();
         let changes = {
@@ -238,10 +245,17 @@ impl BrokerState {
             p.certificates = kept;
             p.groups = groups.to_vec();
             p.groups_as_of = Some(now);
+            p.standing_at = at.map(str::to_owned);
             changes
         };
         self.save()?;
         Ok(changes)
+    }
+
+    /// When the broker made the standing whose restrictions and groups are kept ("as of"), if one was kept. Only shown.
+    #[must_use]
+    pub fn as_of(&self) -> Option<String> {
+        self.get().standing_at.clone()
     }
 
     /// Notes a withdrawal pledge made itself (not told yet), unless already noted.
@@ -316,6 +330,7 @@ mod tests {
                     certificates: &[],
                     groups: &strings(&["ops"]),
                     now: 100,
+                    at: None,
                 },
                 ALWAYS,
             )
@@ -339,13 +354,22 @@ mod tests {
                     certificates: &[],
                     groups: &[],
                     now: 101,
+                    at: None,
                 },
                 ALWAYS,
             )
             .expect("apply");
         assert_eq!(again, Changes::default());
         s.apply(
-            &Applied { blocked: false, blocked_keys: &[], withdrawn: &[], certificates: &[], groups: &[], now: 102 },
+            &Applied {
+                blocked: false,
+                blocked_keys: &[],
+                withdrawn: &[],
+                certificates: &[],
+                groups: &[],
+                now: 102,
+                at: None,
+            },
             ALWAYS,
         )
         .expect("apply");
@@ -366,6 +390,7 @@ mod tests {
                 certificates: std::slice::from_ref(&cert),
                 groups: &["ops".into()],
                 now: 100,
+                at: None,
             },
             ALWAYS,
         )
@@ -390,7 +415,15 @@ mod tests {
         let s = state(&dir);
         let lines = ["a AAAA jan:confirmed".to_owned(), "b AAAA jan:automatic".to_owned()];
         s.apply(
-            &Applied { blocked: false, blocked_keys: &[], withdrawn: &[], certificates: &lines, groups: &[], now: 1 },
+            &Applied {
+                blocked: false,
+                blocked_keys: &[],
+                withdrawn: &[],
+                certificates: &lines,
+                groups: &[],
+                now: 1,
+                at: None,
+            },
             &|line| line.starts_with('b').then(|| "automatic".to_owned()),
         )
         .expect("apply");

@@ -163,7 +163,7 @@ impl Delegations {
         let list = match fs::read(&path) {
             Ok(bytes) => {
                 serde_json::from_slice::<File>(&bytes)
-                    .map_err(|e| Error::Corrupt { path: path.clone(), problem: e.to_string() })?
+                    .map_err(|e| Error::Corrupt { path: path.clone(), problem: crate::outside::json_problem(&e) })?
                     .delegations
             }
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Vec::new(),
