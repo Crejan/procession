@@ -464,7 +464,7 @@ sending it again.
 with `doc` the bytes of
 
 ```json
-{"v":1,"type":"standing","to":"jan","nonce":"q3V0w9h1...","n":0,"blocked":false,"blocked_keys":[],"withdrawn":["SHA256:Qm3..."],"certificates":["ssh-ed25519-cert-v01@openssh.com AAAAIHNzaC1lZDI1NTE5LWNlcnQtdjAxQG9wZW5zc2guY29t... jan:confirmed"],"groups":["ops","rt"]}
+{"v":1,"type":"standing","to":"jan","nonce":"q3V0w9h1...","n":0,"at":"2026-11-18T10:15:00Z","blocked":false,"blocked_keys":[],"withdrawn":["SHA256:Qm3..."],"certificates":["ssh-ed25519-cert-v01@openssh.com AAAAIHNzaC1lZDI1NTE5LWNlcnQtdjAxQG9wZW5zc2guY29t... jan:confirmed"],"groups":["ops","rt"]}
 ```
 
 | Member | Meaning |
@@ -472,6 +472,7 @@ with `doc` the bytes of
 | `to` | the person |
 | `nonce` | the nonce of the sign-in this connection began with: the standing is for this connection and no other |
 | `n` | a counter: `0` in the first standing after the sign-in, rising by one with each later one on the same connection. pledge accepts a standing only on the connection it was made for (its `nonce` is that connection's) and only if `n` is greater than the last one it accepted, so a repeated or older one changes nothing |
+| `at` | the time the broker made this standing, UTC to the second. It is the broker's clock and is shown, never used to decide anything: no standing is refused or preferred because of `at` (which one is current is decided by the connection, its nonce and `n`), and it does not make a standing valid for any length of time. It lets pledge say "as of" for the restrictions it keeps on disk and for the groups it shows from disk |
 | `blocked` | an administrator blocked the person |
 | `blocked_keys` | fingerprints of this person's keys an administrator blocked, `SHA256:...` as `ssh-keygen -l` prints them |
 | `withdrawn` | identifiers of delegations an administrator withdrew and that have not ended. The broker forgets an ended one |
