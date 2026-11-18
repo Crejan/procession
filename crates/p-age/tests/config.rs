@@ -46,10 +46,7 @@ fn a_configuration_builds_a_broker_with_defaults_for_what_is_left_out() {
     );
     let path = write(dir.path(), "page.json", &config_text(dir.path(), ""));
     let config = Config::read(&path).unwrap();
-    assert_eq!(
-        (config.max_waiting_per_agent, config.max_connections, config.max_connections_per_address),
-        (5, 512, 16)
-    );
+    assert_eq!((config.waiting_per_agent, config.max_connections, config.max_connections_per_address), (5, 512, 16));
     // the first start is explicit: without a register the broker is not built
     assert!(matches!(config.build(), Err(ConfigError::State(_))));
     p_age::core::Core::init_state(&dir.path().join("register.json")).unwrap();
@@ -61,8 +58,11 @@ fn a_configuration_builds_a_broker_with_defaults_for_what_is_left_out() {
 #[test]
 fn a_setting_can_be_changed_and_an_unknown_one_is_refused() {
     let dir = private_dir();
-    let ok = write(dir.path(), "a.json", &config_text(dir.path(), r#","max_waiting_per_agent":2"#));
-    assert_eq!(Config::read(&ok).unwrap().max_waiting_per_agent, 2);
+    let ok = write(dir.path(), "a.json", &config_text(dir.path(), r#","waiting_per_agent":2"#));
+    assert_eq!(Config::read(&ok).unwrap().waiting_per_agent, 2);
+    // the old name is not an alias: refused as unknown
+    let old = write(dir.path(), "old.json", &config_text(dir.path(), r#","max_waiting_per_agent":2"#));
+    assert!(Config::read(&old).is_err());
     let bad = write(dir.path(), "b.json", &config_text(dir.path(), r#","max_waiting":2"#));
     assert!(matches!(Config::read(&bad), Err(ConfigError::Settings(_))));
     assert!(Config::read(&dir.path().join("none.json")).is_err());
@@ -260,10 +260,7 @@ fn the_settings_files_are_read_as_p_act_reads_them_one_object_and_nothing_else()
     assert!(refused(format!("{good} trailing")), "text after the object");
     assert!(refused(format!("\u{feff}{good}")), "a byte order mark");
     assert!(refused(format!("[{good}]")), "not an object");
-    assert!(
-        refused(good.replacen("{", r#"{"max_waiting_per_agent":1,"max_waiting_per_agent":2,"#, 1)),
-        "a member twice"
-    );
+    assert!(refused(good.replacen("{", r#"{"waiting_per_agent":1,"waiting_per_agent":2,"#, 1)), "a member twice");
     assert!(refused(good.replacen("{", r#"{"surprise":1,"#, 1)), "an unknown member");
     // a file that is not a regular file (a link to a good one is a file; a directory is not)
     assert!(Config::read(dir.path()).is_err());
