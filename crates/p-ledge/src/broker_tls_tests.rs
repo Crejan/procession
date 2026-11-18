@@ -19,6 +19,15 @@ use crate::approvals_tests::{Lab, yes};
 use crate::broker_link::{self, BrokerLink, DynTransport, SessionConfig, TlsTransport};
 use crate::broker_state::Withdrawal;
 
+/// The broker's clock: the real time, which a test can move to a date its own certificate is not valid at.
+struct MovableClock(std::sync::atomic::AtomicI64);
+
+impl p_age::net::Clock for MovableClock {
+    fn now(&self) -> std::time::SystemTime {
+        std::time::UNIX_EPOCH + Duration::from_secs(u64::try_from(self.0.load(Ordering::SeqCst)).unwrap_or(0))
+    }
+}
+
 /// A broker serving TLS on a Unix socket, and the way to cut its connections.
 struct Site2 {
     rt: tokio::runtime::Runtime,
@@ -26,6 +35,7 @@ struct Site2 {
     socket: PathBuf,
     root_pem: String,
     tasks: Arc<Mutex<Vec<tokio::task::JoinHandle<()>>>>,
+    clock: Arc<MovableClock>,
 }
 
 impl Site2 {
@@ -65,8 +75,10 @@ impl Site2 {
             .host("a.example", &lab.material.host_line())
             .build()
             .expect("site");
+        let clock = Arc::new(MovableClock(std::sync::atomic::AtomicI64::new(crate::approvals_tests::now())));
         let TestBroker { broker, .. } = BrokerSetup::new(site, dir.join("broker"), dir.join("state"))
             .certificates(PublicKey::parse(&lab.material.ca_line()).expect("site ca"), dir.join("certificates"))
+            .clock(clock.clone())
             .start();
         let pki = TestPki::new(&["broker.test"]);
         let acceptor = pki.acceptor();
@@ -89,7 +101,7 @@ impl Site2 {
                 accept_tasks.lock().expect("tasks").push(task);
             }
         });
-        Self { rt, broker, socket, root_pem: ca.root_pem.clone(), tasks }
+        Self { rt, broker, socket, root_pem: ca.root_pem.clone(), tasks, clock }
     }
 
     /// The broker closes every connection it holds.
@@ -244,4 +256,52 @@ fn a_withdrawal_is_told_to_the_broker_and_followed_until_the_broker_has_stored_i
     eventually("stored at the broker", || {
         lab.rig.shared.broker_state.withdrawal(&agent.id) == Some(Withdrawal::Stored)
     });
+}
+
+#[test]
+fn a_broker_whose_certificate_ends_tells_a_connected_pledge_not_ready_once_and_the_connection_stays() {
+    let lab = Lab::stage2();
+    let site = Site2::new(&lab, &delegation_key(&lab));
+    let attempts = Arc::new(AtomicUsize::new(0));
+    let link = site.link(&lab, "jan", Arc::clone(&attempts));
+    eventually("a standing", || link.can_issue());
+    assert_eq!(attempts.load(Ordering::SeqCst), 1);
+    let state = &lab.rig.shared.broker_state;
+    let held = state.certificate_for("confirmed");
+    assert!(held.is_some());
+    // The broker's own certificate ends (its clock passes the end of it): `not-ready`, once, the connection stays.
+    site.clock.0.store(4_200_000_000, Ordering::SeqCst);
+    site.rt.block_on(site.broker.sweep());
+    eventually("not ready", || !link.can_issue());
+    assert!(link.is_ready(), "still signed in on the same connection");
+    assert_eq!(lab.rig.record().iter().filter(|e| e["event"] == "broker-not-ready").count(), 1);
+    assert_eq!(state.certificate_for("confirmed"), held, "what pledge holds stays");
+    lab.rig.dialogs.push(yes());
+    assert_eq!(
+        crate::agents::start(&lab.rig.shared, Lab::start_args(&[], None, None, None)).err(),
+        Some(crate::control::Code::BrokerUnavailable),
+        "nothing is issued without a verified standing"
+    );
+}
+
+#[test]
+fn a_pledge_let_in_by_a_broker_that_cannot_vouch_gets_the_standing_later_without_a_sign_in() {
+    let lab = Lab::stage2();
+    let site = Site2::new(&lab, &delegation_key(&lab));
+    // The broker's clock is before its certificate's start: it lets the pledge in and cannot vouch.
+    site.clock.0.store(1_560_000_000, Ordering::SeqCst);
+    let attempts = Arc::new(AtomicUsize::new(0));
+    let link = site.link(&lab, "jan", Arc::clone(&attempts));
+    eventually("signed in without a standing", || lab.rig.record().iter().any(|e| e["event"] == "broker-not-ready"));
+    assert!(link.is_ready() && !link.can_issue());
+    lab.rig.dialogs.push(yes());
+    assert_eq!(
+        crate::agents::start(&lab.rig.shared, Lab::start_args(&[], None, None, None)).err(),
+        Some(crate::control::Code::BrokerUnavailable)
+    );
+    // Its certificate becomes valid: the standing comes on the same connection.
+    site.clock.0.store(crate::approvals_tests::now(), Ordering::SeqCst);
+    site.rt.block_on(site.broker.sweep());
+    eventually("the standing", || link.can_issue());
+    assert_eq!(attempts.load(Ordering::SeqCst), 1, "no new sign-in");
 }

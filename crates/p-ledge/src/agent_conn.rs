@@ -66,13 +66,9 @@ fn list_identities(shared: &Shared, program: Option<&str>) -> Vec<u8> {
     message::identities_reply(&identities)
 }
 
-/// The longest user of a login pledge shows, in characters.
-pub const MAX_LOGIN_USER_CHARS: usize = 64;
-/// The longest host name of a login pledge shows, in characters (the names listed for the host's key, joined as
-/// the dialog shows them).
-pub const MAX_LOGIN_HOST_CHARS: usize = 170;
+pub use p_act::limits::{MAX_LOGIN_HOST_CHARS, MAX_LOGIN_USER_CHARS};
 /// The user, the `@` and the host together.
-pub const MAX_LOGIN_CHARS: usize = 240;
+pub const MAX_LOGIN_CHARS: usize = p_act::limits::MAX_PROMPT_NAMES_CHARS;
 
 /// Why a login cannot be shown whole, if it cannot: the sentence for the person. Only what is shown counts: a host
 /// that is shown by fingerprint (it has no name pledge can vouch for) has the fingerprint's own fixed length.

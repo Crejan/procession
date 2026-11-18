@@ -25,7 +25,7 @@ use std::io::{Read, Write};
 use std::os::unix::fs::PermissionsExt;
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::Stdio;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread;
@@ -107,12 +107,14 @@ fn random_name() -> Option<String> {
 }
 
 fn keygen(args: &[&std::ffi::OsStr], env_agent: Option<&Path>) -> Result<(), IssueError> {
-    let mut command = Command::new("ssh-keygen");
-    command.args(args).env("SSH_ASKPASS", "false").env("SSH_ASKPASS_REQUIRE", "force");
-    match env_agent {
-        Some(socket) => command.env("SSH_AUTH_SOCK", socket),
-        None => command.env_remove("SSH_AUTH_SOCK"),
+    // The system's ssh-keygen at its fixed path, checked once, with a cleared environment; the only variable added
+    // is the private agent socket for the signing.
+    let keygen = p_act::keygen::Keygen::system().map_err(|e| IssueError::Tool(e.to_string()))?;
+    let mut command = match env_agent {
+        Some(socket) => keygen.command_with_agent(socket),
+        None => keygen.command(),
     };
+    command.args(args);
     let output = command.stdin(Stdio::null()).output().map_err(io("running ssh-keygen"))?;
     if output.status.success() {
         Ok(())

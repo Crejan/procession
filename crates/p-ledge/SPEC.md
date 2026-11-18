@@ -114,6 +114,12 @@ never the path alone. The chain has holes: `exec` and re-parenting drop
 links, and a program with its own SSH implementation ends the chain at
 itself. With an incomplete chain only the two "once" answers are offered.
 
+**Which `ssh-keygen`.** pledge starts only the system's, `/usr/bin/ssh-keygen` (root-owned, not writable by group or
+others, nor its directories; OpenSSH 8.9 or later), with a cleared environment; the one variable added is the
+private SSH agent socket when pledge issues an agent's certificate. `pledge serve` refuses to start, with the
+reason, if it is not so. Changes behaviour: an OpenSSH earlier in `PATH` (Homebrew's) is no longer used. The
+holder's own keys are made with `ring` and start no program.
+
 **What a login must carry.**
 
 - A user authentication is bound to the session (`session-bind@openssh.com`)

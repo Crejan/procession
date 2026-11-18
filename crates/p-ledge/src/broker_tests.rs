@@ -685,3 +685,29 @@ fn the_tls_client_is_what_the_contract_names() {
     assert_eq!(p_act::broker::TLS_CRYPTO_PROVIDER, "ring");
     crate::broker_link::client_config(include_str!("../testdata/tls_root.pem")).expect("config");
 }
+
+#[test]
+fn not_ready_ends_the_right_to_issue_not_the_restrictions_and_is_told_once() {
+    let mut w = W::new();
+    w.sign_in();
+    let mut content = w.content();
+    content.blocked = true;
+    w.send_standing(&content);
+    assert!(w.link.can_issue());
+    w.feed(&ToPledge::NotReady).expect("not ready");
+    w.feed(&ToPledge::NotReady).expect("again");
+    assert!(!w.link.can_issue(), "no standing: nothing is issued");
+    assert!(w.link.is_ready(), "the connection stays");
+    assert!(w.lab.rig.shared.broker_state.is_blocked(), "the restrictions stay");
+    assert_eq!(w.events("broker-not-ready").len(), 1, "told once");
+    // The standing arrives later, without a new sign-in.
+    let mut again = w.content();
+    again.blocked = true;
+    w.send_standing(&again);
+    assert!(w.link.can_issue());
+    // And a broker that is not ready from the start: connected, no standing, no issuing.
+    let mut fresh = W::new();
+    fresh.sign_in();
+    fresh.feed(&ToPledge::NotReady).expect("not ready");
+    assert!(fresh.link.is_ready() && !fresh.link.can_issue());
+}
