@@ -847,7 +847,7 @@ async fn a_withdrawal_of_an_unknown_delegation_and_of_another_persons_cannot_be_
     assert_eq!(shape(&foreign, &jans), shape(&none, &unknown));
     assert_eq!(
         shape(&none, &unknown),
-        "{\"delegation\":\"<fp>\",\"schema_version\":1,\"stored\":true,\"type\":\"withdrawn\"}\n"
+        "{\"delegation\":\"<fp>\",\"schema_version\":1,\"stored\":true,\"type\":\"withdrawn\"}"
     );
     // neither wrote anything: the register is as it was, and (if a write could have failed) not degraded
     if locked {
