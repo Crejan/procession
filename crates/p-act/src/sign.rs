@@ -27,6 +27,7 @@ use crate::clearance::Clearance;
 use crate::error::ParseError;
 use crate::hash::Document;
 use crate::request::Request;
+use crate::sshsig::SshsigSigner;
 use crate::text;
 use base64::Engine as _;
 use base64::engine::general_purpose::{STANDARD, STANDARD_NO_PAD};
@@ -127,6 +128,10 @@ pub enum SignError {
     BadGroups(&'static str),
     #[error("`{0}` is not a fingerprint like SHA256:<43 base64 characters>")]
     MalformedFingerprint(String),
+    #[error("a signer's raw signature is refused: {0}")]
+    RawSignature(&'static str),
+    #[error("the key holder failed: {0}")]
+    Holder(String),
     #[error("the signature carries a certificate, and a plain key was expected")]
     UnexpectedCertificate,
     #[error("ssh-keygen did not accept the certificate: {0}")]
@@ -240,6 +245,12 @@ impl PublicKey {
     }
 }
 
+impl SshsigSigner for Signer {
+    fn sign(&self, namespace: Namespace, message: &[u8]) -> Result<String, SignError> {
+        self.sign_with_keygen(namespace, message)
+    }
+}
+
 /// A private key file to sign with, and its certificate if it has one.
 #[derive(Debug, Clone)]
 pub struct Signer {
@@ -263,7 +274,7 @@ impl Signer {
         if cert.is_file() { Ok(Signer { file: cert }) } else { Err(SignError::NotCertified) }
     }
 
-    fn sign(&self, namespace: Namespace, bytes: &[u8]) -> Result<String, SignError> {
+    fn sign_with_keygen(&self, namespace: Namespace, bytes: &[u8]) -> Result<String, SignError> {
         let out = run(
             &[
                 OsStr::new("-Y"),
@@ -450,7 +461,7 @@ fn name_data_list(list: &[u8], unwrap_value: bool) -> Option<Vec<(String, Vec<u8
 }
 
 /// The type name of a public key blob.
-fn key_type(blob: &[u8]) -> Option<String> {
+pub(crate) fn key_type(blob: &[u8]) -> Option<String> {
     String::from_utf8(Reader(blob).string()?.to_vec()).ok()
 }
 
@@ -687,7 +698,7 @@ pub fn request_person(request: &Request) -> Result<String, SignError> {
 // ---------------------------------------------------------------------------
 
 /// Sign a call with the agent's key, certified by its person's delegation key.
-pub fn sign_call(signer: &Signer, call: &Call) -> Result<String, SignError> {
+pub fn sign_call(signer: &(impl SshsigSigner + ?Sized), call: &Call) -> Result<String, SignError> {
     signer.sign(Namespace::Call, call.as_bytes())
 }
 
@@ -708,7 +719,7 @@ pub fn verify_call_agent(call: &Call, sig: &str, delegation_key: &PublicKey) -> 
 }
 
 /// Sign a request with the service's key, certified by its host's key.
-pub fn sign_request(signer: &Signer, request: &Request) -> Result<String, SignError> {
+pub fn sign_request(signer: &(impl SshsigSigner + ?Sized), request: &Request) -> Result<String, SignError> {
     signer.sign(Namespace::Request, request.as_bytes())
 }
 
@@ -750,7 +761,7 @@ impl ApprovalKind {
 
 /// An approval is the signature over the request's bytes. `signer` holds the
 /// person's confirmed or automatic approval key, certified by the site CA.
-pub fn sign_approval(signer: &Signer, request: &Request) -> Result<String, SignError> {
+pub fn sign_approval(signer: &(impl SshsigSigner + ?Sized), request: &Request) -> Result<String, SignError> {
     signer.sign(Namespace::Approval, request.as_bytes())
 }
 
@@ -796,7 +807,7 @@ pub fn verify_approval(request: &Request, sig: &str, trust: ApprovalTrust<'_>) -
 }
 
 /// Sign a clearance with the broker's key, certified by the site CA as `broker`.
-pub fn sign_clearance(signer: &Signer, clearance: &Clearance) -> Result<String, SignError> {
+pub fn sign_clearance(signer: &(impl SshsigSigner + ?Sized), clearance: &Clearance) -> Result<String, SignError> {
     signer.sign(Namespace::Clearance, clearance.as_bytes())
 }
 
@@ -814,7 +825,7 @@ pub fn verify_clearance(clearance: &Clearance, sig: &str, site_ca: &PublicKey) -
 
 /// Sign a connection document (`approval-connections.md` section 5, sign-in) with the person's
 /// connection key, a plain key: `connection-v1@procession`.
-pub fn sign_connection(signer: &Signer, document: &[u8]) -> Result<String, SignError> {
+pub fn sign_connection(signer: &(impl SshsigSigner + ?Sized), document: &[u8]) -> Result<String, SignError> {
     signer.sign(Namespace::Connection, document)
 }
 
@@ -843,7 +854,7 @@ pub fn verify_connection(
 
 /// Sign what the broker says in its own name (the standing) with the broker's key, certified by the
 /// site CA as `broker`: `broker-v1@procession`.
-pub fn sign_broker(signer: &Signer, document: &[u8]) -> Result<String, SignError> {
+pub fn sign_broker(signer: &(impl SshsigSigner + ?Sized), document: &[u8]) -> Result<String, SignError> {
     signer.sign(Namespace::Broker, document)
 }
 
