@@ -180,6 +180,9 @@ enum Plan {
     Expire,
     Silent,
     CloseAfterSubmit,
+    /// The connection is dropped as soon as it is accepted, before anything is read (a peer whose credentials pledge
+    /// cannot read): the service is told nothing.
+    DropAtOnce,
     /// An answer whose `result` is not one, then (if a key) an approval.
     UnknownThen(Option<PathBuf>),
     /// An approval with clearance members, which stage 1 refuses.
@@ -271,6 +274,9 @@ fn answer(stream: &UnixStream, request: p_act::DocumentHash, outcome: Answered, 
 fn connection(stream: UnixStream, plan: &Plan, events: &Mutex<Vec<String>>, host_key: &PublicKey) {
     let log = |text: String| events.lock().unwrap().push(text);
     stream.set_nonblocking(false).unwrap();
+    if matches!(plan, Plan::DropAtOnce) {
+        return log("dropped-at-once".to_string());
+    }
     let mut reader = LineReader::new(&stream);
     let submit = match reader.read_message(POLICY) {
         Ok(Some(Message::Submit(submit))) => submit,
@@ -302,6 +308,7 @@ fn connection(stream: UnixStream, plan: &Plan, events: &Mutex<Vec<String>>, host
         Plan::Expire => answer(&stream, hash, Answered::Expired(By::Pledge), POLICY),
         Plan::Silent => {}
         Plan::CloseAfterSubmit => return log(format!("closed-by-pledge {hash}")),
+        Plan::DropAtOnce => unreachable!("dropped before anything was read"),
         Plan::UnknownThen(path) => {
             let _ = (&stream).write_all_line(format!(
                 "{{\"schema_version\":1,\"type\":\"answer\",\"request\":\"{hash}\",\"result\":\"maybe\"}}\n"
@@ -719,6 +726,22 @@ fn a_pledge_that_cannot_be_used_means_unavailable_at_once_and_a_broken_connectio
     assert!(rig.ran().is_empty());
     // No pledge at all.
     drop(rig.pledge);
+}
+
+#[test]
+fn a_connection_pledge_drops_without_a_word_is_unavailable_and_nothing_more_whenever_it_ends_and_nothing_runs() {
+    let rig = Rig::new(Plan::DropAtOnce);
+    // Dropped before pledge read anything (the credentials it could not read): the agent hears `unavailable`.
+    let first = rig.outcome(&rig.jan("sys kit", &[]));
+    assert_eq!(first, Outcome::Unavailable);
+    assert_eq!((first.word(), first.reason()), ("unavailable", None), "nothing more specific");
+    // Dropped after the submit was written: the same.
+    rig.pledge.set(Plan::CloseAfterSubmit);
+    let second = rig.outcome(&rig.jan("sys kit", &[]));
+    assert_eq!((second.word(), second.reason()), ("unavailable", None));
+    assert!(rig.ran().is_empty(), "nothing ran");
+    assert!(rig.log_has("exact='no-route:") || rig.log_has("exact=no-route:"), "{:?}", rig.log);
+    assert_eq!(rig.service.waiting(), 0);
 }
 
 #[test]
