@@ -55,8 +55,12 @@ host's key issued a certificate when the service was installed; it never
 reads the host key. That certificate is valid 30 days. `probe setup`, run
 as root, makes it, and is the same command for the first time and for
 every renewal: it keeps the service's key and replaces the certificate. A
-root timer on the host runs it, with no arguments from outside, once 20 of
-the 30 days have passed; no converge is needed. `sys kit` reports the days
+root timer on the host runs it daily in a form that renews only when due:
+it does nothing while more than 10 of the 30 days remain, and renews
+otherwise, or at once when there is no certificate or the key changed. A
+renewal that fails ends non-zero, so the timer's unit shows as failed and
+the next day tries again. Run by hand, `probe setup` renews always. Nothing
+from outside the host is an argument to it, and no converge is needed. `sys kit` reports the days
 left, and fewer than 5 is a warning. The service runs under an account of its own, and the dispatcher
 gets the privilege each verb needs through the same sudo rule a person's
 call uses. It holds no rule about who may what. It does hold the ratings: they are facts about its own verbs, and
