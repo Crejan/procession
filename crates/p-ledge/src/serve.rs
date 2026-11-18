@@ -179,9 +179,9 @@ fn report(throttle: &mut Throttle, message: &str) {
 /// `service.sock`: who connects is the file mode's business (a service may run under another account),
 /// but a connection whose peer credentials cannot be read is dropped, as on the other two sockets: no
 /// request is handled for it and the peer is told nothing (the connection just ends).
-fn service_peer<S: std::os::unix::io::AsRawFd>(socket: &S, throttle: &mut Throttle) -> Option<(u32, Option<i32>)> {
+fn service_peer<S: std::os::unix::io::AsRawFd>(socket: &S, throttle: &mut Throttle) -> Option<peer::Seen> {
     match peer::peer(socket) {
-        Ok(p) => Some((p.uid, p.pid)),
+        Ok(p) => Some(peer::Seen::of(p)),
         Err(e) => {
             report(
                 throttle,
@@ -327,8 +327,12 @@ mod tests {
         let mut throttle = Throttle::new(LOG_INTERVAL);
         assert_eq!(service_peer(&file, &mut throttle), None, "no request is handled for it");
         let (a, _b) = UnixStream::pair().expect("pair");
-        let (uid, _) = service_peer(&a, &mut throttle).expect("a readable peer is taken");
-        assert_eq!(uid, own_uid(), "a service under another account would be taken too: the door is the file mode");
+        let seen = service_peer(&a, &mut throttle).expect("a readable peer is taken");
+        assert_eq!(
+            seen.uid,
+            own_uid(),
+            "a service under another account would be taken too: the door is the file mode"
+        );
     }
 
     #[test]

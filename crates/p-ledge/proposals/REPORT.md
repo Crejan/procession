@@ -777,3 +777,20 @@ through pledge) passed, so the lookup succeeded on those sockets; a3 passing bef
 show it on `service.sock` itself, this reading of the code and that evidence is why this
 change should not turn it red. Whole workspace (`cargo test --workspace --offline --features
 p-robe/test-verbs,p-act/pact-tls --no-fail-fast`): 0 failed.
+
+## Who connected to `service.sock`, shown in the record
+
+Before: the final `request` entry already had `peer` (`uid`, `pid`); `received` did not, the
+program was never read, and `pledge history` text did not print it. Now, in both the
+`received` entry and the answer entry, and so in `pledge history --format json`:
+
+    "peer": {"uid": <uid of the connecting account>, "pid": <pid or null/0>, "program": "<path>"}
+
+`program` is read from the kernel (Linux `/proc/<pid>/exe`, macOS `proc_pidpath`) and left out
+when it cannot be read (another user's process under a restrictive `/proc`, another pid
+namespace gives pid 0) or cannot be shown as it is. All of it is read by `SO_PEERCRED` (Linux) or
+`getpeereid`/`LOCAL_PEERPID` (macOS) on the accepted socket, so an entry with `peer.uid` shows
+that the lookup succeeded for that connection. `pledge history` (text) prints `peer-uid=N` on
+`received` and `request` lines. Tests: unit (the three entries, the history line) and
+`real_approvals` against the real binary (uid equals the test's own, pid > 0, program is the test
+binary).
