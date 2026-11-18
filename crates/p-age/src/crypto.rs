@@ -44,6 +44,8 @@ pub trait Crypto: Send + Sync {
         site_ca: &PublicKey,
         now: std::time::SystemTime,
     ) -> Result<BrokerCertificate, BrokerCertificateFailure>;
+    /// Where the broker's certificate is: `<broker_key>-cert.pub`, beside the key (named in `page status`).
+    fn broker_certificate_file(&self) -> PathBuf;
     /// The broker's signature over a clearance.
     fn sign_clearance(&self, clearance: &Clearance) -> Result<String, CryptoError>;
     /// The broker's signature over a standing (namespace `broker-v1@procession`).
@@ -131,6 +133,10 @@ impl Crypto for SshCrypto {
         // The issuer and the signature, the way a service and a pledge verify it.
         sign::verify_broker(site_ca, &sig, probe).map_err(|e| refused(&e))?;
         Ok(BrokerCertificate { valid_after: cert.valid_after, valid_before: cert.valid_before })
+    }
+
+    fn broker_certificate_file(&self) -> PathBuf {
+        self.certificate_file()
     }
 
     fn sign_clearance(&self, clearance: &Clearance) -> Result<String, CryptoError> {

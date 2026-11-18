@@ -54,10 +54,11 @@ fn config_path<'a>(verb: &str, args: &[&'a str]) -> Option<&'a str> {
 /// broker and print what it says. The exit codes are `p_age::admin::EXIT_TABLE`: 0 done, 1 refused, 2 usage,
 /// 3 no broker, 4 in force but not stored, 5 degraded (`status` only).
 fn admin(verb: &str, args: &[&str]) -> ExitCode {
-    use p_age::admin::{Command, EXIT_NO_BROKER, EXIT_TABLE, EXIT_USAGE, Target, ask, render, socket_path};
+    use p_age::admin::{Command, EXIT_NO_BROKER, EXIT_TABLE, EXIT_USAGE, Reply, Target, ask, render, socket_path};
     let synopsis = format!(
         "usage: page {verb} [--config FILE]{}",
         match verb {
+            "status" => " [--format json]",
             "block" | "unblock" => " (NAME | --key SHA256:...)",
             "withdraw" => " SHA256:...",
             _ => "",
@@ -72,13 +73,17 @@ fn admin(verb: &str, args: &[&str]) -> ExitCode {
         eprintln!("{synopsis}\n\n{EXIT_TABLE}");
         ExitCode::from(EXIT_USAGE)
     };
-    let (mut config, mut key, mut rest) = ("/etc/page.json", None, Vec::new());
+    let (mut config, mut key, mut rest, mut json) = ("/etc/page.json", None, Vec::new(), false);
     let mut it = args.iter();
     while let Some(arg) = it.next() {
         match *arg {
             "--config" => match it.next() {
                 Some(file) => config = file,
                 None => return usage(),
+            },
+            "--format" if verb == "status" => match it.next() {
+                Some(&"json") => json = true,
+                _ => return usage(),
             },
             "--key" => match it.next() {
                 Some(fp) => key = Some(*fp),
@@ -112,7 +117,11 @@ fn admin(verb: &str, args: &[&str]) -> ExitCode {
     };
     match ask(&socket_path(&config.state_dir), &command) {
         Ok(reply) => {
-            let (text, code) = render(&command, &reply);
+            let (mut text, code) = render(&command, &reply);
+            if let (true, Reply::Status(s)) = (json, &reply) {
+                // The same list of conditions, as an array; the exit code is the same.
+                text = p_age::admin::conditions_json(s);
+            }
             // What `status` shows is its output whatever the exit code; a refusal, or a change that is not stored,
             // is said on standard error.
             if code == 0 || command == Command::Status {

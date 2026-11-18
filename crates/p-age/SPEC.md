@@ -125,22 +125,37 @@ print this table:
 | 6 | an enabled person has no valid certificate for a purpose (`status` only) |
 | 7 | the broker has no valid certificate of its own and issues no clearances (`status` only) |
 
-When more than one of 5, 6 and 7 holds, `status` returns 7, then 5, then 6: the most severe first (nothing is cleared at all; the register cannot be stored; some person cannot be approved). Each code has one meaning.
+When more than one of 5, 6 and 7 holds, `status` returns the gravest, 7, then 5, then 6 (nothing is vouched for at all; the register cannot be stored; some person cannot be approved), and prints a line for each; the exit code is the gravest condition and the lines are the complete list. Each code has one meaning.
 
-**The broker's own certificate** is not in that directory. It is what the broker
-presents: ssh-keygen puts it into every signature the broker makes (clearances
-and standings), and finds it as `<broker_key>-cert.pub` beside the key (the
-configuration's `broker_certificate`, if given, must be exactly that path).
-It is checked at start and once a minute against the site CA (`site_ca` is
-required): its one principal is `broker`, issued by the site CA, valid now, no
-critical option, no extension, and it certifies the key the broker holds (the
-check signs a probe with the key and reads the certificate out of that
-signature, which is what a service or a pledge verifies). A broker without a
-valid one **issues no clearance** (an approval that comes back is answered
-`refused` `busy`) **and no standing** (a pledge that signs in is told `busy`;
-one already connected is left as it is), says so on standard error, and
-`page status` says so with the reason (`missing`, `not-yet-valid`, `expired`,
-`refused`), or with the days left when it has one (exit code 7).
+**The broker's own certificate** is not in that directory and has no member in
+the configuration: its path is derived, `<broker_key>-cert.pub` beside the key
+(`ssh-keygen` finds the key by the certificate's name), and `page status` names
+it. `site_ca` (the path to the site CA's public key) is required: there is no
+mode, test support included, in which the broker does not check its own
+certificate. It is checked at start and once a minute: its one principal is
+`broker`, issued by the site CA, valid now, no critical option, no extension, and
+it certifies the key the broker holds (until p-act's `verify_broker_certificate`
+is used, the check signs a probe with the key and reads the certificate out of
+that signature, which is what a service or a pledge verifies). A broker without a
+valid one is **not ready** and vouches for nothing:
+- an approval that comes back is answered to the service `refused` with the
+  reason `not-ready`, with no clearance; the broker logs `approval-lost:not-ready`
+  and says on standard error whose approval was lost;
+- a pledge that signs in is let in, gets `ready` and then `{"type":"not-ready"}`
+  in place of a standing, and the connection stays open; on it only what
+  restricts is served (`withdraw` is taken and answered as always; a registration
+  is answered `not-registered` with `unavailable`); requests wait; when the
+  certificate is valid again the broker sends the standing and what waited,
+  without a new sign-in;
+- a pledge already connected when the certificate ends is told `not-ready` once,
+  at the end (the sweep sees it, every second), and the same holds from then.
+`not-ready` is a code of its own; `busy` keeps its one meaning (too many open).
+
+**`page status`** prints every condition that holds, one line each, and exits with
+the gravest, in the order 7, 5, 6; the exit code is the gravest condition and the
+lines are the complete list. `page status --format json` gives the same list as
+an array of `{"code","condition","detail"}`, `[]` when none holds. With the
+broker's certificate valid it shows the days left.
 
 **Certificates.** The certificates of persons' approval keys that the broker
 carries to pledge are a separate input, not part of the site file (which has no
