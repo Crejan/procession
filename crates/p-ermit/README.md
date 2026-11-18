@@ -9,6 +9,10 @@ What may be trusted on a Unix system, checked the same way by every program that
 - **a secret file**, such as a password file (`read_secret_checked`, `read_secret_optional`, `check_open_secret`): the same, but
   with no permission bit at all for group or others (reading is as bad as writing). The refusal gives the exact
   `chmod 600 <path>` or `chown` for the caller's path; the content is never in an error.
+- **text from elsewhere** (`p_ermit::text`): `check` is the rule for what is refused (no control characters, no
+  bidirectional marks); `escape`, `escape_bytes`, `escape_clipped`, `unescape` are the one escape form for diagnostic data
+  that is shown or passed on instead: `\u{202e}`, `\x{ff}` for bytes that are not UTF-8, `\\` for a backslash,
+  reversible, and the result passes `check`.
 - **a TOML settings file** (feature `toml`, off by default; brings `toml` 0.9 and `serde`): `read_toml`,
   `read_toml_optional`, `parse_toml`, with the same checks, and errors that name the offending *key* and its line and
   column but never print a *value*. Unknown keys are refused by the caller's own `#[serde(deny_unknown_fields)]`;
@@ -18,7 +22,7 @@ What may be trusted on a Unix system, checked the same way by every program that
   exists only if its credentials were read, and `admit`/`accept` never treat "could not read" as anyone. A throttled log
   line, at most one per interval per socket, goes to a sink the caller gives.
 
-libc only by default. Unix only. Minimum Rust 1.91.
+libc only by default. Unix only (except `text`, which is portable). Minimum Rust 1.91.
 
 ## Use
 

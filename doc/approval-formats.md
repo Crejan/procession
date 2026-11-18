@@ -5,9 +5,9 @@ The four things that are signed in the approval system
 the request, the approval, the clearance. Who sends what to whom over which
 connection is not here; that is the next document.
 
-Status: a draft. Every signature and verification below was run with
-OpenSSH 10.2 and keys in files (section 7). Nothing implements these formats
-yet.
+Status: a draft until stage 1 is declared done (section 1, "the freeze").
+Every signature and verification below was run with OpenSSH 10.2 and keys in
+files (section 7). The crate `p-act` implements these formats.
 
 ## 1. Principles
 
@@ -46,8 +46,23 @@ what the broker says to a pledge in its own name. A service's
 allowed-signers lines never list either. `hosts-v1@procession` is section
 6.1.
 
-A change that an old reader would misread gets a new number in `v` and in
-the namespace. A reader refuses a `v` it does not know.
+**The freeze.** A form is a draft until the stage that first runs it across
+real parts is declared done (`approvals.md`, section 8; a stage is declared
+done when its runs on Linux have passed and are recorded). Until then a
+change to it changes the draft and keeps `v` at 1, because no reader exists
+outside one commit of this workspace. From then it is frozen at `v` 1: a
+member added to a signed document, or any change an old reader would
+misread, is a new number in `v` and a new namespace, without exception. A
+reader refuses a `v` it does not know.
+
+- With stage 1: the call, the request, the approval (the signature over the
+  request), the agent's certificate and the bundle, the exchange on
+  `service.sock`, the call in MCP `_meta`, pledge's record.
+- With stage 2: the clearance, the connection document, the standing, the
+  messages on both of the broker's connections, the broker's register, the
+  broker's own and the persons' certificates as far as stage 2 uses them.
+- With stage 3: the broker's site file in its target form (what `page load`
+  reads), the list of hosts' keys, the certificates the site CA issues.
 
 ## 2. Common rules
 
@@ -162,7 +177,7 @@ some other consumer of OpenSSH certificates might honour it. The names
 What a service states it will do. Signed by the service.
 
 ```json
-{"v":1,"type":"request","call":"eyJ2IjoxLCJ0eXBlIjoiY2FsbCIs...","call_sig":"LS0tLS1CRUdJTiBTU0ggU0lHTkFUVVJFLS0tLS0K...","rating":{"exposure":"internal","damage":"none","disruption":"none"}}
+{"v":1,"type":"request","call":"eyJ2IjoxLCJ0eXBlIjoiY2FsbCIs...","call_sig":"LS0tLS1CRUdJTiBTU0ggU0lHTkFUVVJFLS0tLS0K...","rating":{"exposure":"internal","damage":"none","disruption":"none"},"host_text":false}
 ```
 
 | Member | Type | Meaning |
@@ -174,13 +189,18 @@ What a service states it will do. Signed by the service.
 | `rating.exposure` | string | `open`, `internal` or `secret` |
 | `rating.damage` | string | `none`, `recoverable` or `lasting` |
 | `rating.disruption` | string | `none`, `brief` or `outage` |
+| `host_text` | boolean | whether the action's result can carry text that is not the service's: chosen by whoever runs processes on the host or wrote a file that is read (`approvals.md`, R2). Required, always written, `true` or `false`; there is no "absent means false". pledge shows one fixed line in the dialog when it is `true` |
 
 A request says nothing of its own about what will be done: the action, its
 parameters, the service and the deadline are the call's, and they are in the
 request as the bytes the agent signed. So a request cannot say something
 else than the call (approvals.md, R6); what pledge compares is that the
 service that signed the request is the service the call names. The service
-adds one thing, the rating.
+adds two things, the rating and `host_text`. Both bind it: what it carries
+out is checked against what was approved where the action runs, and a call
+whose action can return such text while the approved request said `false` is
+refused like a call above the approved rating. A service cannot obtain an
+approval for "no host text" and return some.
 
 There is no second identifier and no second time. The call's `id` and
 `deadline` are the request's.
@@ -202,7 +222,7 @@ connections) and recorded, and a service acts on none of them.
 The broker saying a request passed its checks. Signed by the broker.
 
 ```json
-{"v":1,"type":"clearance","request":"sha256:9c2f...e1","at":"2026-11-11T15:04:41Z"}
+{"v":1,"type":"clearance","request":"sha256:9c2f...e1","approval":"sha256:41ab...07","at":"2026-11-11T15:04:41Z"}
 ```
 
 | Member | Type | Meaning |
@@ -210,6 +230,7 @@ The broker saying a request passed its checks. Signed by the broker.
 | `v` | number | `1` |
 | `type` | string | `"clearance"` |
 | `request` | string | the hash of the request's bytes |
+| `approval` | string | the hash of the approval's bytes: the armoured signature as pledge made it. A clearance says exactly what it cleared: one approval by one key. A service checks that the approval it holds is the one the clearance names, so an approval by another key of the same person for the same request (the automatic one where the confirmed one was cleared, or one by a key blocked since) can never be paired with it, by whatever path it arrives |
 | `at` | string | when the broker issued it: when the approval came back |
 
 A service accepts a clearance for 60 seconds after `at`.

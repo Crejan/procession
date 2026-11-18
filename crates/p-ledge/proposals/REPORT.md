@@ -866,3 +866,48 @@ pipe), a service under an account apart from the person, the broker connection o
 `received` is written only for a request that waits for a person (mode `ask`), before it is queued or shown. An
 automatic request is answered at once and has one entry, `request`; so the first two calls (automatic) have no
 `received`, the later ones (confirmed) have it first.
+
+## Audit: strings from elsewhere that pledge prints, shows or writes (from the code, nothing changed)
+
+The rule pledge applies is `agent/text.rs`: `is_showable` (at most 200 characters, no control U+0000-001F, U+007F-009F, no bidi
+U+061C, U+200E/F, U+202A-E, U+2066-9; refused, never cleaned), `is_clean` (the same without the length), `escape_unshowable` (written as
+`\u{XXXX}`, for a reader that prints what it did not write). Calls, requests and approvals come through p-act's formats first
+(`Call::showable()`).
+
+| # | Site | Where the string comes from | Passed the rule before this point? | If not, what it could do |
+|---|---|---|---|---|
+| 1 | Approval dialog: action, params, claim | the agent's call | yes: `Call::showable` (refused as `not-showable` before any dialog; `approvals.rs` 424) | - |
+| 2 | Approval dialog: person | the call's certificate | yes: `is_clean` (approvals 427) | - |
+| 3 | Approval dialog: service and host names | the call | yes: formats' name rules at parse | - |
+| 4 | Login dialog: user | the SSH agent data | yes: `is_showable` in `sign_content.rs` (not parsed otherwise: `unrecognised`) | - |
+| 5 | Login dialog: host names | `known_hosts` (a file of the person) | yes: `is_showable` per name (`known_hosts.rs` 114), others dropped; plus the length bounds of the login | - |
+| 6 | Login dialog and `tell` notices: the program | the connecting process's path (SSH agent socket) | yes: `showable_program`, else refused `program-not-showable` | - |
+| 7 | Record, signing request: `program` | as 6 | yes; else `program_hash` instead | - |
+| 8 | Record, request: `peer.program` (`service.sock`) | the kernel (`/proc/<pid>/exe`, `proc_pidpath`) | **`is_clean` only** (approvals 539: an unclean path is left out); **no length bound** (up to the 4096-byte buffer) | not shown by pledge itself; in the file it is JSON-escaped (below) |
+| 9 | Record, `received`/`request`: names, claim, params, delegation | calls (as 1-3) | yes | - |
+| 10 | Record file as a whole | pledge writes JSON; serde escapes U+0000-001F, `"`, `\` | partly: **not U+007F-009F, not bidi marks, not U+2028/9** (serde leaves them) | the file is not a terminal; the readers below matter |
+| 11 | `pledge history` text | the record read back | **yes, at print**: every field through `escape_unshowable`, whoever wrote it (older/other pledge: not trusted) | - |
+| 12 | `pledge history --format json` | the record read back, `println!("{entry}")` | **no**: serde's Display escapes only U+0000-001F | a record line from another writer with a C1 control (U+009B, a CSI in some terminals) or a bidi mark is printed raw to a terminal. Entries pledge wrote are clean (1-9), but the record is hash-chained, not signed: its own tamper-evidence does not make a line trustworthy |
+| 13 | `pledge keys list` text / JSON | key meta from `keys` files and the holder | text: `escape_unshowable`; **JSON: raw** `println!("{data}")` | key comments are pledge's own words (`pledge bound user@host-fingerprint`, user checked at 354); a key file edited by hand could carry anything into JSON |
+| 14 | `pledge programs list` text / JSON | `programs.json` (pledge's file) | text: escaped; **JSON raw**; **`load_programs` does not re-check names** read back | as 12/13 |
+| 15 | `pledge agents list` text / JSON | pledge's delegation state | text: escaped (cli 450); JSON raw | labels and groups were checked at `agents start` (`is_showable`, `is_name`) |
+| 16 | `ssh-add -l` comment | key meta comment | pledge's own words (control 379/397/425) | a hand-edited key file's comment goes out raw on the SSH agent socket |
+| 17 | `control.sock` replies | pledge's state and closed `error` codes; nothing echoes a client's input | n/a: names in `args` are checked at entry (`is_showable`, 354/388/468) | - |
+| 18 | stderr: peer lookup refusals | `p_act::peer`: a uid and an `io::Error` kind; **no program path** | n/a | - |
+| 19 | stderr: `agents.rs` 136, 151 (`{e}`) | `IssueError::Tool(...)` is **ssh-keygen's own stderr**, trimmed | no | holds our scratch paths and the label (checked); a trusted system program, but unchecked |
+| 20 | stderr: serde errors in `Error::Corrupt`, config/IO errors with paths | the person's own files (`config.json`, `programs.json`, key files) and their paths | no | an unknown field name or a path with an ESC in it is printed raw; the writer is the person or root |
+| 21 | stderr: CLI usage errors (`unknown verb '{other}'`, `unexpected '{extra}'`, `'{text}' is not a duration`) | the person's own command line | no | the person's own typing echoed; no third party |
+| 22 | stderr: `cancel for a request it does not hold: {key}`, `an answer from a service for {hash}: ignored` | a typed hash (`DocumentHash`) from the wire | yes: parsed type (hex) | - |
+| 23 | Broker words: standing `groups`, `certificates`, certificate `key_id` | the broker, signed; certificates CA-verified | groups are checked by p-act's `Standing` rules; **never shown by pledge** (not built); `key_id` is never read or shown | `broker-state.json` stores the lines; not printed |
+| 24 | `agents start` question (presence check) | the person's own groups/ceilings | `is_name`, ratings | - |
+
+**Count: 24 sites; not covered by the rule before they are printed: 12, 13 (JSON), 14 (JSON and the read-back of `programs.json`), 15 (JSON), 16, 19, 20, 21;
+8 is covered but without a length bound.** None of them is a string from a service, an agent or a host: those are all
+refused at entry (1-7). The open ones are strings read back from pledge's own files, in JSON output, and the text of
+errors that quote files and ssh-keygen.
+
+**Where `p_ermit::text::escape` should replace refusing:** (a) the JSON forms (12-15): print `escape`d strings, not raw ones, for any
+value read back from a file (they are data to be shown, not asked about); (b) site 8: write the program path escaped (and bounded to
+200 characters) instead of leaving it out, so the record still says which program; (c) site 19/20: pass ssh-keygen's stderr and file
+paths in messages through it; (d) replace `escape_unshowable` in the text forms by it, for the reversible form. Where pledge keeps refusing:
+everything a person is asked about (1-7), because an escaped action is still not what was signed.
