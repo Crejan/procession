@@ -18,6 +18,8 @@ default = ["formats"]
 formats = ["dep:base64", "dep:serde", "dep:serde_json", "dep:ring", "dep:tempfile", "dep:thiserror"]
 # The agent-side signer `pact` (proposals/pact.md): the library the binary is made of, and the binary.
 pact = ["formats", "dep:ureq"]
+# TOML settings files (`p_act::settings::read_toml`): `toml` 0.9 and `serde`, and nothing of `formats`. Off by default.
+toml = ["dep:toml", "dep:serde"]
 # TLS for `pact`'s HTTP client (stage 2). Without it `pact` speaks plain http only.
 pact-tls = ["pact", "ureq/rustls", "dep:rustls"]
 
@@ -37,6 +39,7 @@ serde_json = { version = "1", features = ["raw_value"], optional = true }
 ring = { version = "0.17", default-features = false, optional = true }
 tempfile = { version = "3", optional = true }
 thiserror = { version = "2", optional = true }
+toml = { version = "0.9", default-features = false, features = ["std", "parse", "serde"], optional = true }
 
 [[test]]
 name = "ssh"
