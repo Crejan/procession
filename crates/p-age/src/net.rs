@@ -343,7 +343,7 @@ where
                         }
                         Message::Error(_) => break,
                         // A service sends no answer.
-                        Message::Answer(_) => {
+                        Message::Answer(_) | Message::Hello => {
                             send_service_error(&mut wr, ErrorCode::UnknownType).await;
                             break;
                         }
@@ -476,7 +476,7 @@ where
                         }
                         Message::Error(_) => break,
                         // pledge sends no submit and no cancel.
-                        Message::Submit(_) | Message::Cancel(_) => {
+                        Message::Submit(_) | Message::Cancel(_) | Message::Hello => {
                             send_pledge_error(&mut wr, ErrorCode::UnknownType).await;
                             break;
                         }

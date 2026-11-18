@@ -147,10 +147,11 @@ pub enum First {
 pub fn first_kind(line: &[u8]) -> First {
     match kind(line).as_deref() {
         Ok("submit") => First::Service,
-        Ok("hello") => match parse::<BareWire>(line).and_then(|w| version(w.schema_version)) {
-            Ok(()) => First::Pledge,
+        // p-act's parse is the one rule for what a `hello` is.
+        Ok("hello") => match exchange(line) {
+            Ok(Message::Hello) => First::Pledge,
             // Nothing more is said than that this is not a beginning.
-            Err(_) => First::Refuse(ErrorCode::MalformedLine),
+            _ => First::Refuse(ErrorCode::MalformedLine),
         },
         _ => First::Refuse(ErrorCode::MalformedLine),
     }

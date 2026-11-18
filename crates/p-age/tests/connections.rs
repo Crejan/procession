@@ -774,3 +774,19 @@ async fn restricting_goes_on_while_the_register_cannot_be_written_and_pledge_is_
     assert!(w.broker.unblock_person("jan".into()).await.is_ok());
     assert_eq!(w.broker.degraded(), None);
 }
+
+#[tokio::test]
+async fn a_hello_after_the_first_message_is_an_unexpected_message() {
+    let w = World::new();
+    let mut pledge = open_pledge(&w).await;
+    pledge.connect_as("jan", &w.jan_connection).await;
+    register(&w, &mut pledge).await;
+    let mut s = open_service(&w);
+    s.send(&submit_line(&w.submit(1, 120))).await;
+    s.send_json(serde_json::json!({"schema_version":1,"type":"hello"})).await;
+    assert_eq!(s.recv().await["error"], "unknown-type");
+    pledge.send_json(serde_json::json!({"schema_version":1,"type":"hello"})).await;
+    assert_eq!(pledge.recv_type().await, "submit");
+    assert_eq!(pledge.recv().await["error"], "unknown-type");
+    pledge.expect_closed().await;
+}
