@@ -1,0 +1,607 @@
+//! The two connections, over any async byte stream: a service's
+//! (`approval-connections.md` section 4) and a pledge's (section 5). TLS is
+//! around them (`tls`); tests run them over in-memory streams.
+//!
+//! The rules are `core`'s. This module reads and writes lines, runs the
+//! signatures that cost time off the async threads (bounded, so that a
+//! stranger's line costs little), and carries out what `core` returns.
+
+use std::collections::HashMap;
+use std::net::IpAddr;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex, PoisonError};
+use std::time::{Duration, Instant, SystemTime};
+
+use base64::Engine as _;
+use base64::engine::general_purpose::STANDARD;
+use p_act::exchange::{ErrorCode, MAX_LINE, Message};
+use ring::rand::{SecureRandom, SystemRandom};
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
+use tokio::net::TcpListener;
+use tokio::sync::{OwnedSemaphorePermit, Semaphore, mpsc};
+use tokio_rustls::TlsAcceptor;
+
+use crate::core::{ConnId, Core, Effect, vet};
+use crate::crypto::Crypto;
+use crate::site::Site;
+use crate::tls;
+use crate::wire::{
+    ConnectionDoc, ParseFailure, PledgeIn, PledgeOut, ServiceIn, ServiceOut, challenge_line, parse_pledge_line,
+    parse_service_line, pledge_line, service_line,
+};
+
+/// The waits of the connections. The defaults are the document's; tests shorten them.
+#[derive(Debug, Clone, Copy)]
+pub struct Timeouts {
+    /// A line that is begun must be finished within this long (10 s).
+    pub line: Duration,
+    /// A service sends its `submit` within this long of connecting (10 s).
+    pub first_line: Duration,
+    /// A pledge answers the challenge within this long (10 s).
+    pub signin: Duration,
+    /// A pledge connection silent for this long is closed; pledge pings every 30 s (90 s).
+    pub pledge_silence: Duration,
+}
+
+impl Default for Timeouts {
+    fn default() -> Self {
+        Timeouts {
+            line: Duration::from_secs(10),
+            first_line: Duration::from_secs(10),
+            signin: Duration::from_secs(10),
+            pledge_silence: Duration::from_secs(90),
+        }
+    }
+}
+
+/// The time, replaceable in tests.
+pub trait Clock: Send + Sync {
+    fn now(&self) -> SystemTime;
+}
+
+/// The system's clock.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct SystemClock;
+
+impl Clock for SystemClock {
+    fn now(&self) -> SystemTime {
+        SystemTime::now()
+    }
+}
+
+/// Why a line could not be read.
+#[derive(Debug, PartialEq, Eq)]
+pub enum ReadError {
+    TooLong,
+    Truncated,
+    Timeout,
+    Io,
+}
+
+/// A bounded line reader: at most [`MAX_LINE`] bytes in a line, and a begun line is finished within
+/// the line timeout. Cancel-safe: a dropped `read` loses nothing.
+#[derive(Debug)]
+pub struct Lines<R> {
+    inner: R,
+    buf: Vec<u8>,
+    started: Option<Instant>,
+    line_timeout: Duration,
+}
+
+impl<R: AsyncRead + Unpin> Lines<R> {
+    pub fn new(inner: R, line_timeout: Duration) -> Lines<R> {
+        Lines { inner, buf: Vec::new(), started: None, line_timeout }
+    }
+
+    /// The next line without its `\n`; `None` at the end between lines. `wait` bounds the wait for a line to begin.
+    pub async fn read(&mut self, wait: Option<Duration>) -> Result<Option<Vec<u8>>, ReadError> {
+        loop {
+            if let Some(pos) = self.buf.iter().position(|&b| b == b'\n') {
+                let mut line: Vec<u8> = self.buf.drain(..=pos).collect();
+                line.pop();
+                self.started = (!self.buf.is_empty()).then(Instant::now);
+                return if line.len() > MAX_LINE { Err(ReadError::TooLong) } else { Ok(Some(line)) };
+            }
+            if self.buf.len() > MAX_LINE {
+                return Err(ReadError::TooLong);
+            }
+            let limit = match self.started {
+                Some(t0) => Some(self.line_timeout.saturating_sub(t0.elapsed())),
+                None => wait,
+            };
+            let mut chunk = [0u8; 8192];
+            let n = match limit {
+                Some(d) => tokio::time::timeout(d, self.inner.read(&mut chunk))
+                    .await
+                    .map_err(|_| ReadError::Timeout)?
+                    .map_err(|_| ReadError::Io)?,
+                None => self.inner.read(&mut chunk).await.map_err(|_| ReadError::Io)?,
+            };
+            if n == 0 {
+                return if self.buf.is_empty() { Ok(None) } else { Err(ReadError::Truncated) };
+            }
+            if self.buf.is_empty() {
+                self.started = Some(Instant::now());
+            }
+            self.buf.extend_from_slice(&chunk[..n]);
+        }
+    }
+}
+
+async fn write_line<W: AsyncWrite + Unpin>(w: &mut W, line: &[u8]) -> bool {
+    w.write_all(line).await.is_ok() && w.flush().await.is_ok()
+}
+
+fn read_error_code(e: &ReadError) -> Option<ErrorCode> {
+    match e {
+        ReadError::TooLong => Some(ErrorCode::LineTooLong),
+        ReadError::Timeout => Some(ErrorCode::Timeout),
+        ReadError::Truncated | ReadError::Io => None,
+    }
+}
+
+#[derive(Debug)]
+enum Out {
+    Service(ServiceOut),
+    Pledge(PledgeOut),
+}
+
+/// The broker: the state under one lock, and the channels to the connections.
+pub struct Broker {
+    core: Mutex<Core>,
+    outs: Mutex<HashMap<ConnId, mpsc::UnboundedSender<Out>>>,
+    crypto: Arc<dyn Crypto>,
+    site: Arc<Site>,
+    clock: Arc<dyn Clock>,
+    timeouts: Timeouts,
+    /// Bounds the `ssh-keygen` runs at once; above it a request is refused `busy`.
+    keygen: Arc<Semaphore>,
+    next: AtomicU64,
+}
+
+fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
+    m.lock().unwrap_or_else(PoisonError::into_inner)
+}
+
+impl Broker {
+    pub fn new(
+        core: Core,
+        crypto: Arc<dyn Crypto>,
+        site: Arc<Site>,
+        clock: Arc<dyn Clock>,
+        timeouts: Timeouts,
+        max_keygen: usize,
+    ) -> Arc<Broker> {
+        Arc::new(Broker {
+            core: Mutex::new(core),
+            outs: Mutex::new(HashMap::new()),
+            crypto,
+            site,
+            clock,
+            timeouts,
+            keygen: Arc::new(Semaphore::new(max_keygen.max(1))),
+            next: AtomicU64::new(1),
+        })
+    }
+
+    fn new_conn(&self) -> ConnId {
+        ConnId(self.next.fetch_add(1, Ordering::Relaxed))
+    }
+
+    fn attach(&self, id: ConnId) -> mpsc::UnboundedReceiver<Out> {
+        let (tx, rx) = mpsc::unbounded_channel();
+        lock(&self.outs).insert(id, tx);
+        rx
+    }
+
+    fn detach(&self, id: ConnId) {
+        lock(&self.outs).remove(&id);
+    }
+
+    /// Hand effects to their connections. Called with the core's lock held, so that two events cannot
+    /// reorder what one connection receives.
+    fn dispatch(&self, effects: Vec<Effect>) {
+        let outs = lock(&self.outs);
+        for effect in effects {
+            let (id, out) = match effect {
+                Effect::Service(id, o) => (id, Out::Service(o)),
+                Effect::Pledge(id, o) => (id, Out::Pledge(o)),
+            };
+            if let Some(tx) = outs.get(&id) {
+                let _ = tx.send(out);
+            }
+        }
+    }
+
+    /// Run `f` on the core off the async threads, then dispatch what it returns, in one critical section.
+    async fn with_core<T: Send + 'static>(
+        self: &Arc<Self>,
+        f: impl FnOnce(&mut Core, SystemTime) -> (T, Vec<Effect>) + Send + 'static,
+    ) -> Option<T> {
+        let me = Arc::clone(self);
+        tokio::task::spawn_blocking(move || {
+            let mut core = lock(&me.core);
+            let (value, effects) = f(&mut core, me.clock.now());
+            me.dispatch(effects);
+            value
+        })
+        .await
+        .ok()
+    }
+
+    /// Run signature work for a stranger's line, bounded. `None` if the bound is reached.
+    async fn offload<T: Send + 'static>(&self, f: impl FnOnce() -> T + Send + 'static) -> Option<T> {
+        let permit: OwnedSemaphorePermit = Arc::clone(&self.keygen).try_acquire_owned().ok()?;
+        tokio::task::spawn_blocking(move || {
+            let value = f();
+            drop(permit);
+            value
+        })
+        .await
+        .ok()
+    }
+
+    /// The deadline sweep: unanswered requests past their deadline are answered `expired`, and forgotten.
+    pub async fn sweep(self: &Arc<Self>) {
+        self.with_core(|core, now| ((), core.sweep(now))).await;
+    }
+
+    /// How many requests the broker holds.
+    pub fn held_count(&self) -> usize {
+        lock(&self.core).held_count()
+    }
+
+    /// An administrator blocks a person.
+    pub async fn block_person(self: &Arc<Self>, person: String) {
+        self.with_core(move |core, now| ((), core.block_person(&person, now))).await;
+    }
+}
+
+/// Send `error` and say so; the caller then ends the connection.
+async fn send_service_error<W: AsyncWrite + Unpin>(w: &mut W, code: ErrorCode) {
+    if let Some(line) = service_line(&ServiceOut::Error(code)) {
+        write_line(w, &line).await;
+    }
+}
+
+async fn send_pledge_error<W: AsyncWrite + Unpin>(w: &mut W, code: ErrorCode) {
+    if let Some(line) = pledge_line(&PledgeOut::Error(code)) {
+        write_line(w, &line).await;
+    }
+}
+
+/// One service connection (section 4): one request, and its answer.
+pub async fn serve_service<S>(stream: S, broker: Arc<Broker>)
+where
+    S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
+{
+    let conn = broker.new_conn();
+    let mut rx = broker.attach(conn);
+    let (rd, mut wr) = tokio::io::split(stream);
+    let mut lines = Lines::new(rd, broker.timeouts.line);
+    let mut submitted = false;
+    loop {
+        tokio::select! {
+            read = lines.read(if submitted { None } else { Some(broker.timeouts.first_line) }) => {
+                let line = match read {
+                    Ok(Some(line)) => line,
+                    Ok(None) => break,
+                    Err(e) => {
+                        if let Some(code) = read_error_code(&e) { send_service_error(&mut wr, code).await; }
+                        break;
+                    }
+                };
+                match parse_service_line(&line) {
+                    Err(ParseFailure::Close(code)) => {
+                        if let Some(code) = code { send_service_error(&mut wr, code).await; }
+                        break;
+                    }
+                    Err(ParseFailure::BadRequest(hash)) => {
+                        submitted = true;
+                        broker.with_core(move |c, now| ((), c.refuse_unparsed(conn, hash, now))).await;
+                    }
+                    Ok(ServiceIn::Ack { request }) => {
+                        broker.with_core(move |c, now| ((), c.ack(conn, request, now))).await;
+                    }
+                    Ok(ServiceIn::Exchange(message)) => match *message {
+                        Message::Cancel(c) => {
+                            broker.with_core(move |core, now| ((), core.cancel(conn, c.request, now))).await;
+                        }
+                        Message::Submit(submit) => {
+                            if submitted {
+                                send_service_error(&mut wr, ErrorCode::TooManyOpen).await;
+                                break;
+                            }
+                            submitted = true;
+                            submit_from_service(&broker, conn, submit).await;
+                        }
+                        Message::Error(_) => break,
+                        // A service sends no answer.
+                        Message::Answer(_) => {
+                            send_service_error(&mut wr, ErrorCode::UnknownType).await;
+                            break;
+                        }
+                    },
+                }
+            }
+            out = rx.recv() => match out {
+                Some(Out::Service(ServiceOut::Close)) | None => break,
+                Some(Out::Service(o)) => {
+                    if let Some(line) = service_line(&o) {
+                        if !write_line(&mut wr, &line).await { break; }
+                    }
+                }
+                Some(Out::Pledge(_)) => {}
+            },
+        }
+    }
+    let _ = wr.shutdown().await;
+    broker.detach(conn);
+    broker.with_core(move |c, _| (c.service_gone(conn), Vec::new())).await;
+}
+
+async fn submit_from_service(broker: &Arc<Broker>, conn: ConnId, submit: p_act::exchange::Submit) {
+    let hash = submit.hash();
+    let (crypto, site, now) = (Arc::clone(&broker.crypto), Arc::clone(&broker.site), broker.clock.now());
+    let vetted = broker.offload(move || vet(&*crypto, &site, submit, now)).await;
+    match vetted {
+        Some(Ok(v)) => {
+            broker.with_core(move |c, now| ((), c.submit(conn, v, now))).await;
+        }
+        Some(Err(refusal)) => {
+            broker.with_core(move |c, now| ((), c.refuse(conn, &refusal, now))).await;
+        }
+        None => {
+            // The bound on signature work is reached: the request was not looked at, so it is refused
+            // `busy` and not logged against a host or a person.
+            broker.with_core(move |c, _| ((), c.refuse_busy(conn, hash))).await;
+        }
+    }
+}
+
+fn random_b64() -> Option<String> {
+    let mut bytes = [0u8; 32];
+    SystemRandom::new().fill(&mut bytes).ok()?;
+    Some(STANDARD.encode(bytes))
+}
+
+/// One pledge connection (section 5). `binding` is what both ends exported from the TLS connection;
+/// it ties the sign-in to this connection.
+pub async fn serve_pledge<S>(stream: S, binding: [u8; 32], broker: Arc<Broker>)
+where
+    S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
+{
+    let (rd, mut wr) = tokio::io::split(stream);
+    let mut lines = Lines::new(rd, broker.timeouts.line);
+    let Some(nonce) = random_b64() else { return };
+    if !write_line(&mut wr, &challenge_line(&nonce)).await {
+        return;
+    }
+    let Some(person) = sign_in(&broker, &mut lines, &mut wr, &nonce, &STANDARD.encode(binding)).await else {
+        let _ = wr.shutdown().await;
+        return;
+    };
+    let conn = broker.new_conn();
+    let mut rx = broker.attach(conn);
+    let (p, n) = (person.clone(), nonce.clone());
+    broker.with_core(move |c, now| ((), c.pledge_signed_in(&p, conn, &n, now))).await;
+    loop {
+        tokio::select! {
+            read = lines.read(Some(broker.timeouts.pledge_silence)) => {
+                let line = match read {
+                    Ok(Some(line)) => line,
+                    Ok(None) => break,
+                    Err(e) => {
+                        if let Some(code) = read_error_code(&e) { send_pledge_error(&mut wr, code).await; }
+                        break;
+                    }
+                };
+                match parse_pledge_line(&line) {
+                    Err(ParseFailure::Close(code)) => {
+                        if let Some(code) = code { send_pledge_error(&mut wr, code).await; }
+                        break;
+                    }
+                    Err(ParseFailure::BadRequest(_)) => {
+                        send_pledge_error(&mut wr, ErrorCode::MalformedLine).await;
+                        break;
+                    }
+                    Ok(PledgeIn::Ping) => {}
+                    Ok(PledgeIn::Delegation { cert }) => {
+                        let p = person.clone();
+                        broker.with_core(move |c, now| ((), c.register_delegation(&p, conn, &cert, now))).await;
+                    }
+                    Ok(PledgeIn::Withdraw { delegation }) => {
+                        let p = person.clone();
+                        broker.with_core(move |c, now| ((), c.withdraw(&p, &delegation, now))).await;
+                    }
+                    Ok(PledgeIn::Exchange(message)) => match *message {
+                        Message::Answer(answer) => {
+                            let p = person.clone();
+                            broker.with_core(move |c, now| ((), c.pledge_answer(&p, answer, now))).await;
+                        }
+                        Message::Error(_) => break,
+                        // pledge sends no submit and no cancel.
+                        Message::Submit(_) | Message::Cancel(_) => {
+                            send_pledge_error(&mut wr, ErrorCode::UnknownType).await;
+                            break;
+                        }
+                    },
+                    // pledge signs in once.
+                    Ok(PledgeIn::Signin { .. }) => {
+                        send_pledge_error(&mut wr, ErrorCode::UnknownType).await;
+                        break;
+                    }
+                }
+            }
+            out = rx.recv() => match out {
+                Some(Out::Pledge(PledgeOut::Close)) | None => break,
+                Some(Out::Pledge(o)) => {
+                    if let Some(line) = pledge_line(&o) {
+                        if !write_line(&mut wr, &line).await { break; }
+                    }
+                }
+                Some(Out::Service(_)) => {}
+            },
+        }
+    }
+    let _ = wr.shutdown().await;
+    broker.detach(conn);
+    broker.with_core(move |c, _| (c.pledge_gone(&person, conn), Vec::new())).await;
+}
+
+/// The sign-in: the signed connection document, checked against the nonce, the TLS binding and the person's
+/// connection key. Any failure is `error` `signin`, the same for an unknown person, a wrong key and a stale
+/// nonce; `blocked` only after a signature verified.
+async fn sign_in<R, W>(
+    broker: &Arc<Broker>,
+    lines: &mut Lines<R>,
+    wr: &mut W,
+    nonce: &str,
+    binding_b64: &str,
+) -> Option<String>
+where
+    R: AsyncRead + Unpin,
+    W: AsyncWrite + Unpin,
+{
+    let line = match lines.read(Some(broker.timeouts.signin)).await {
+        Ok(Some(line)) => line,
+        Ok(None) => return None,
+        Err(e) => {
+            if let Some(code) = read_error_code(&e) {
+                send_pledge_error(wr, code).await;
+            }
+            return None;
+        }
+    };
+    let (doc, sig) = match parse_pledge_line(&line) {
+        Ok(PledgeIn::Signin { doc, doc_sig }) => (doc, doc_sig),
+        Err(ParseFailure::Close(Some(code))) => {
+            send_pledge_error(wr, code).await;
+            return None;
+        }
+        _ => {
+            send_pledge_error(wr, ErrorCode::Signin).await;
+            return None;
+        }
+    };
+    let verified = async {
+        let parsed = ConnectionDoc::parse(&doc)?;
+        if parsed.nonce != nonce || parsed.tls != binding_b64 {
+            return None;
+        }
+        let person = broker.site.person(&parsed.person).filter(|p| p.enabled)?;
+        let (crypto, key, name) = (Arc::clone(&broker.crypto), person.connection_key.clone(), parsed.person.clone());
+        let ok = broker.offload(move || crypto.verify_connection(&doc, &sig, &name, &key).is_ok()).await?;
+        ok.then_some(parsed.person)
+    }
+    .await;
+    let Some(person) = verified else {
+        send_pledge_error(wr, ErrorCode::Signin).await;
+        return None;
+    };
+    let p = person.clone();
+    if broker.with_core(move |c, _| (c.is_blocked(&p), Vec::new())).await.unwrap_or(true) {
+        send_pledge_error(wr, ErrorCode::Blocked).await;
+        return None;
+    }
+    Some(person)
+}
+
+// ---------------------------------------------------------------------------
+// Listening
+// ---------------------------------------------------------------------------
+
+/// Bounds on connections: in total, and from one address.
+#[derive(Debug, Clone)]
+pub struct ConnLimits {
+    total: Arc<Semaphore>,
+    per_ip: Arc<Mutex<HashMap<IpAddr, usize>>>,
+    max_per_ip: usize,
+}
+
+impl ConnLimits {
+    #[must_use]
+    pub fn new(total: usize, max_per_ip: usize) -> ConnLimits {
+        ConnLimits { total: Arc::new(Semaphore::new(total)), per_ip: Arc::default(), max_per_ip }
+    }
+
+    /// A slot for a connection from `ip`, or `None` if either bound is reached.
+    fn take(&self, ip: IpAddr) -> Option<Slot> {
+        let permit = Arc::clone(&self.total).try_acquire_owned().ok()?;
+        let mut map = lock(&self.per_ip);
+        let count = map.entry(ip).or_insert(0);
+        if *count >= self.max_per_ip {
+            return None;
+        }
+        *count += 1;
+        Some(Slot { _permit: permit, per_ip: Arc::clone(&self.per_ip), ip })
+    }
+}
+
+struct Slot {
+    _permit: OwnedSemaphorePermit,
+    per_ip: Arc<Mutex<HashMap<IpAddr, usize>>>,
+    ip: IpAddr,
+}
+
+impl Drop for Slot {
+    fn drop(&mut self) {
+        let mut map = lock(&self.per_ip);
+        if let Some(count) = map.get_mut(&self.ip) {
+            *count = count.saturating_sub(1);
+            if *count == 0 {
+                map.remove(&self.ip);
+            }
+        }
+    }
+}
+
+/// Which of the two connections a listener serves.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Kind {
+    Service,
+    Pledge,
+}
+
+/// Accept connections for ever: TLS first (the handshake within 10 s), then the connection of `kind`.
+pub async fn listen(listener: TcpListener, acceptor: TlsAcceptor, broker: Arc<Broker>, limits: ConnLimits, kind: Kind) {
+    loop {
+        let Ok((tcp, peer)) = listener.accept().await else {
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            continue;
+        };
+        let Some(slot) = limits.take(peer.ip()) else { continue };
+        let (acceptor, broker) = (acceptor.clone(), Arc::clone(&broker));
+        tokio::spawn(async move {
+            let _slot = slot;
+            serve_tls(tcp, acceptor, broker, kind).await;
+        });
+    }
+}
+
+/// One accepted connection of `kind`: the TLS handshake within 10 s, then the connection itself. A pledge's
+/// sign-in is tied to the TLS connection by what both ends export from it.
+pub async fn serve_tls<S>(stream: S, acceptor: TlsAcceptor, broker: Arc<Broker>, kind: Kind)
+where
+    S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
+{
+    let Ok(Ok(stream)) = tokio::time::timeout(Duration::from_secs(10), acceptor.accept(stream)).await else {
+        return;
+    };
+    match kind {
+        Kind::Service => serve_service(stream, broker).await,
+        Kind::Pledge => {
+            let Some(binding) = tls::exporter(stream.get_ref().1) else { return };
+            serve_pledge(stream, binding, broker).await;
+        }
+    }
+}
+
+/// Run the deadline sweep once a second for ever.
+pub async fn sweep_forever(broker: Arc<Broker>) {
+    let mut tick = tokio::time::interval(Duration::from_secs(1));
+    loop {
+        tick.tick().await;
+        broker.sweep().await;
+    }
+}
