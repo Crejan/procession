@@ -111,13 +111,17 @@ impl Object {
         Ok(())
     }
 
-    #[cfg(feature = "pact")]
     /// Whether a member of this name is present.
     pub(crate) fn has(&self, name: &str) -> bool {
         self.members.iter().any(|(n, _)| n == name)
     }
 
-    #[cfg(feature = "pact")]
+    /// A boolean.
+    pub(crate) fn take_bool(&mut self, name: &'static str) -> Result<bool, ParseError> {
+        let raw = self.take_raw(name)?;
+        self.typed(name, &raw, "true or false")
+    }
+
     /// A non-negative integer.
     pub(crate) fn take_u64(&mut self, name: &'static str) -> Result<u64, ParseError> {
         let raw = self.take_raw(name)?;

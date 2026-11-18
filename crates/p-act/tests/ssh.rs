@@ -2,6 +2,10 @@
 //! directory. Nothing here touches anything outside it, and nothing prompts:
 //! keys have no passphrase and no command has a terminal to ask on.
 
+use p_act::broker::{
+    ConnectionDocument, DelegationMessage, FromPledge, Signed, Standing, StandingContent, StandingError, ToPledge,
+};
+use p_act::exchange::{ErrorCode, ExchangeError};
 use p_act::rating::{Damage, Disruption, Exposure, Rating};
 use p_act::sign::{
     ApprovalKind, ApprovalTrust, Fingerprint, Namespace, PublicKey, SignError, Signer, agent_certificate,
@@ -1516,5 +1520,149 @@ fn a_tampered_certificate_is_never_given_an_issuer() {
             base64::engine::general_purpose::STANDARD.encode(spliced)
         );
         assert!(certificate_issuer(&spliced).is_err(), "{label} spliced signature");
+    }
+}
+
+// ---------------------------------------------------------------------------
+// The broker's signed documents: the connection document and the standing
+// ---------------------------------------------------------------------------
+
+#[test]
+fn a_sign_in_from_document_to_verification() {
+    let keys = Keys::new();
+    let (nonce, tls) = ([5u8; 32], [6u8; 32]);
+    for (label, key) in [("ed25519", keys.key("c-e")), ("p256", keys.ecdsa_key("c-p"))] {
+        let public = keys.public(&key);
+        // pledge writes and signs; the message carries the bytes and the armoured signature, decoded.
+        let doc = ConnectionDocument::compose("jan", &nonce, &tls).unwrap();
+        let sig = doc.sign(&Signer::plain(&key)).unwrap();
+        let line = FromPledge::Signin(Signed { doc: doc.as_bytes().to_vec(), sig }).encode().unwrap();
+        // The broker reads the line, reads the person out of the document (unverified), verifies, then checks the connection.
+        let FromPledge::Signin(received) = FromPledge::parse(&line[..line.len() - 1]).unwrap() else { panic!() };
+        let read = ConnectionDocument::parse_unverified(received.doc.clone()).unwrap();
+        assert_eq!(read.person(), "jan");
+        read.verify(&public, &received.sig).unwrap_or_else(|e| panic!("{label}: {e}"));
+        assert!(read.is_for(&nonce, &tls), "{label}");
+        assert!(!read.is_for(&[1u8; 32], &tls) && !read.is_for(&nonce, &[1u8; 32]), "{label}");
+        // Not verified by another key, by changed bytes, or from another namespace.
+        assert!(is_rejected(read.verify(&keys.public(&keys.key(&format!("other-{label}"))), &received.sig)), "{label}");
+        let changed = ConnectionDocument::compose("jan", &[9u8; 32], &tls).unwrap();
+        assert!(is_rejected(changed.verify(&public, &received.sig)), "{label}");
+        let wrong = raw_sign(&key, "broker-v1@procession", doc.as_bytes());
+        assert!(is_rejected(doc.verify(&public, &wrong)), "{label}");
+    }
+}
+
+fn standing_content(nonce: [u8; 32]) -> StandingContent {
+    StandingContent {
+        to: "jan".into(),
+        nonce,
+        n: 0,
+        blocked: false,
+        blocked_keys: vec![],
+        withdrawn: vec!["SHA256:Qm3AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA".parse().unwrap()],
+        certificates: vec![],
+        groups: vec!["ops".into(), "rt".into()],
+    }
+}
+
+#[test]
+fn a_standing_is_signed_by_the_broker_and_read_only_after_it_verifies() {
+    let keys = Keys::new();
+    let nonce = [5u8; 32];
+    for (label, ca) in [("ed25519 ca", keys.key("sca-e")), ("p256 ca", keys.ecdsa_key("sca-p"))] {
+        let ca_pub = keys.public(&ca);
+        let broker = keys.certified(&format!("{label}-broker"), &ca, "broker", VALID);
+        let standing = Standing::compose(&standing_content(nonce)).unwrap();
+        let sig = standing.sign(&broker).unwrap();
+        // Through a `notice` line as pledge receives it.
+        let line = ToPledge::Notice(Signed { doc: standing.as_bytes().to_vec(), sig }).encode().unwrap();
+        let ToPledge::Notice(received) = ToPledge::parse(&line[..line.len() - 1]).unwrap() else { panic!() };
+        let verified = Standing::parse_verified(received.doc.clone(), &received.sig, &ca_pub).unwrap();
+        assert_eq!(verified, standing, "{label}");
+        assert!(verified.accepted_by("jan", &nonce, None), "{label}");
+        assert!(!verified.accepted_by("jan", &[1u8; 32], None), "a standing carried to another connection: {label}");
+        // Refused before it is read: changed bytes, another CA, a person's certificate, the namespace of a clearance, a plain key.
+        let mut changed = standing.as_bytes().to_vec();
+        let last = changed.len() - 3;
+        changed[last] ^= 1;
+        assert!(
+            matches!(
+                Standing::parse_verified(changed, &received.sig, &ca_pub),
+                Err(StandingError::Signature(SignError::Rejected { .. }))
+            ),
+            "{label}"
+        );
+        let other_ca = keys.public(&keys.ecdsa_key(&format!("elsewhere-{label}")));
+        assert!(
+            matches!(
+                Standing::parse_verified(standing.as_bytes().to_vec(), &received.sig, &other_ca),
+                Err(StandingError::Signature(_))
+            ),
+            "{label}"
+        );
+        let person = keys.certified(&format!("{label}-person"), &ca, "jan:confirmed", VALID);
+        assert!(
+            Standing::parse_verified(standing.as_bytes().to_vec(), &standing.sign(&person).unwrap(), &ca_pub).is_err(),
+            "{label}"
+        );
+        let as_clearance =
+            raw_sign(&keys.path(&format!("{label}-broker-cert.pub")), "clearance-v1@procession", standing.as_bytes());
+        assert!(Standing::parse_verified(standing.as_bytes().to_vec(), &as_clearance, &ca_pub).is_err(), "{label}");
+        let plain = Signer::plain(keys.key(&format!("{label}-plain")));
+        assert!(
+            Standing::parse_verified(standing.as_bytes().to_vec(), &standing.sign(&plain).unwrap(), &ca_pub).is_err(),
+            "{label}"
+        );
+        // Signed but not a standing: verified first, then refused as a document.
+        let junk = br#"{"v":1,"type":"standing"}"#.to_vec();
+        let junk_sig = p_act::sign::sign_broker(&broker, &junk).unwrap();
+        assert!(
+            matches!(Standing::parse_verified(junk, &junk_sig, &ca_pub), Err(StandingError::Document(_))),
+            "{label}"
+        );
+        // A clearance's signature is not a standing's, nor the reverse.
+        let request = request(&delegation("alice"), INTERNAL);
+        let clearance = Clearance::compose(request.hash(), Timestamp::from_unix(1_794_409_481).unwrap()).unwrap();
+        assert!(is_rejected(verify_clearance(&clearance, &standing.sign(&broker).unwrap(), &ca_pub)), "{label}");
+    }
+}
+
+#[test]
+fn a_delegation_message_carries_a_certificate_read_with_the_rules_of_section_3_1() {
+    let keys = Keys::new();
+    let ca = keys.key("dca");
+    let ca_pub = keys.public(&ca);
+    let (line, _) = cert_line_and_sig(&keys, &ca, "alice", &["extension:groups@procession=admins,diag"]);
+    // pledge writes the message, the broker reads it back.
+    let written = FromPledge::Delegation(DelegationMessage {
+        certificate: line.clone(),
+        agent: agent_certificate(&line).unwrap(),
+    })
+    .encode()
+    .unwrap();
+    let FromPledge::Delegation(d) = FromPledge::parse(&written[..written.len() - 1]).unwrap() else { panic!() };
+    assert_eq!(d.certificate, line);
+    assert_eq!(
+        (d.agent.person.as_str(), d.agent.groups.as_slice()),
+        ("alice", ["admins".to_owned(), "diag".to_owned()].as_slice())
+    );
+    // The broker then checks the issuer against the person's delegation key.
+    assert_eq!(verify_agent_certificate(&d.certificate, &ca_pub).unwrap().delegation, d.agent.delegation);
+    assert!(matches!(
+        verify_agent_certificate(&d.certificate, &keys.public(&keys.key("other-dca"))),
+        Err(SignError::WrongIssuer)
+    ));
+    // A certificate that breaks 3.1 in its form is `error malformed-line`, with no fingerprint to answer under.
+    for (principals, options) in [
+        ("alice,bob", vec![]),
+        ("alice", vec!["force-command=/bin/true"]),
+        ("alice", vec!["extension:groups@procession=b,a"]),
+    ] {
+        let (bad, _) = cert_line_and_sig(&keys, &ca, principals, &options);
+        let wire = format!(r#"{{"schema_version":1,"type":"delegation","cert":"{bad}"}}"#);
+        let e = FromPledge::parse(wire.as_bytes()).unwrap_err();
+        assert!(matches!(e, ExchangeError::BadCertificate(_)), "{principals} {options:?}");
+        assert_eq!(e.code(), Some(ErrorCode::MalformedLine));
     }
 }

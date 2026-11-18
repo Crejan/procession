@@ -73,6 +73,8 @@ macro_rules! closed_code {
     };
 }
 
+pub(crate) use closed_code;
+
 closed_code! {
     /// Who said no, or that time had run out.
     By { Pledge => "pledge", Broker => "broker" }
@@ -329,6 +331,9 @@ pub enum ExchangeError {
     BadRequest { hash: DocumentHash, source: ParseError },
     #[error("the clearance in the answer is refused: {0}")]
     BadClearance(ParseError),
+    /// A certificate in a message breaks formats section 3.1 in its form (the text says how).
+    #[error("the certificate is refused: {0}")]
+    BadCertificate(String),
     #[error("an approved answer needs both clearance members")]
     ClearanceMissing,
     #[error("an answer must not carry clearance members here")]
@@ -351,6 +356,7 @@ impl ExchangeError {
             | ExchangeError::BadSignature(_)
             | ExchangeError::BadRequest { .. }
             | ExchangeError::BadClearance(_)
+            | ExchangeError::BadCertificate(_)
             | ExchangeError::ClearanceMissing
             | ExchangeError::ClearanceNotAllowed => Some(ErrorCode::MalformedLine),
         }
