@@ -735,3 +735,17 @@ writing `config.json` under umask 002 (mode 0664), which pledge rightly refuses.
    0664 there and is refused (the unit one failed before the fix). pledge's own files (record,
    answers, delegations, programs, keys, sockets) already set their modes explicitly. Unit
    177, integration 5 + 6 pass; clippy clean.
+
+## The suite under umask 002
+
+Plainly: the owner's run of `cargo test -p p-ledge` in the container as root did not
+exercise the umask: root's umask there is 022, so a 0644 `config.json` was accepted. The
+designer's whole-workspace run under `umask 002` showed my harness failing (35 unit tests,
+all of `real_approvals`) because it wrote `config.json` with the default mode. That is
+fixed in the previous commit (explicit 0600, plus tests that re-run under umask 002 in
+child processes); I did not run the whole suite under umask 002 myself then, I do now:
+`sh -c 'umask 002; cargo test -p p-ledge --no-fail-fast'`: 177 unit, 5 `real_approvals`,
+7 `real_programs`, 0 failed (and the same under 022).
+`Server::start` no longer swallows pledge's words: when a socket does not appear it reports
+whether `pledge serve` ended (and its exit status) or is still running, and everything it
+wrote on stdout and stderr. Tested by a start that fails on a group-writable `config.json`.

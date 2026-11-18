@@ -18,6 +18,17 @@ use std::time::Duration;
 
 use common::{Dir, PLEDGE, Server, run, text};
 
+/// A start that fails must show pledge's own words: here a settings file others can write.
+#[test]
+#[should_panic(expected = "can be written by someone other than its owner")]
+fn a_failed_start_shows_the_exit_status_and_what_pledge_wrote() {
+    let _ = Server::start_with("failed-start", None, |state, _| {
+        let config = state.join("config.json");
+        fs::write(&config, "{}").expect("write");
+        fs::set_permissions(&config, std::os::unix::fs::PermissionsExt::from_mode(0o666)).expect("chmod");
+    });
+}
+
 #[test]
 fn it_says_at_start_that_the_form_protects_nothing() {
     let server = Server::start("warning", None);
