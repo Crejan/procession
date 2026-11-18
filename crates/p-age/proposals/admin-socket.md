@@ -30,7 +30,10 @@ that holds `register.json`: 0700, owned by the broker's user).
   broker's user and root. In addition the broker checks the peer's user id
   (`SO_PEERCRED`/`LOCAL_PEERCRED`, tokio's `peer_cred`): it must be root or
   the user that owns the state directory (the broker's own). Anything else is
-  closed without a word. Neither check relies on the other.
+  closed without a word, **and so is a peer whose credentials cannot be read**:
+  the rule for every socket is that an unreadable peer is dropped and told
+  nothing (`admin::peer_allowed`, tested with an `Err`). Neither check relies on
+  the other.
 - **One command per connection**: one JSON line in, one JSON line out, then
   the broker closes. A line is at most 4 KiB; a command must arrive within 10
   s. The framing is the exchange's (`schema_version` 1, `type`, unknown
@@ -156,3 +159,18 @@ added); no change of the site's data (stage 3); no command over TCP.
    attention; a monitor that polls `status` reconnects each time.
 6. **The register file gains `blocked_keys`** (a member the reader of the
    previous version did not have; `v` stays 1 and a missing member is empty).
+7. **Where the peer lookup lives: it should move to `p-act`, for pledge and
+   page to share.** Today p-ledge has its own (`peer.rs`: `SO_PEERCRED` on
+   Linux, `getpeereid` and `LOCAL_PEERPID` elsewhere, with `unsafe`) and p-age
+   uses tokio's `UnixStream::peer_cred` (the same two system calls, no `unsafe`
+   of ours, uid only). Two lookups mean two places for the rule "unreadable is
+   dropped" and two answers if the platforms differ. *Proposal:* `p_act::peer`
+   with `Peer { uid, pid }`, `peer(&impl AsRawFd) -> io::Result<Peer>` (what
+   p-ledge has, behind the `libc` feature p-act already has), `own_euid()`, and
+   the one decision function that p-age's `peer_allowed` is now:
+   `admitted(io::Result<Peer>, allowed_uids) -> bool`, `false` on `Err`. p-age
+   would call it on `stream.as_raw_fd()` and drop tokio's lookup; p-ledge would
+   keep `Seen` (the program path, which only pledge reads) on top. Until then
+   p-age's check is the one function `peer_allowed`, so the move is a change of
+   one call. The broker's own user is today the owner of the socket it made;
+   `own_euid()` would replace that.
