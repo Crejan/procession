@@ -403,3 +403,13 @@ fn commands_and_answers_are_read_as_strictly_as_everything_else() {
     );
     assert_eq!(Reply::parse(br#"{"schema_version":1,"type":"refused","reason":"anything at all"}"#), None);
 }
+
+#[test]
+fn a_peer_is_allowed_only_if_its_user_is_root_or_the_brokers_and_one_that_cannot_be_read_is_not() {
+    use p_age::admin::peer_allowed;
+    assert!(peer_allowed(Ok(0), 501));
+    assert!(peer_allowed(Ok(501), 501));
+    assert!(!peer_allowed(Ok(502), 501));
+    assert!(!peer_allowed(Err(std::io::Error::from(std::io::ErrorKind::Unsupported)), 501));
+    assert!(!peer_allowed(Err(std::io::Error::other("no credentials")), 0));
+}
