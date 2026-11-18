@@ -1,27 +1,22 @@
 //! A certificate for one of the person's approval keys, as the standing carries it, judged by pledge itself:
 //! it is accepted only if the site CA's signature verifies, for **this** pledge's key of that role, and the
 //! name is `<person>:<role>` (`doc/approval-connections.md`, section 5, "certificates"). The broker's
-//! signature on the standing is not what makes it good; the CA's is.
+//! signature on the standing is not what makes it good; the CA's is. The judgement of the certificate itself
+//! is `p_act::sign::verify_approval_certificate`; what is pledge's is whose key it is.
 //!
-//! How: the key holder signs a fixed probe with the approval key, the signature is armoured with the
-//! certificate as the key (exactly as an approval will be), `p_act` reads the certificate out of it, and
-//! `ssh-keygen -Y verify` checks the chain against a single CA line, as a service will. p-act has no function
-//! for "verify this approval key's certificate"; this is the one place pledge does it, so that it can move.
-
-use std::io::Write;
-use std::path::Path;
-use std::process::{Command, Stdio};
+//! **Possession.** The old check had the holder sign a probe, which proved this pledge holds the private key.
+//! Now the certificate is compared with `certifies(<the holder's own public key>)`. That is enough here: the
+//! public key comes from the holder's own key store (`key_with_purpose`), which lists only keys it has a pair
+//! for, so a certificate for that key is a certificate for a key the holder can sign with. Where pledge relies
+//! on actual signing is every approval: a certificate whose key is not the signing key makes the service refuse
+//! the approval, and `seam::sign` signs with the holder's plain key and carries this certificate.
 
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD;
-use p_act::sign::{PublicKey, signature_certificate};
+use p_act::Timestamp;
+use p_act::sign::{ApprovalKind, PublicKey, SignError, verify_approval_certificate, verify_approval_certificate_for};
 
-use crate::agent::host_key::fingerprint;
-use crate::approvals::APPROVAL_NAMESPACE;
 use crate::shared::Shared;
-use p_act::sign::Namespace;
-
-const PROBE: &[u8] = b"pledge: certificate check, not a request";
 
 /// What a good certificate is for.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -34,32 +29,12 @@ pub struct Good {
     pub valid_before: u64,
 }
 
-fn run_keygen(dir: &Path, principal: &str, ca: &PublicKey, armoured: &str) -> bool {
-    let allowed = dir.join("allowed");
-    let signature = dir.join("probe.sig");
-    if std::fs::write(&allowed, format!("{principal} cert-authority,namespaces=\"{APPROVAL_NAMESPACE}\" {ca}\n"))
-        .is_err()
-        || std::fs::write(&signature, armoured).is_err()
-    {
-        return false;
+fn why(error: &SignError) -> &'static str {
+    match error {
+        SignError::WrongIssuer => "the site CA's signature does not verify",
+        SignError::CertificateNotYetValid | SignError::CertificateExpired => "the certificate is not valid now",
+        _ => "the certificate does not read as an approval key's",
     }
-    let Ok(mut child) = Command::new("ssh-keygen")
-        .args(["-Y", "verify", "-f"])
-        .arg(&allowed)
-        .args(["-I", principal, "-n", APPROVAL_NAMESPACE, "-s"])
-        .arg(&signature)
-        .env("SSH_ASKPASS", "false")
-        .stdin(Stdio::piped())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn()
-    else {
-        return false;
-    };
-    if let Some(mut stdin) = child.stdin.take() {
-        let _ = stdin.write_all(PROBE);
-    }
-    child.wait().is_ok_and(|status| status.success())
 }
 
 /// Judges `line` for `person` against `site_ca` at `now` (Unix time).
@@ -73,38 +48,31 @@ pub fn check(shared: &Shared, line: &str, person: &str, site_ca: &PublicKey, now
         .nth(1)
         .and_then(|b64| STANDARD.decode(b64).ok())
         .ok_or("the certificate line does not read")?;
-    for role in ["confirmed", "automatic"] {
-        let Some(key) = shared.key_with_purpose(role) else { continue };
-        // The seam refuses a blob that is not a key or certificate of the key's algorithm: not this pledge's.
-        let Some(armoured) = crate::seam::sign(shared, &key.blob, &blob, Namespace::Approval, PROBE) else { continue };
-        let Ok(cert) = signature_certificate(&armoured) else { continue };
-        if cert.fingerprint.as_str() != fingerprint(&key.blob) {
-            continue; // not this role's key
-        }
-        let principal = format!("{person}:{role}");
-        if cert.principals != [principal.clone()] {
-            return Err("the certificate does not name this person and role".into());
-        }
-        let n = u64::try_from(now).unwrap_or(0);
-        if cert.valid_after > n || n >= cert.valid_before {
-            return Err("the certificate is not valid now".into());
-        }
-        let dir = shared.work_dir.join(format!("cert-{}", std::process::id()));
-        crate::paths::ensure_private_dir(&dir).map_err(|_| "no private directory to check in")?;
-        let verified = run_keygen(&dir, &principal, site_ca, &armoured);
-        let _ = std::fs::remove_dir_all(&dir);
-        return if verified {
-            Ok(Good { role, blob, valid_before: cert.valid_before })
-        } else {
-            Err("the site CA's signature does not verify".into())
-        };
-    }
-    Err("the certificate is not for one of this pledge's approval keys".into())
+    let now = Timestamp::from_unix(now).ok_or("the clock is not usable")?;
+    let cert = verify_approval_certificate(line, site_ca, now).map_err(|e| why(&e))?;
+    let ours = ["confirmed", "automatic"].into_iter().find(|role| {
+        shared
+            .key_with_purpose(role)
+            .and_then(|key| PublicKey::parse(&key.public_line()).ok())
+            .is_some_and(|key| cert.certifies(&key))
+    });
+    let Some(role) = ours else { return Err("the certificate is not for one of this pledge's approval keys".into()) };
+    let kind = if role == "confirmed" { ApprovalKind::Confirmed } else { ApprovalKind::Automatic };
+    // Person and role are known now: the one judgement of the name is p-act's.
+    verify_approval_certificate_for(line, site_ca, person, kind, now).map_err(|e| match e {
+        SignError::NotTheExpectedName => "the certificate does not name this person and role",
+        other => why(&other),
+    })?;
+    Ok(Good {
+        role: if role == "confirmed" { "confirmed" } else { "automatic" },
+        blob,
+        valid_before: cert.valid_before,
+    })
 }
 
 #[cfg(test)]
 mod tests {
-    use std::process::Command;
+    use std::process::{Command, Stdio};
 
     use super::*;
     use crate::holder::KeyType;
@@ -204,11 +172,7 @@ mod tests {
                 w.certificate("confirmed", "ca", "jan:confirmed", "20200101Z:20200102Z"),
                 "not valid now",
             ),
-            (
-                "a garbage line",
-                "ssh-ed25519-cert-v01@openssh.com AAAA jan:confirmed".to_owned(),
-                "not for one of this pledge's",
-            ),
+            ("a garbage line", "ssh-ed25519-cert-v01@openssh.com AAAA jan:confirmed".to_owned(), "does not read"),
             ("not a line", "nonsense".to_owned(), "does not read"),
         ] {
             let error = w.check(&line).expect_err(what);

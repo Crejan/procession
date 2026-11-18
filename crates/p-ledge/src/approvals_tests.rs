@@ -1189,3 +1189,8 @@ fn the_record_shows_who_connected_to_service_sock_in_received_and_in_the_answer(
     let line = crate::cli::history_line(entries.iter().find(|e| e["type"] == "received").expect("received"));
     assert!(line.contains("peer-uid=4242"), "{line}");
 }
+
+/// The user the tests run as.
+pub(crate) fn own_uid_for_tests() -> u32 {
+    p_act::peer::own_uid()
+}
