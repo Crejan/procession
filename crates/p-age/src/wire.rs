@@ -150,7 +150,11 @@ pub fn first_kind(line: &[u8]) -> First {
         // p-act's parse is the one rule for what a `hello` is.
         Ok("hello") => match exchange(line) {
             Ok(Message::Hello) => First::Pledge,
-            // Nothing more is said than that this is not a beginning.
+            // A well-formed `hello` of a version the broker does not speak: that, and nothing more.
+            Err(ParseFailure::Close(Some(ErrorCode::UnsupportedVersion))) => {
+                First::Refuse(ErrorCode::UnsupportedVersion)
+            }
+            // Anything else is no beginning; nothing more is said than that.
             _ => First::Refuse(ErrorCode::MalformedLine),
         },
         _ => First::Refuse(ErrorCode::MalformedLine),
@@ -307,6 +311,8 @@ pub enum NotRegistered {
     TooLong,
     NotYours,
     Blocked,
+    /// The broker could not take the registration now (its register cannot be written); nothing about why.
+    Unavailable,
 }
 
 impl NotRegistered {
@@ -317,6 +323,7 @@ impl NotRegistered {
             NotRegistered::TooLong => "too-long",
             NotRegistered::NotYours => "not-yours",
             NotRegistered::Blocked => "blocked",
+            NotRegistered::Unavailable => "unavailable",
         }
     }
 }
@@ -334,6 +341,8 @@ pub enum PledgeOut {
     Cancel(DocumentHash),
     Registered(Fingerprint),
     NotRegistered(Fingerprint, NotRegistered),
+    /// The answer to a withdrawal: whether it is in force only in memory (`false`) or written too.
+    Withdrawn(Fingerprint, bool),
     Error(ErrorCode),
     /// Close after what was queued before.
     Close,
@@ -391,6 +400,12 @@ pub fn pledge_line(out: &PledgeOut) -> Option<Vec<u8>> {
             let mut m = head("not-registered");
             m.insert("delegation".into(), fp.to_string().into());
             m.insert("reason".into(), why.wire().into());
+            json_line(&m.into())
+        }
+        PledgeOut::Withdrawn(fp, stored) => {
+            let mut m = head("withdrawn");
+            m.insert("delegation".into(), fp.to_string().into());
+            m.insert("stored".into(), (*stored).into());
             json_line(&m.into())
         }
         PledgeOut::Error(code) => Message::Error(ErrorMessage { error: *code }).encode(refused).ok()?,

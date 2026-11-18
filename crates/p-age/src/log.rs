@@ -17,7 +17,10 @@ pub struct LogEntry {
     pub service: String,
     /// `None` when the request was refused before a person was known.
     pub person: Option<String>,
-    pub request: DocumentHash,
+    /// The request's hash; `None` for an entry about a delegation, not a request.
+    pub request: Option<DocumentHash>,
+    /// The delegation an entry is about (a withdrawal an honest pledge would not send), if it is about one.
+    pub delegation: Option<String>,
     /// `approval-returned`, `declined`, `expired`, `cancelled`, or `refused:<code>`. The broker never
     /// writes "approved": that word is the service's to say.
     pub result: String,
@@ -42,7 +45,7 @@ impl LogSink for FileLog {
     fn write(&mut self, e: &LogEntry) {
         let line = serde_json::json!({
             "at": e.at.to_string(), "host": e.host, "service": e.service, "person": e.person,
-            "request": e.request.to_string(), "result": e.result,
+            "request": e.request.map(|h| h.to_string()), "delegation": e.delegation, "result": e.result,
         });
         // A log that cannot be written must not stop the broker: say so on standard error.
         if let Err(err) = writeln!(self.0, "{line}") {

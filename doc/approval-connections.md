@@ -81,7 +81,8 @@ in it names a socket. Its codec is in the crate `p-act`.
   `schema_version` or a `type` it does not know, with an `error` (3.5).
 - Unknown members make a message invalid.
 - Strings: the rules of the formats (no control characters, no bidirectional
-  marks).
+  marks), for every string member of every message, signed or not, the
+  broker's messages of sections 4 and 5 included.
 - Codes (`result`, `by`, reasons, errors) are lower-case words with hyphens,
   `[a-z][a-z-]*`, from **closed lists**. **A reader maps a code it does not know
   to `unknown`**, and never passes the received text on. A program puts nothing
@@ -276,8 +277,11 @@ it verifies.
 **One address, and the first message says which exchange this is.** The broker
 listens for services and for pledges on the same address. A connection whose
 first message is `submit` is a service's; one whose first message is `hello`
-(section 5) is a pledge's; any other first message is an `error`
-`malformed-line`, which says nothing more than that, and the connection is
+(section 5) is a pledge's. A well-formed `hello` or `submit` with a
+`schema_version` the broker does not know is answered `error`
+`unsupported-version` and the connection is closed: that tells a peer only
+which version the broker speaks, and makes a later change of version
+diagnosable. Any other first message is an `error` `malformed-line`, which says nothing more than that, and the connection is
 closed. The broker never speaks first: a connection that sends nothing
 within 10 s is closed without a word. Where a connection arrived
 means nothing: what authenticates it is the signature inside, the signed
@@ -377,8 +381,12 @@ where `doc` is the bytes of
 | Member | Meaning |
 |---|---|
 | `person` | who signs in: a name as the site project has it |
-| `nonce` | the one the broker sent on this connection |
+| `nonce` | the one the broker sent on this connection: exactly 32 bytes, base64; anything else is refused |
 | `tls` | 32 bytes exported from this TLS connection (RFC 5705, label `EXPORTER-procession-connection-v1`, no context), base64. It ties the signature to this connection, so that it cannot be carried to another |
+
+A writer writes the members in the order shown. No reader depends on the
+order: it verifies the bytes as received. `tls` is exactly 32 bytes as well.
+The document is at most 1 KiB.
 
 Namespace `connection-v1@procession`; the key is the person's connection key, a
 plain key, not certified (`approvals.md` section 5 certifies the two approval
@@ -440,8 +448,14 @@ with `doc` the bytes of
 | `blocked` | an administrator blocked the person |
 | `blocked_keys` | fingerprints of this person's keys an administrator blocked, `SHA256:...` as `ssh-keygen -l` prints them |
 | `withdrawn` | identifiers of delegations an administrator withdrew and that have not ended. The broker forgets an ended one |
-| `certificates` | the person's current certificates for the approval keys, as the issuer (whoever holds the site CA's key) made them and the site's data gave them to the broker (optional, may be empty) |
-| `groups` | the names of the person's groups, from the part of the broker's data that is refreshed separately (optional, may be empty) |
+| `certificates` | the person's current certificates for the approval keys, as the issuer (whoever holds the site CA's key) made them and the site's data gave them to the broker (required, may be empty) |
+| `groups` | the names of the person's groups, from the part of the broker's data that is refreshed separately (required, may be empty) |
+
+Every member is required; a standing that lacks one is refused, as one with an
+unknown member is. The lists are sets: a writer writes each entry once, sorted;
+a reader does not depend on the order and refuses a list with a duplicate, which
+can only be a writer's fault. A standing is at most 64 KiB. The receiver
+verifies the signature first and reads the document only then.
 
 Namespace `broker-v1@procession`, signed with the broker's key. It is a new
 namespace on purpose: the broker's key also signs clearances, and a signature of
@@ -580,7 +594,12 @@ could not be written to its register (`crates/p-age/SPEC.md`). pledge writes
 that into its record with the withdrawal, and sends the withdrawal again at
 every sign-in, and at most once a minute on a standing connection, until the
 answer says `true`. A withdrawal changes nothing the second time, so repeating
-it is safe. The person is asked nothing: pledge itself refuses every request
+it is safe. A `withdraw` for a delegation the broker does not know, and one for
+a delegation that is another person's, get the same answer, `withdrawn` with
+`stored` `true`, alike byte for byte, and change nothing at the broker: silence
+could be told apart from an answer and would leave an honest pledge repeating.
+The broker logs the second case for the administrator, since an honest pledge
+never sends one. The person is asked nothing: pledge itself refuses every request
 under a withdrawn delegation, whatever the broker remembers.
 
 **Keeping the connection.** pledge sends `{"schema_version":1,"type":"ping"}`

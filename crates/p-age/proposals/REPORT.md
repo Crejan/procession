@@ -156,3 +156,15 @@ Not run, as before: TCP (`listen`, the per-address limit, `page serve`), real ti
   1. *A withdrawal from pledge that was not stored*: nothing. It is in force; pledge gets the `cancel` it always gets for a request waiting under it and no other message; the broker is degraded. The document has no message for "in force, not stored", so I added none.
   2. *A registration refused because the register cannot be written*: the document has no answer either (`not-registered` has no such reason, and its reasons are about the certificate). I used the nearest existing message, `error busy`, then the close; pledge can sign in again and register again later. **This is a choice I had to make and the designer should confirm it or give a reason code**; a new `not-registered` reason (say `unavailable`) would keep the connection open, which is kinder than a close.
 - The standing is not re-sent when a change cannot be stored: it reflects memory, which is what is in force.
+
+## `withdrawn` and `unavailable` (integration merged; Hello arms done in fc211c2)
+
+- **`withdrawn`** (`{"schema_version":1,"type":"withdrawn","delegation":"SHA256:…","stored":true|false}`) answers every `withdraw` from the pledge of the delegation's person, after the cancels of the requests it refused. `stored` is `false` when the write failed. A repeated withdrawal changes nothing, tries the write again, and answers the current truth (tested: `false`, `false`, then `true` after the disk came back). Where the document is silent: a delegation the broker does **not know** is answered `stored: true` (nothing to stop; without an answer pledge would repeat for ever), and a delegation that is **another person's** is not answered at all (it would say it exists). Confirm both.
+- **`not-registered` with `unavailable`** replaces `error busy`: the connection stays open, nothing is registered, nothing is said about why; registering works on the same connection once the register can be written (tested).
+- Both message types are in `wire.rs` with the others. 73 tests, clippy clean.
+
+## Withdrawals alike; unsupported-version on a first message (integration merged)
+
+- A `withdraw` for another person's delegation is answered exactly like one for an unknown delegation (`withdrawn`, `stored: true`; the same bytes but for the identifier asked about), changes nothing, attempts no write, and is logged for the administrator as `foreign-withdrawal` with the person and the delegation (`LogEntry` gained `delegation`; `request` is now optional). Test: eva withdraws jan's delegation and then an unknown one, with the state directory locked (a write would make the broker degraded) and the register file's bytes and modification time compared afterwards; the answers match; jan's delegation still works; the log has the foreign one only.
+- A well-formed first `hello` or `submit` with another `schema_version` is `error unsupported-version` and the close (the first-message tests changed from `malformed-line`).
+- `wire.rs` stays until p-act's is merged.

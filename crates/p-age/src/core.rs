@@ -303,7 +303,21 @@ impl Core {
             host: h.host.clone(),
             service: h.service.clone(),
             person: h.person.clone(),
-            request: h.hash,
+            request: Some(h.hash),
+            delegation: None,
+            result: result.to_owned(),
+        });
+    }
+
+    /// An entry about a delegation, for the administrator: what a pledge did that an honest one does not.
+    fn log_delegation(&mut self, now: SystemTime, person: &str, delegation: &Fingerprint, result: &str) {
+        self.log.write(&LogEntry {
+            at: stamp(now),
+            host: "-".to_owned(),
+            service: "-".to_owned(),
+            person: Some(person.to_owned()),
+            request: None,
+            delegation: Some(delegation.to_string()),
             result: result.to_owned(),
         });
     }
@@ -597,28 +611,37 @@ impl Core {
         if self.register.person_of(fp.as_str()).is_none() {
             let change = |r: &mut Register| r.register(fp.as_str(), person, at(until));
             if self.permit(now, change).is_err() {
-                // Registering permits: refused while the register cannot be written. The document has no
-                // answer for this (`not-registered` has no such reason); `error busy` is the nearest there is.
-                return vec![
-                    Effect::Pledge(conn, PledgeOut::Error(ErrorCode::Busy)),
-                    Effect::Pledge(conn, PledgeOut::Close),
-                ];
+                // Registering permits: refused while the register cannot be written. `unavailable` says nothing
+                // about why, and the connection stays open.
+                return no(NotRegistered::Unavailable);
             }
         }
         reply(PledgeOut::Registered(fp))
     }
 
-    /// The person withdraws one of their own delegations. Requests waiting under it are refused.
-    pub fn withdraw(&mut self, person: &str, delegation: &Fingerprint, now: SystemTime) -> Vec<Effect> {
-        if self.register.person_of(delegation.as_str()) != Some(person) {
-            return Vec::new();
+    /// The person withdraws one of their own delegations. Requests waiting under it are refused. The answer says
+    /// whether the withdrawal is stored; a repeated one changes nothing and is answered with the current truth
+    /// (the write is tried again). A delegation the broker does not know has nothing to stop: answered `stored`.
+    /// Another person's is answered **exactly alike**, so that the answer cannot tell the two apart, and nothing
+    /// changes (no write is attempted); it is logged for the administrator, since an honest pledge never sends one.
+    pub fn withdraw(&mut self, person: &str, conn: ConnId, delegation: &Fingerprint, now: SystemTime) -> Vec<Effect> {
+        let answer = |stored| Effect::Pledge(conn, PledgeOut::Withdrawn(delegation.clone(), stored));
+        match self.register.person_of(delegation.as_str()) {
+            None => return vec![answer(true)],
+            Some(owner) if owner != person => {
+                self.log_delegation(now, person, delegation, "foreign-withdrawal");
+                return vec![answer(true)];
+            }
+            Some(_) => {}
         }
         self.register.withdraw(delegation.as_str());
-        // In force whether or not it is stored; pledge is told nothing either way (see the report).
-        let _ = self.store_restriction(now);
+        // In force whether or not it is stored.
+        let stored = self.store_restriction(now) == Stored::Yes;
         let hashes: Vec<_> =
             self.held.iter().filter(|(_, h)| h.answer.is_none() && &h.agent == delegation).map(|(k, _)| *k).collect();
-        self.refuse_held(hashes, BrokerReason::Delegation, now)
+        let mut fx = self.refuse_held(hashes, BrokerReason::Delegation, now);
+        fx.push(answer(stored));
+        fx
     }
 
     fn refuse_held(&mut self, hashes: Vec<DocumentHash>, reason: BrokerReason, now: SystemTime) -> Vec<Effect> {
@@ -923,7 +946,7 @@ mod tests {
         let v = vetted("jan", AGENT_A, 1, 120);
         assert_eq!(refusal_of(&f.core.submit(SVC, v, now(9 * 3600))), Some(BrokerReason::Delegation));
         let fp: Fingerprint = AGENT_B.parse().unwrap();
-        f.core.withdraw("jan", &fp, now(0));
+        f.core.withdraw("jan", PLEDGE, &fp, now(0));
         let v = vetted("jan", AGENT_B, 2, 120);
         assert_eq!(refusal_of(&f.core.submit(SVC, v, now(0))), Some(BrokerReason::Delegation));
     }
@@ -1177,8 +1200,8 @@ mod tests {
     fn the_standing_names_withdrawn_delegations_and_carries_groups_but_no_keys_of_others() {
         let mut f = fixture(5);
         let fp: Fingerprint = AGENT_B.parse().unwrap();
-        f.core.withdraw("jan", &fp, now(0));
-        f.core.withdraw("eva", &AGENT_A.parse().unwrap(), now(0)); // not eva's: nothing happens
+        f.core.withdraw("jan", PLEDGE, &fp, now(0));
+        f.core.withdraw("eva", PLEDGE, &AGENT_A.parse().unwrap(), now(0)); // not eva's: nothing happens
         let fx = sign_in(&mut f.core, "jan", PLEDGE);
         let standing = notice_json(&to_pledge(&fx, PLEDGE));
         assert_eq!(standing["withdrawn"], serde_json::json!([AGENT_B]));
@@ -1191,7 +1214,7 @@ mod tests {
         let mut f = fixture(5);
         f.core.submit(SVC, vetted("jan", AGENT_A, 1, 120), now(0));
         f.core.submit(ConnId(3), vetted("jan", AGENT_B, 2, 120), now(0));
-        let fx = f.core.withdraw("jan", &AGENT_A.parse().unwrap(), now(1));
+        let fx = f.core.withdraw("jan", PLEDGE, &AGENT_A.parse().unwrap(), now(1));
         assert_eq!(refusal_of(&fx), Some(BrokerReason::Delegation));
         assert!(to_service(&fx, ConnId(3)).is_empty());
     }
@@ -1267,7 +1290,7 @@ mod tests {
         if !disk.lock() {
             return;
         }
-        let fx = f.core.withdraw("jan", &AGENT_A.parse().unwrap(), now(1));
+        let fx = f.core.withdraw("jan", PLEDGE, &AGENT_A.parse().unwrap(), now(1));
         assert_eq!(refusal_of(&fx), Some(BrokerReason::Delegation));
         assert_eq!(
             refusal_of(&f.core.submit(SVC, vetted("jan", AGENT_A, 2, 120), now(2))),
@@ -1352,7 +1375,7 @@ mod tests {
         let mut f = fixture(5);
         f.core.state_path = Some(path.clone());
         f.core.block_person("eva", now(0));
-        f.core.withdraw("jan", &AGENT_A.parse().unwrap(), now(0));
+        f.core.withdraw("jan", PLEDGE, &AGENT_A.parse().unwrap(), now(0));
         let register = Core::read_state(&path).unwrap();
         assert!(register.is_blocked("eva"));
         assert_eq!(register.person_for(AGENT_A, now(1)), Err(Stopped::Withdrawn));

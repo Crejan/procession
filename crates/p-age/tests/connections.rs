@@ -141,7 +141,12 @@ async fn the_first_message_says_which_exchange_this_is() {
     assert_eq!(c.recv().await["error"], "malformed-line");
     let mut c = open_service(&w);
     c.send_json(serde_json::json!({"schema_version":2,"type":"hello"})).await;
-    assert_eq!(c.recv().await["error"], "malformed-line", "nothing more is said than that this is no beginning");
+    assert_eq!(c.recv().await["error"], "unsupported-version", "a well-formed hello of a version not spoken");
+    c.expect_closed().await;
+    let mut c = open_service(&w);
+    c.send_json(serde_json::json!({"schema_version":2,"type":"submit","request":"","request_sig":""})).await;
+    assert_eq!(c.recv().await["error"], "unsupported-version");
+    c.expect_closed().await;
     // a line that is not JSON
     let mut c = open_service(&w);
     c.send(b"hello\n").await;
@@ -573,6 +578,15 @@ async fn a_withdrawal_stops_the_delegation_and_refuses_what_waits_under_it() {
     pledge.send_json(serde_json::json!({"schema_version":1,"type":"withdraw","delegation":fp.to_string()})).await;
     assert_eq!(refusal(&service_answer(&mut service).await), BrokerReason::Delegation);
     assert_eq!(pledge.recv_type().await, "cancel", "the pledge is told to drop it too");
+    let answer = pledge.recv().await;
+    assert_eq!((answer["type"].as_str(), answer["stored"].as_bool()), (Some("withdrawn"), Some(true)));
+    // a withdrawal again changes nothing and is answered again; one the broker does not know has nothing to stop
+    pledge.send_json(serde_json::json!({"schema_version":1,"type":"withdraw","delegation":fp.to_string()})).await;
+    assert_eq!(pledge.recv().await["stored"], true);
+    pledge
+        .send_json(serde_json::json!({"schema_version":1,"type":"withdraw","delegation":"SHA256:ZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZ"}))
+        .await;
+    assert_eq!(pledge.recv().await["type"], "withdrawn");
     // a new request under it is refused
     let mut s = open_service(&w);
     s.send(&submit_line(&w.submit(2, 120))).await;
@@ -725,24 +739,25 @@ async fn registering_is_refused_while_the_register_cannot_be_written_and_works_a
         return;
     }
     pledge.send_json(serde_json::json!({"schema_version":1,"type":"delegation","cert":cert})).await;
-    // the document has no answer for this; `error busy` and the end is the nearest existing one
-    assert_eq!(pledge.recv().await["error"], "busy");
-    pledge.expect_closed().await;
+    // `not-registered` with the reason `unavailable`, which says nothing about why; the connection stays open
+    let reply = pledge.recv().await;
+    assert_eq!((reply["type"].as_str(), reply["reason"].as_str()), (Some("not-registered"), Some("unavailable")));
+    assert!(reply["delegation"].as_str().unwrap().starts_with("SHA256:"));
+    pledge.send_json(serde_json::json!({"schema_version":1,"type":"ping"})).await;
+    assert!(tokio::time::timeout(Duration::from_millis(300), pledge.lines.read(None)).await.is_err());
     assert!(w.broker.degraded().is_some());
     // nothing was permitted: a request under that delegation is refused
     let mut s = open_service(&w);
     s.send(&submit_line(&w.submit(1, 120))).await;
     assert_eq!(refusal(&service_answer(&mut s).await), BrokerReason::Delegation);
-    // the disk comes back: registering works and the broker is no longer degraded
+    // the disk comes back: registering works on the same connection and the broker is no longer degraded
     unlock_state_dir(&w);
-    let mut again = open_pledge(&w).await;
-    again.connect_as("jan", &w.jan_connection).await;
-    register(&w, &mut again).await;
+    register(&w, &mut pledge).await;
     assert_eq!(w.broker.degraded(), None);
 }
 
 #[tokio::test]
-async fn restricting_goes_on_while_the_register_cannot_be_written_and_pledge_is_told_nothing_extra() {
+async fn restricting_goes_on_while_the_register_cannot_be_written_and_the_withdrawal_answer_says_not_stored() {
     let w = World::new();
     let mut pledge = open_pledge(&w).await;
     pledge.connect_as("jan", &w.jan_connection).await;
@@ -755,10 +770,19 @@ async fn restricting_goes_on_while_the_register_cannot_be_written_and_pledge_is_
     if !lock_state_dir(&w) {
         return;
     }
-    // a withdrawal from pledge: in force, and the only thing pledge is sent is the cancel it always gets
-    pledge.send_json(serde_json::json!({"schema_version":1,"type":"withdraw","delegation":fp.to_string()})).await;
+    // a withdrawal from pledge: in force, and the answer says it is not stored
+    let withdraw = serde_json::json!({"schema_version":1,"type":"withdraw","delegation":fp.to_string()});
+    pledge.send_json(withdraw.clone()).await;
     assert_eq!(refusal(&service_answer(&mut service).await), BrokerReason::Delegation);
     assert_eq!(pledge.recv_type().await, "cancel");
+    let answer = pledge.recv().await;
+    assert_eq!(
+        (answer["type"].as_str(), answer["delegation"].as_str(), answer["stored"].as_bool()),
+        (Some("withdrawn"), Some(fp.to_string().as_str()), Some(false))
+    );
+    // repeated: changes nothing, answered again with the current truth
+    pledge.send_json(withdraw.clone()).await;
+    assert_eq!(pledge.recv().await["stored"], false);
     pledge.send_json(serde_json::json!({"schema_version":1,"type":"ping"})).await;
     assert!(tokio::time::timeout(Duration::from_millis(300), pledge.lines.read(None)).await.is_err(), "nothing else");
     assert!(w.broker.degraded().is_some());
@@ -773,6 +797,14 @@ async fn restricting_goes_on_while_the_register_cannot_be_written_and_pledge_is_
     unlock_state_dir(&w);
     assert!(w.broker.unblock_person("jan".into()).await.is_ok());
     assert_eq!(w.broker.degraded(), None);
+    // the same withdrawal once more: now it is stored, and that is the answer
+    pledge.send_json(withdraw).await;
+    // (the standings the block and the lift sent come first)
+    let mut answer = pledge.recv().await;
+    while answer["type"] == "notice" {
+        answer = pledge.recv().await;
+    }
+    assert_eq!((answer["type"].as_str(), answer["stored"].as_bool()), (Some("withdrawn"), Some(true)));
 }
 
 #[tokio::test]
@@ -789,4 +821,46 @@ async fn a_hello_after_the_first_message_is_an_unexpected_message() {
     assert_eq!(pledge.recv_type().await, "submit");
     assert_eq!(pledge.recv().await["error"], "unknown-type");
     pledge.expect_closed().await;
+}
+
+#[tokio::test]
+async fn a_withdrawal_of_an_unknown_delegation_and_of_another_persons_cannot_be_told_apart() {
+    let w = World::new();
+    let mut jan = open_pledge(&w).await;
+    jan.connect_as("jan", &w.jan_connection).await;
+    register(&w, &mut jan).await;
+    let mut eva = open_pledge(&w).await;
+    eva.connect_as("eva", &w.eva_connection).await;
+    let jans = p_act::sign::agent_certificate(&w.keys.cert_line(&w.agent)).unwrap().delegation.to_string();
+    let unknown = "SHA256:ZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZ".to_owned();
+    let before = std::fs::read(&w.state).unwrap();
+    let mtime = std::fs::metadata(&w.state).unwrap().modified().unwrap();
+    let locked = lock_state_dir(&w); // a write attempt would now fail and make the broker degraded
+
+    let ask = |fp: &str| serde_json::json!({"schema_version":1,"type":"withdraw","delegation":fp});
+    eva.send(&[serde_json::to_vec(&ask(&jans)).unwrap(), b"\n".to_vec()].concat()).await;
+    let foreign = eva.recv_raw().await.unwrap();
+    eva.send(&[serde_json::to_vec(&ask(&unknown)).unwrap(), b"\n".to_vec()].concat()).await;
+    let none = eva.recv_raw().await.unwrap();
+    // the same bytes but for the identifier asked about
+    let shape = |line: &[u8], fp: &str| String::from_utf8(line.to_vec()).unwrap().replace(fp, "<fp>");
+    assert_eq!(shape(&foreign, &jans), shape(&none, &unknown));
+    assert_eq!(
+        shape(&none, &unknown),
+        "{\"delegation\":\"<fp>\",\"schema_version\":1,\"stored\":true,\"type\":\"withdrawn\"}"
+    );
+    // neither wrote anything: the register is as it was, and (if a write could have failed) not degraded
+    if locked {
+        assert_eq!(w.broker.degraded(), None);
+    }
+    unlock_state_dir(&w);
+    assert_eq!(std::fs::read(&w.state).unwrap(), before);
+    assert_eq!(std::fs::metadata(&w.state).unwrap().modified().unwrap(), mtime);
+    // jan's delegation is untouched: a request under it is still held for jan's pledge
+    let mut s = open_service(&w);
+    s.send(&submit_line(&w.submit(1, 120))).await;
+    assert_eq!(jan.recv_type().await, "submit");
+    // and the administrator can see the foreign one, and only that one
+    let log: Vec<_> = w.log.entries().into_iter().map(|e| (e.result, e.person, e.delegation)).collect();
+    assert_eq!(log, [("foreign-withdrawal".to_owned(), Some("eva".to_owned()), Some(jans))]);
 }
