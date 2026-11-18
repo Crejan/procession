@@ -141,7 +141,7 @@ async fn the_first_message_says_which_exchange_this_is() {
     assert_eq!(c.recv().await["error"], "malformed-line");
     let mut c = open_service(&w);
     c.send_json(serde_json::json!({"schema_version":2,"type":"hello"})).await;
-    assert_eq!(c.recv().await["error"], "unsupported-version");
+    assert_eq!(c.recv().await["error"], "malformed-line", "nothing more is said than that this is no beginning");
     // a line that is not JSON
     let mut c = open_service(&w);
     c.send(b"hello\n").await;
@@ -164,7 +164,18 @@ async fn a_connection_that_says_nothing_is_closed() {
     };
     let w = World::with(Settings::default(), quick);
     let mut c = open_raw_on(&w.broker, BINDING, quick);
-    assert_eq!(c.recv().await["error"], "timeout");
+    // the broker never speaks first: nothing is sent, the connection is closed
+    c.expect_closed().await;
+    // a connection that sends a first line too long is told `malformed-line` and nothing more
+    let mut c = open_raw_on(&w.broker, BINDING, Timeouts::default());
+    let mut long = vec![b'a'; p_act::limits::MAX_EXCHANGE_LINE_BYTES + 10];
+    long.push(b'\n');
+    c.send(&long).await;
+    assert_eq!(c.recv().await["error"], "malformed-line");
+    c.expect_closed().await;
+    // a first line that is begun and not finished is closed without a word
+    let mut c = open_raw_on(&w.broker, BINDING, quick);
+    c.send(b"{\"schema_version\":1,").await;
     c.expect_closed().await;
 }
 
@@ -198,7 +209,7 @@ async fn a_sign_in_that_does_not_verify_is_one_error_whatever_is_wrong() {
     let mut c = open_pledge(&w).await;
     let nonce = c.recv().await["nonce"].as_str().unwrap().to_owned();
     let doc = p_age::wire::ConnectionDoc::compose("jan", &nonce, &STANDARD.encode(BINDING));
-    let sig = p_age::keygen::sign(&w.jan_connection, Namespace::Request, &doc).unwrap();
+    let sig = raw_sign(&w.jan_connection, Namespace::Request, &doc);
     c.send_json(serde_json::json!({"schema_version":1,"type":"signin","doc":STANDARD.encode(&doc),"doc_sig":p_act::sign::signature_to_base64(&sig)})).await;
     assert_eq!(c.recv().await["error"], "signin");
     // something that is not a sign-in at all
@@ -577,7 +588,9 @@ async fn a_withdrawal_stops_the_delegation_and_refuses_what_waits_under_it() {
 #[tokio::test]
 async fn a_line_that_is_too_long_ends_the_connection() {
     let w = World::new();
-    let mut s = open_service(&w);
+    // after the first message: a pledge that has signed in sends a line that is too long
+    let mut s = open_pledge(&w).await;
+    s.connect_as("jan", &w.jan_connection).await;
     let mut long = vec![b'a'; p_act::limits::MAX_EXCHANGE_LINE_BYTES + 10];
     long.push(b'\n');
     s.send(&long).await;
@@ -594,13 +607,8 @@ async fn a_line_that_is_not_finished_in_time_and_a_silent_pledge_are_told_so() {
         pledge_silence: Duration::from_millis(500),
     };
     let w = World::with(Settings::default(), quick);
-    // a service that sends nothing
-    let mut s = open_service_on(&w.broker, quick);
-    assert_eq!(s.recv().await["error"], "timeout");
-    // a service that begins a line and does not finish it
-    let mut s = open_service_on(&w.broker, quick);
-    s.send(b"{\"schema_version\":1,").await;
-    assert_eq!(s.recv().await["error"], "timeout");
+    // a connection that sends nothing, or begins a first line and does not finish it, is closed without a word
+    // (a_connection_that_says_nothing_is_closed)
     // a pledge that does not answer the challenge
     let mut p = open_pledge_on(&w.broker, BINDING, quick).await;
     assert_eq!(p.recv_type().await, "challenge");
@@ -664,7 +672,7 @@ async fn an_unauthenticated_peer_learns_nothing_about_the_site_beyond_a_coarse_c
                 p_act::rating::Disruption::None,
             );
             let request = p_act::Request::compose(&call, &call_sig, rating).unwrap();
-            let sig = p_age::keygen::sign(service, Namespace::Request, request.as_bytes()).unwrap();
+            let sig = raw_sign(service, Namespace::Request, request.as_bytes());
             p_act::exchange::Submit::new(request, &sig).unwrap()
         } else {
             w.submit_with(n, 120, agent, service)

@@ -5,11 +5,9 @@
 
 use std::path::PathBuf;
 
-use p_act::sign::{self, Agent, Namespace, PublicKey, SignError, Signer};
+use p_act::sign::{self, Agent, PublicKey, SignError, Signer};
 use p_act::{Call, Clearance, Request};
 use thiserror::Error;
-
-use crate::keygen::{self, KeygenError};
 
 /// Why a signature operation failed. The broker never looks inside: a check that
 /// fails is a refusal with a code.
@@ -17,10 +15,6 @@ use crate::keygen::{self, KeygenError};
 pub enum CryptoError {
     #[error(transparent)]
     Sign(#[from] SignError),
-    #[error(transparent)]
-    Keygen(#[from] KeygenError),
-    #[error("the certificate was issued by {found}, not by the person's delegation key")]
-    WrongIssuer { found: String },
 }
 
 /// Signing and verifying for the broker. All methods block (they run `ssh-keygen`).
@@ -51,12 +45,6 @@ impl SshCrypto {
     pub fn new(broker_key: impl Into<PathBuf>) -> SshCrypto {
         SshCrypto { broker_key: broker_key.into() }
     }
-
-    fn certificate_file(&self) -> PathBuf {
-        let mut name = self.broker_key.clone().into_os_string();
-        name.push("-cert.pub");
-        PathBuf::from(name)
-    }
 }
 
 impl Crypto for SshCrypto {
@@ -69,17 +57,11 @@ impl Crypto for SshCrypto {
     }
 
     fn verify_connection(&self, doc: &[u8], sig: &str, person: &str, key: &PublicKey) -> Result<(), CryptoError> {
-        Ok(keygen::verify_plain(Namespace::Connection, person, key, sig, doc)?)
+        Ok(sign::verify_connection(person, key, sig, doc)?)
     }
 
     fn check_agent_certificate(&self, line: &str, delegation_key: &PublicKey) -> Result<Agent, CryptoError> {
-        let agent = sign::agent_certificate(line)?;
-        let issuer = keygen::certificate_issuer(line)?;
-        if issuer == delegation_key.fingerprint() {
-            Ok(agent)
-        } else {
-            Err(CryptoError::WrongIssuer { found: issuer.to_string() })
-        }
+        Ok(sign::verify_agent_certificate(line, delegation_key)?)
     }
 
     fn sign_clearance(&self, clearance: &Clearance) -> Result<String, CryptoError> {
@@ -88,6 +70,6 @@ impl Crypto for SshCrypto {
     }
 
     fn sign_standing(&self, bytes: &[u8]) -> Result<String, CryptoError> {
-        Ok(keygen::sign(&self.certificate_file(), Namespace::Broker, bytes)?)
+        Ok(sign::sign_broker(&Signer::certified(&self.broker_key)?, bytes)?)
     }
 }

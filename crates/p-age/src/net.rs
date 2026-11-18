@@ -14,7 +14,7 @@ use std::time::{Duration, Instant, SystemTime};
 
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD;
-use p_act::exchange::{ErrorCode, MAX_LINE, Message};
+use p_act::exchange::{ErrorCode, LineBuffer, Message};
 use ring::rand::{SecureRandom, SystemRandom};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::net::TcpListener;
@@ -78,32 +78,31 @@ pub enum ReadError {
     Io,
 }
 
-/// A bounded line reader: at most [`MAX_LINE`] bytes in a line, and a begun line is finished within
-/// the line timeout. Cancel-safe: a dropped `read` loses nothing.
+/// An async line reader on `p_act`'s framing ([`LineBuffer`]): at most `MAX_LINE` bytes in a line, and a begun
+/// line is finished within the line timeout. Cancel-safe: a dropped `read` loses nothing.
 #[derive(Debug)]
 pub struct Lines<R> {
     inner: R,
-    buf: Vec<u8>,
+    buf: LineBuffer,
     started: Option<Instant>,
     line_timeout: Duration,
 }
 
 impl<R: AsyncRead + Unpin> Lines<R> {
     pub fn new(inner: R, line_timeout: Duration) -> Lines<R> {
-        Lines { inner, buf: Vec::new(), started: None, line_timeout }
+        Lines { inner, buf: LineBuffer::new(), started: None, line_timeout }
     }
 
     /// The next line without its `\n`; `None` at the end between lines. `wait` bounds the wait for a line to begin.
     pub async fn read(&mut self, wait: Option<Duration>) -> Result<Option<Vec<u8>>, ReadError> {
         loop {
-            if let Some(pos) = self.buf.iter().position(|&b| b == b'\n') {
-                let mut line: Vec<u8> = self.buf.drain(..=pos).collect();
-                line.pop();
-                self.started = (!self.buf.is_empty()).then(Instant::now);
-                return if line.len() > MAX_LINE { Err(ReadError::TooLong) } else { Ok(Some(line)) };
-            }
-            if self.buf.len() > MAX_LINE {
-                return Err(ReadError::TooLong);
+            match self.buf.next_line() {
+                Ok(Some(line)) => {
+                    self.started = (self.buf.pending() > 0).then(Instant::now);
+                    return Ok(Some(line));
+                }
+                Ok(None) => {}
+                Err(_) => return Err(ReadError::TooLong),
             }
             let limit = match self.started {
                 Some(t0) => Some(self.line_timeout.saturating_sub(t0.elapsed())),
@@ -118,12 +117,12 @@ impl<R: AsyncRead + Unpin> Lines<R> {
                 None => self.inner.read(&mut chunk).await.map_err(|_| ReadError::Io)?,
             };
             if n == 0 {
-                return if self.buf.is_empty() { Ok(None) } else { Err(ReadError::Truncated) };
+                return if self.buf.pending() == 0 { Ok(None) } else { Err(ReadError::Truncated) };
             }
-            if self.buf.is_empty() {
+            if self.buf.pending() == 0 {
                 self.started = Some(Instant::now());
             }
-            self.buf.extend_from_slice(&chunk[..n]);
+            self.buf.push(&chunk[..n]);
         }
     }
 }
@@ -373,13 +372,14 @@ where
 {
     let (rd, mut wr) = tokio::io::split(stream);
     let mut lines = Lines::new(rd, broker.timeouts.line);
+    // The broker never speaks first: silence is closed without a word, and a first line that is not a `hello` or
+    // a `submit` (too long included) is `malformed-line` and nothing more.
     let first = match lines.read(Some(broker.timeouts.first_line)).await {
         Ok(Some(line)) => line,
-        Ok(None) => return,
-        Err(e) => {
-            if let Some(code) = read_error_code(&e) {
-                send_pledge_error(&mut wr, code).await;
-            }
+        Ok(None) | Err(ReadError::Timeout | ReadError::Truncated | ReadError::Io) => return,
+        Err(ReadError::TooLong) => {
+            send_pledge_error(&mut wr, ErrorCode::MalformedLine).await;
+            let _ = wr.shutdown().await;
             return;
         }
     };
