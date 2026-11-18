@@ -538,6 +538,29 @@ fn history_verb(mut args: Vec<String>) -> Done {
 
 #[cfg(test)]
 mod tests {
+    /// Run by the next test in a child process whose umask is 0177 (it would leave 0400 without the chmod).
+    #[test]
+    fn child_of_the_forced_umask_test() {
+        let Some(path) = std::env::var_os("PLEDGE_DELIVER_CHILD") else { return };
+        // SAFETY: umask has no preconditions; this child process only runs this test.
+        unsafe { libc::umask(0o177) };
+        deliver(&json!({"bundle": "AAEC"}), path.to_str()).expect("written");
+    }
+
+    #[test]
+    fn a_bundle_is_0600_even_where_the_umask_would_leave_0400() {
+        use std::os::unix::fs::MetadataExt as _;
+        let dir = crate::testing::TestDir::new("deliver-umask");
+        let path = dir.path().join("bundle");
+        let status = std::process::Command::new(std::env::current_exe().expect("exe"))
+            .args(["--exact", "cli::tests::child_of_the_forced_umask_test", "--test-threads=1"])
+            .env("PLEDGE_DELIVER_CHILD", &path)
+            .status()
+            .expect("child");
+        assert!(status.success());
+        assert_eq!(std::fs::metadata(&path).expect("written").mode() & 0o7777, 0o600);
+    }
+
     #[test]
     fn a_bundle_file_is_exactly_0600_owned_by_the_person_and_never_replaces_a_file() {
         use std::os::unix::fs::MetadataExt as _;

@@ -14,7 +14,7 @@
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD;
 use p_act::Timestamp;
-use p_act::sign::{ApprovalKind, PublicKey, SignError, verify_approval_certificate};
+use p_act::sign::{ApprovalKind, PublicKey, SignError, verify_approval_certificate, verify_approval_certificate_for};
 
 use crate::shared::Shared;
 
@@ -58,9 +58,11 @@ pub fn check(shared: &Shared, line: &str, person: &str, site_ca: &PublicKey, now
     });
     let Some(role) = ours else { return Err("the certificate is not for one of this pledge's approval keys".into()) };
     let kind = if role == "confirmed" { ApprovalKind::Confirmed } else { ApprovalKind::Automatic };
-    if cert.person != person || cert.kind != kind {
-        return Err("the certificate does not name this person and role".into());
-    }
+    // Person and role are known now: the one judgement of the name is p-act's.
+    verify_approval_certificate_for(line, site_ca, person, kind, now).map_err(|e| match e {
+        SignError::NotTheExpectedName => "the certificate does not name this person and role",
+        other => why(&other),
+    })?;
     Ok(Good {
         role: if role == "confirmed" { "confirmed" } else { "automatic" },
         blob,
