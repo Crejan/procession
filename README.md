@@ -48,6 +48,20 @@ not published (`publish = false`).
   refused, a key given twice refused, a size limit, and error texts that
   carry no value from the file. Secrets are never in a settings file: a path
   to a file of mode 0600, or the key store.
+- Strings from outside. No program writes a string that came from outside
+  (a file another writer could have touched counts as outside) into JSON or
+  text without the rule of `p-ermit` (`p_ermit::text`): by validation where
+  it enters, or by the escape form where it is put out. A JSON writer's own
+  escaping is not that rule: it covers U+0000 to U+001F and lets other
+  control characters and bidirectional marks through. Each program has one
+  test that feeds a C1 control character and a bidirectional mark through
+  every output it has. A state file of a program's own that fails
+  validation when read back is refused whole.
+- Errors. An error names the file, the member and what was wrong with it,
+  and never repeats the offending value, except through the escape form
+  with a length bound where an operator needs to see it. The stderr of a
+  program that was run is never forwarded to anyone but a log, escaped and
+  bounded.
 - A `health` or `status` verb meant for a monitor documents its exit codes
   in a table in the program's SPEC and never uses one code for two meanings.
 - Machine output: `--format json` with `schema_version`, one record type per

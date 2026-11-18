@@ -271,7 +271,7 @@ the call's identifier.
 
 | Trusted | For | Not for |
 |---|---|---|
-| a service | doing what its request says and nothing else; rating honestly. A service can do what it can do, with or without a request, so nothing here can restrain it | |
+| a service | doing what its request says and nothing else; rating honestly. A service can do what it can do, with or without a request, so nothing here can restrain it. Where the action runs (p-robe's dispatcher) the rating, `host_text`, the deadline and the call's identifier are checked against what was approved, and concrete paths are rated again; that the action and its parameters equal the approved ones is not checked there, because the dispatcher neither holds nor verifies the request. The service's account can therefore run any action within what the dispatcher admits, and taking over that account is taking over the service. Closing that would mean handing the dispatcher the request and the approval to verify itself: a design of its own, not now | |
 | the site project, the directory on a site that has one, and their administrators | saying who is who, who is in which group and who may what; entering people's keys | |
 | the broker | keeping what a person may not have carried out away from them (R10); honouring withdrawals and blocks; limits; being there | releasing an action (R1); saying who a person is; saying a request is a person's own agent's (R8, which pledge checks itself) |
 | the sandbox | giving an agent no way out except services (R2) | keeping the agent's key secret |
