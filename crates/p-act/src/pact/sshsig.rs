@@ -11,15 +11,8 @@
 use crate::call::Call;
 use crate::hash::Document;
 use crate::sign::{Namespace, put_string};
-use base64::Engine as _;
-use base64::engine::general_purpose::STANDARD;
-use ring::digest::{SHA512, digest};
+use crate::sshsig::{RawSignature, armour_in, signing_input_in, ssh_signature_blob};
 use ring::signature::{Ed25519KeyPair, KeyPair};
-
-const BEGIN: &str = "-----BEGIN SSH SIGNATURE-----\n";
-const END: &str = "-----END SSH SIGNATURE-----\n";
-/// `ssh-keygen` wraps the armour at this many columns.
-const COLUMNS: usize = 70;
 
 /// An Ed25519 key, and its certificate if it has one, that signs calls.
 pub struct CallSigner {
@@ -58,26 +51,13 @@ impl CallSigner {
     }
 
     fn write(&self, namespace: &str, message: &[u8]) -> String {
-        const HASH_ALGORITHM: &[u8] = b"sha512";
-        // What is signed: magic, namespace, reserved (empty), hash algorithm, hash of the message.
-        let mut signed = b"SSHSIG".to_vec();
-        put_string(&mut signed, namespace.as_bytes());
-        put_string(&mut signed, b"");
-        put_string(&mut signed, HASH_ALGORITHM);
-        put_string(&mut signed, digest(&SHA512, message).as_ref());
-        let signature = self.pair.sign(&signed);
-        let mut signature_blob = Vec::new();
-        put_string(&mut signature_blob, b"ssh-ed25519");
-        put_string(&mut signature_blob, signature.as_ref());
-        // The blob: magic, version, public key, namespace, reserved, hash algorithm, signature.
-        let mut blob = b"SSHSIG".to_vec();
-        blob.extend_from_slice(&1u32.to_be_bytes());
-        put_string(&mut blob, &self.public_key_blob);
-        put_string(&mut blob, namespace.as_bytes());
-        put_string(&mut blob, b"");
-        put_string(&mut blob, HASH_ALGORITHM);
-        put_string(&mut blob, &signature_blob);
-        armour(&blob)
+        // The form is written once, in `crate::sshsig`; this only signs the bytes it asks for.
+        let signature = self.pair.sign(&signing_input_in(namespace, message));
+        let mut raw = [0u8; 64];
+        raw.copy_from_slice(signature.as_ref());
+        // An Ed25519 signature blob is well formed by construction.
+        let signature_blob = ssh_signature_blob(&RawSignature::Ed25519(raw)).unwrap_or_default();
+        armour_in(namespace, &self.public_key_blob, &signature_blob)
     }
 
     /// For the tests of the writer's specification only: any namespace.
@@ -85,17 +65,6 @@ impl CallSigner {
     pub(crate) fn write_in(&self, namespace: &str, message: &[u8]) -> String {
         self.write(namespace, message)
     }
-}
-
-fn armour(blob: &[u8]) -> String {
-    let b64 = STANDARD.encode(blob);
-    let mut out = String::from(BEGIN);
-    for chunk in b64.as_bytes().chunks(COLUMNS) {
-        out.push_str(std::str::from_utf8(chunk).unwrap_or_default());
-        out.push('\n');
-    }
-    out.push_str(END);
-    out
 }
 
 #[cfg(test)]
@@ -255,7 +224,7 @@ mod tests {
         let lines: Vec<&str> = sig.lines().collect();
         assert_eq!(lines.first(), Some(&"-----BEGIN SSH SIGNATURE-----"));
         assert_eq!(lines.last(), Some(&"-----END SSH SIGNATURE-----"));
-        assert!(lines[1..lines.len() - 2].iter().all(|l| l.len() == COLUMNS));
+        assert!(lines[1..lines.len() - 2].iter().all(|l| l.len() == 70));
         assert!(sig.ends_with('\n'));
     }
 }
