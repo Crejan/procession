@@ -467,7 +467,7 @@ where
                     }
                     Ok(PledgeIn::Withdraw { delegation }) => {
                         let p = person.clone();
-                        broker.with_core(move |c, now| ((), c.withdraw(&p, &delegation, now))).await;
+                        broker.with_core(move |c, now| ((), c.withdraw(&p, conn, &delegation, now))).await;
                     }
                     Ok(PledgeIn::Exchange(message)) => match *message {
                         Message::Answer(answer) => {
