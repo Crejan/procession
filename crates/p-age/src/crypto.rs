@@ -6,6 +6,8 @@
 use std::path::PathBuf;
 
 use p_act::broker::{ConnectionDocument, Standing};
+
+use crate::certs::{BrokerCertificate, BrokerCertificateFailure};
 use p_act::sign::{self, Agent, PublicKey, SignError, Signer};
 use p_act::{Call, Clearance, Request};
 use thiserror::Error;
@@ -35,6 +37,13 @@ pub trait Crypto: Send + Sync {
         line: &str,
         site_ca: &PublicKey,
     ) -> Result<sign::ApprovalCertificate, CryptoError>;
+    /// The broker's own certificate, as it is presented in every signature: it must be for the name `broker`, issued by
+    /// the site CA, valid at `now`, with no critical option and no extension, and certify the key the broker holds.
+    fn check_broker_certificate(
+        &self,
+        site_ca: &PublicKey,
+        now: std::time::SystemTime,
+    ) -> Result<BrokerCertificate, BrokerCertificateFailure>;
     /// The broker's signature over a clearance.
     fn sign_clearance(&self, clearance: &Clearance) -> Result<String, CryptoError>;
     /// The broker's signature over a standing (namespace `broker-v1@procession`).
@@ -49,6 +58,14 @@ pub struct SshCrypto {
 }
 
 impl SshCrypto {
+    /// The broker's certificate: `<key>-cert.pub` beside the key (where `ssh-keygen` finds it).
+    #[must_use]
+    pub fn certificate_file(&self) -> PathBuf {
+        let mut name = self.broker_key.clone().into_os_string();
+        name.push("-cert.pub");
+        PathBuf::from(name)
+    }
+
     #[must_use]
     pub fn new(broker_key: impl Into<PathBuf>) -> SshCrypto {
         SshCrypto { broker_key: broker_key.into() }
@@ -78,6 +95,42 @@ impl Crypto for SshCrypto {
         site_ca: &PublicKey,
     ) -> Result<sign::ApprovalCertificate, CryptoError> {
         Ok(sign::check_approval_certificate(line, site_ca)?)
+    }
+
+    fn check_broker_certificate(
+        &self,
+        site_ca: &PublicKey,
+        now: std::time::SystemTime,
+    ) -> Result<BrokerCertificate, BrokerCertificateFailure> {
+        let refused = |e: &dyn std::fmt::Display| BrokerCertificateFailure::Refused(e.to_string());
+        if !self.certificate_file().is_file() {
+            return Err(BrokerCertificateFailure::Missing);
+        }
+        // What is checked is what is presented: the certificate inside a signature the broker makes. `ssh-keygen`
+        // signs with the key and the certificate beside it; the signature proves the key is the certified one.
+        let probe = b"page: the broker's certificate check";
+        let sig = sign::sign_broker(&Signer::certified(&self.broker_key).map_err(|e| refused(&e))?, probe)
+            .map_err(|e| refused(&e))?;
+        let cert = sign::signature_certificate(&sig).map_err(|e| refused(&e))?;
+        if cert.principals != ["broker"] {
+            return Err(BrokerCertificateFailure::Refused("its principals are not exactly `broker`".to_owned()));
+        }
+        if let Some((name, _)) = cert.critical_options.first() {
+            return Err(BrokerCertificateFailure::Refused(format!("it has the critical option `{name}`")));
+        }
+        if let Some((name, _)) = cert.extensions.first() {
+            return Err(BrokerCertificateFailure::Refused(format!("it has the extension `{name}`")));
+        }
+        let secs = now.duration_since(std::time::SystemTime::UNIX_EPOCH).map_or(0, |d| d.as_secs());
+        if secs < cert.valid_after {
+            return Err(BrokerCertificateFailure::NotYetValid);
+        }
+        if secs >= cert.valid_before {
+            return Err(BrokerCertificateFailure::Expired);
+        }
+        // The issuer and the signature, the way a service and a pledge verify it.
+        sign::verify_broker(site_ca, &sig, probe).map_err(|e| refused(&e))?;
+        Ok(BrokerCertificate { valid_after: cert.valid_after, valid_before: cert.valid_before })
     }
 
     fn sign_clearance(&self, clearance: &Clearance) -> Result<String, CryptoError> {

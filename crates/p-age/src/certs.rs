@@ -253,3 +253,45 @@ impl Loaded {
         self.next_event.is_some_and(|at| u64::try_from(unix(now)).unwrap_or(0) >= at)
     }
 }
+
+/// What the broker's own certificate says, once it has passed the check.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BrokerCertificate {
+    /// Seconds since the Unix epoch.
+    pub valid_after: u64,
+    pub valid_before: u64,
+}
+
+/// Why the broker's own certificate is not good.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum BrokerCertificateFailure {
+    /// There is no certificate file beside the key.
+    Missing,
+    NotYetValid,
+    Expired,
+    /// Anything else: not the name `broker`, not issued by the site CA, a critical option, an extension, not for the
+    /// key the broker holds, not readable. The text is for standard error.
+    Refused(String),
+}
+
+impl BrokerCertificateFailure {
+    /// A code from a closed list, for the administrator's answer: `missing`, `not-yet-valid`, `expired`, `refused`.
+    #[must_use]
+    pub fn code(&self) -> &'static str {
+        match self {
+            BrokerCertificateFailure::Missing => "missing",
+            BrokerCertificateFailure::NotYetValid => "not-yet-valid",
+            BrokerCertificateFailure::Expired => "expired",
+            BrokerCertificateFailure::Refused(_) => "refused",
+        }
+    }
+}
+
+impl std::fmt::Display for BrokerCertificateFailure {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            BrokerCertificateFailure::Refused(why) => write!(f, "refused: {why}"),
+            other => f.write_str(other.code()),
+        }
+    }
+}

@@ -177,6 +177,7 @@ pub struct BrokerSetup {
     clock: Arc<dyn Clock>,
     crypto: Option<Arc<dyn Crypto>>,
     certificates: Option<crate::certs::CertificateInput>,
+    site_ca: Option<p_act::sign::PublicKey>,
 }
 
 /// A broker that was started.
@@ -202,6 +203,7 @@ impl BrokerSetup {
             clock: Arc::new(SystemClock),
             crypto: None,
             certificates: None,
+            site_ca: None,
         }
     }
 
@@ -230,10 +232,20 @@ impl BrokerSetup {
         self
     }
 
+    /// Check the broker's own certificate against the site CA, as `page serve` does: a broker without a valid one issues
+    /// no clearance and no standing, and its status says so. Without this call (or [`BrokerSetup::certificates`]) it is
+    /// not checked.
+    #[must_use]
+    pub fn site_ca(mut self, site_ca: p_act::sign::PublicKey) -> BrokerSetup {
+        self.site_ca = Some(site_ca);
+        self
+    }
+
     /// The certificates the broker carries to pledge: a directory of `*-cert.pub` files, checked against `site_ca`
     /// (see [`write_certificate`] for the files' names). Without this call none are carried.
     #[must_use]
     pub fn certificates(mut self, site_ca: p_act::sign::PublicKey, directory: impl Into<PathBuf>) -> BrokerSetup {
+        self.site_ca = Some(site_ca.clone());
         self.certificates = Some(crate::certs::CertificateInput { site_ca, directory: directory.into() });
         self
     }
@@ -265,6 +277,10 @@ impl BrokerSetup {
             Arc::clone(&crypto),
             Box::new(log.clone()),
         );
+        let core = match self.site_ca {
+            Some(site_ca) => core.with_broker_certificate_check(site_ca, self.clock.now()),
+            None => core,
+        };
         let core = match self.certificates {
             Some(input) => core.with_certificates(input, self.clock.now()),
             None => core,
