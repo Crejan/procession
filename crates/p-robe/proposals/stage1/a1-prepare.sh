@@ -39,12 +39,14 @@ install -d -o "$SVC" -g "$SVC" -m 0700 /var/lib/probe/used
 TMP=/etc/sudoers.d/.probe-svc.new
 cat > "$TMP" <<'RULE'
 # probe-svc may run the dispatcher of probe, as root, in exactly this form: --within <rating>
-# --call <uuid> <noun> <verb> [arguments]. The dispatcher refuses everything that is not a verb of its
+# --call <uuid> --until <seconds> <noun> <verb> [arguments]. --call is the waiting form (the dispatcher waits
+# up to 10 s for its lock); --until is the call's deadline, after which the verb is not started. The
+# dispatcher refuses everything that is not a verb of its
 # table, `run command` among it, and anything above the rating after --within. Sudoers wildcards
 # match anything, spaces included; the dispatcher is what checks the words.
 Defaults:probe-svc !lecture
 Defaults:probe-svc env_reset
-probe-svc ALL=(root) NOPASSWD: /usr/local/bin/probe --within [a-z]*,[a-z]*,[a-z]* --call ????????-????-????-????-???????????? [a-z]* [a-z]*
+probe-svc ALL=(root) NOPASSWD: /usr/local/bin/probe --within [a-z]*,[a-z]*,[a-z]* --call ????????-????-????-????-???????????? --until [0-9]* [a-z]* [a-z]*
 RULE
 chmod 0440 "$TMP"
 if visudo -cf "$TMP"; then

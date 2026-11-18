@@ -26,6 +26,10 @@ use p_act::rating::Rating;
 pub const RC_UNAVAILABLE: u8 = 3;
 pub const RC_REFUSED: u8 = 64;
 pub const RC_BUSY: u8 = 75;
+/// The call's deadline passed before its verb could start (`--until`).
+pub const RC_EXPIRED: u8 = 76;
+/// How long a call that came through the service (`--call`) waits for the identity's lock.
+pub const LOCK_WAIT: std::time::Duration = std::time::Duration::from_secs(10);
 
 /// The directory a test build is pointed at by `PROBE_TEST_SANDBOX`, if it may be: **never for a
 /// process that is root**, which is what a call through sudo is. So even a sudo rule that kept the
@@ -57,6 +61,8 @@ pub struct Admitted {
     pub within: Option<Rating>,
     /// The call's identifier (`--call`), if the service gave one.
     pub call: Option<String>,
+    /// The call's deadline in seconds since the epoch (`--until`): the verb is not started at or after it.
+    pub until: Option<i64>,
     pub verb: &'static Verb,
     pub args: Vec<String>,
 }
@@ -108,7 +114,7 @@ pub fn admit(caller: &Caller, argv: &[OsString]) -> Result<Admitted, Refusal> {
     // running this for, written to every audit line so that an operator can join
     // them to the service's own; it changes nothing else. They are not
     // arguments, which may not start with `-`; they are read here, in this place only.
-    let (mut within, mut call, mut rest) = (None, None, words.as_slice());
+    let (mut within, mut call, mut until, mut rest) = (None, None, None, words.as_slice());
     loop {
         match rest {
             [flag, value, tail @ ..] if flag == "--within" && within.is_none() => {
@@ -127,11 +133,27 @@ pub fn admit(caller: &Caller, argv: &[OsString]) -> Result<Admitted, Refusal> {
                 );
                 rest = tail;
             }
-            [flag, ..] if flag == "--within" || flag == "--call" => {
+            [flag, value, tail @ ..] if flag == "--until" && until.is_none() => {
+                until = Some(
+                    value
+                        .parse::<u64>()
+                        .ok()
+                        .filter(|_| value.len() <= 11 && value.chars().all(|c| c.is_ascii_digit()))
+                        .and_then(|secs| i64::try_from(secs).ok())
+                        .ok_or_else(|| refuse("bad --until: expected the call's deadline in seconds", who))?,
+                );
+                rest = tail;
+            }
+            [flag, ..] if flag == "--within" || flag == "--call" || flag == "--until" => {
                 return Err(refuse(format!("bad {flag}: a value is needed, and each once"), who));
             }
             _ => break,
         }
+    }
+    // The waiting form is reachable only with `--call`: `--until` says how long it may go on, and means
+    // nothing without it.
+    if until.is_some() && call.is_none() {
+        return Err(refuse("--until is only for a call that has --call", who));
     }
     let words = rest.to_vec();
     let [noun, verb, args @ ..] = words.as_slice() else {
@@ -163,7 +185,7 @@ pub fn admit(caller: &Caller, argv: &[OsString]) -> Result<Admitted, Refusal> {
     if matches!(row.availability, Availability::ServiceOnly) {
         return Err(refuse(format!("{} is offered by the service only", row.label()), who));
     }
-    Ok(Admitted { identity, within, call, verb: row, args: args.to_vec() })
+    Ok(Admitted { identity, within, call, until, verb: row, args: args.to_vec() })
 }
 
 /// The identifier of `--call`, if the leading flags hold a well-formed one: read
@@ -173,7 +195,7 @@ fn scan_call(argv: &[OsString]) -> Option<String> {
     while let [flag, value, tail @ ..] = rest {
         match flag.to_str() {
             Some("--call") => return p_act::CallId::parse(value.to_str()?).ok().map(|id| id.as_str().to_string()),
-            Some("--within") => rest = tail,
+            Some("--within" | "--until") => rest = tail,
             _ => return None,
         }
     }
@@ -189,6 +211,8 @@ struct Origin<'a> {
 /// What the dispatcher is wired to.
 pub struct Dispatcher<'a> {
     pub audit: &'a dyn Audit,
+    /// How long a call with `--call` waits for the identity's lock; a call without it does not wait.
+    pub lock_wait: std::time::Duration,
     pub lock_dir: PathBuf,
     pub cap: usize,
 }
@@ -197,6 +221,8 @@ pub struct Dispatcher<'a> {
 enum Stop {
     Refused(Refusal),
     Busy(String),
+    /// The deadline passed before the verb could start.
+    Expired(String),
     Unavailable(String),
     /// A line could not be written; the call does not run (or, after the
     /// run, its answer is already out and the exit code says so).
@@ -207,7 +233,7 @@ impl<'a> Dispatcher<'a> {
     /// A dispatcher writing audit lines to `audit`, with the usual cap.
     #[must_use]
     pub fn new(audit: &'a dyn Audit, lock_dir: PathBuf) -> Self {
-        Self { audit, lock_dir, cap: ANSWER_CAP }
+        Self { audit, lock_dir, cap: ANSWER_CAP, lock_wait: LOCK_WAIT }
     }
 
     fn log(&self, event: &str, fields: &[(&str, &str)]) -> Result<(), Stop> {
@@ -245,6 +271,7 @@ impl<'a> Dispatcher<'a> {
             }
             Stop::Refused(refusal) => (RC_REFUSED, "refused", refusal.reason, refusal.identity.unwrap_or(who)),
             Stop::Busy(reason) => (RC_BUSY, "busy", reason, who),
+            Stop::Expired(reason) => (RC_EXPIRED, "expired", reason, who),
             Stop::Unavailable(reason) => (RC_UNAVAILABLE, "unavailable", reason, who),
         };
         let cmd = audit::clip(&argv.iter().map(|w| w.to_string_lossy()).collect::<Vec<_>>().join(" "), CLIP);
@@ -257,6 +284,7 @@ impl<'a> Dispatcher<'a> {
         }
         let message = match code {
             RC_BUSY => format!("busy ({reason}): another call is running"),
+            RC_EXPIRED => format!("expired ({reason}): the verb was not started"),
             _ => format!("{event}: {reason}"),
         };
         let _ = writeln!(err, "probe: {message}");
@@ -304,15 +332,43 @@ impl<'a> Dispatcher<'a> {
             ("from", from),
         ];
         fields.extend(call_id.map(|id| ("call", id)));
-        let _lock = match lock::take(&self.lock_dir, identity) {
+        // The waiting form is reachable only with `--call`; `--until` (the call's deadline) bounds it, and
+        // the verb is not started at or after it, whatever the wait did: the decision is made here, after
+        // the lock is held, by this process's clock.
+        let waits = call_id.is_some();
+        let now = || p_act::Timestamp::now().map_or(0, p_act::Timestamp::unix);
+        if call.until.is_some_and(|until| now() >= until) {
+            return Err(Stop::Expired("the deadline had passed before the call reached the dispatcher".into()));
+        }
+        let wait = match (waits, call.until) {
+            (false, _) => std::time::Duration::ZERO,
+            (true, None) => self.lock_wait,
+            (true, Some(until)) => {
+                self.lock_wait.min(std::time::Duration::from_secs(u64::try_from(until - now()).unwrap_or(0)))
+            }
+        };
+        let waiting_since = Instant::now();
+        let taken = lock::take_waiting(&self.lock_dir, identity, wait);
+        let waited = format!("{:.2}s", waiting_since.elapsed().as_secs_f64());
+        if waits {
+            fields.push(("waited", waited.as_str()));
+        }
+        let _lock = match taken {
             Ok(Taken::Held(file)) => Some(file),
             Ok(Taken::NoDirectory) => {
                 self.log("nolock", &fields)?;
                 None
             }
+            Err(Fault::Busy) if call.until.is_some_and(|until| now() >= until) => {
+                return Err(Stop::Expired(format!("the deadline passed while waiting for the lock (waited {waited})")));
+            }
+            Err(Fault::Busy) if waits => return Err(Stop::Busy(format!("identity-busy: waited {waited}"))),
             Err(Fault::Busy) => return Err(Stop::Busy("identity-busy".into())),
             Err(Fault::Refused(reason)) => return Err(Stop::Refused(refuse(reason, Some(identity)))),
         };
+        if call.until.is_some_and(|until| now() >= until) {
+            return Err(Stop::Expired(format!("the deadline passed before the verb could start (waited {waited})")));
+        }
         self.log("start", &fields)?;
         let started = Instant::now();
         let env = Env {
@@ -359,6 +415,26 @@ mod tests {
     fn call_with(sink: &Memory, lock_dir: &std::path::Path, caller: &Caller, argv: &[&str]) -> Outcome {
         let (mut out, mut err) = (Vec::new(), Vec::new());
         let rc = Dispatcher::new(sink, lock_dir.to_path_buf()).run(caller, &words(argv), &mut out, &mut err);
+        Outcome {
+            rc,
+            out: String::from_utf8(out).unwrap(),
+            err: String::from_utf8(err).unwrap(),
+            lines: sink.lines.borrow().clone(),
+        }
+    }
+
+    /// As `call_with`, with a lock wait of `wait` for a call that has `--call`.
+    fn call_waiting(
+        sink: &Memory,
+        lock_dir: &std::path::Path,
+        caller: &Caller,
+        argv: &[&str],
+        wait: std::time::Duration,
+    ) -> Outcome {
+        let (mut out, mut err) = (Vec::new(), Vec::new());
+        let mut dispatcher = Dispatcher::new(sink, lock_dir.to_path_buf());
+        dispatcher.lock_wait = wait;
+        let rc = dispatcher.run(caller, &words(argv), &mut out, &mut err);
         Outcome {
             rc,
             out: String::from_utf8(out).unwrap(),
@@ -634,6 +710,148 @@ mod tests {
         assert!(sink.lines.borrow().last().unwrap().contains("truncated=true"));
     }
 
+    // -- waiting for the lock, and the deadline -----------------------------------------------
+
+    fn secs(n: u64) -> std::time::Duration {
+        std::time::Duration::from_secs(n)
+    }
+
+    fn millis(n: u64) -> std::time::Duration {
+        std::time::Duration::from_millis(n)
+    }
+
+    fn unix_now() -> i64 {
+        p_act::Timestamp::now().unwrap().unix()
+    }
+
+    #[test]
+    fn a_call_with_call_waits_for_the_lock_and_says_how_long() {
+        let dir = crate::testdir::new("locks");
+        let held = lock::take(&dir, "jan").unwrap();
+        let releaser = std::thread::spawn(move || {
+            std::thread::sleep(millis(300));
+            drop(held);
+        });
+        let started = Instant::now();
+        let outcome = call_waiting(&Memory::default(), &dir, &sudo("jan"), &["--call", CALL, "sys", "kit"], secs(5));
+        releaser.join().unwrap();
+        assert_eq!(outcome.rc, 0, "{:?}", outcome.lines);
+        assert!(started.elapsed() >= millis(250) && started.elapsed() < secs(4));
+        let waited: f64 =
+            outcome.lines[0].split(" waited=").nth(1).unwrap().split('s').next().unwrap().parse().unwrap();
+        assert!(waited >= 0.25, "{:?}", outcome.lines);
+        assert!(outcome.lines.iter().all(|l| l.contains(" waited=")), "{:?}", outcome.lines);
+    }
+
+    #[test]
+    fn a_call_without_call_does_not_wait() {
+        let dir = crate::testdir::new("locks");
+        let _held = lock::take(&dir, "jan").unwrap();
+        let started = Instant::now();
+        // However long the wait is set: the form without --call is the immediate one.
+        let outcome = call_waiting(&Memory::default(), &dir, &sudo("jan"), &["sys", "kit"], secs(5));
+        assert_eq!(outcome.rc, RC_BUSY);
+        assert!(started.elapsed() < millis(500));
+        assert!(!outcome.lines[0].contains("waited"), "{:?}", outcome.lines);
+    }
+
+    #[test]
+    fn still_held_after_the_wait_is_busy_and_the_line_says_it_waited() {
+        let dir = crate::testdir::new("locks");
+        let _held = lock::take(&dir, "jan").unwrap();
+        let started = Instant::now();
+        let outcome =
+            call_waiting(&Memory::default(), &dir, &sudo("jan"), &["--call", CALL, "sys", "kit"], millis(400));
+        assert_eq!(outcome.rc, RC_BUSY);
+        assert!(started.elapsed() >= millis(380) && started.elapsed() < secs(3));
+        assert!(outcome.out.is_empty() && outcome.lines.len() == 1);
+        assert!(
+            outcome.lines[0].starts_with("event=busy ") && outcome.lines[0].contains("identity-busy: waited 0.4"),
+            "{:?}",
+            outcome.lines
+        );
+        assert!(outcome.lines[0].contains(&format!(" call={CALL}")));
+    }
+
+    #[test]
+    fn the_verb_is_not_started_at_or_after_the_deadline() {
+        let until = |n: i64| n.to_string();
+        // Already past, before anything: expired, no lock taken, no verb.
+        let past = until(unix_now() - 1);
+        let outcome = call(&sudo("jan"), &["--call", CALL, "--until", &past, "sys", "kit"]);
+        assert_eq!(outcome.rc, RC_EXPIRED);
+        assert!(
+            outcome.out.is_empty() && outcome.lines.len() == 1 && outcome.lines[0].starts_with("event=expired "),
+            "{:?}",
+            outcome.lines
+        );
+        // The deadline passes while the dispatcher waits for the lock: expired, not busy, and the verb does not start
+        // even though the lock is freed a moment later.
+        let dir = crate::testdir::new("locks");
+        let held = lock::take(&dir, "jan").unwrap();
+        let soon = until(unix_now() + 1);
+        let releaser = std::thread::spawn(move || {
+            std::thread::sleep(millis(1500));
+            drop(held);
+        });
+        let started = Instant::now();
+        let outcome = call_waiting(
+            &Memory::default(),
+            &dir,
+            &sudo("jan"),
+            &["--call", CALL, "--until", &soon, "sys", "kit"],
+            secs(10),
+        );
+        releaser.join().unwrap();
+        assert_eq!(outcome.rc, RC_EXPIRED, "{:?}", outcome.lines);
+        assert!(started.elapsed() < secs(3), "the wait was cut at the deadline, not at 10 seconds");
+        assert!(outcome.out.is_empty(), "nothing ran");
+        assert!(!outcome.lines.iter().any(|l| l.starts_with("event=start")), "{:?}", outcome.lines);
+        assert!(outcome.lines[0].contains("the deadline passed while waiting for the lock"), "{:?}", outcome.lines);
+        // The lock is taken just before the deadline's second ends: the decision is made after it is held.
+        let dir = crate::testdir::new("locks");
+        let held = lock::take(&dir, "jan").unwrap();
+        let tight = until(unix_now() + 2);
+        let releaser = std::thread::spawn(move || {
+            std::thread::sleep(millis(2300));
+            drop(held);
+        });
+        let outcome = call_waiting(
+            &Memory::default(),
+            &dir,
+            &sudo("jan"),
+            &["--call", CALL, "--until", &tight, "sys", "kit"],
+            secs(10),
+        );
+        releaser.join().unwrap();
+        assert_eq!(outcome.rc, RC_EXPIRED, "{:?}", outcome.lines);
+        assert!(!outcome.lines.iter().any(|l| l.starts_with("event=start")));
+        // A deadline well ahead is no hindrance.
+        let far = until(unix_now() + 600);
+        let outcome = call(&sudo("jan"), &["--call", CALL, "--until", &far, "sys", "kit"]);
+        assert_eq!(outcome.rc, 0, "{:?}", outcome.lines);
+    }
+
+    #[test]
+    fn until_is_reachable_only_with_call_and_only_as_a_plain_number() {
+        let future = (unix_now() + 600).to_string();
+        for bad in [
+            vec!["--until", future.as_str(), "sys", "kit"],
+            vec!["--call", CALL, "--until", "soon", "sys", "kit"],
+            vec!["--call", CALL, "--until", "-5", "sys", "kit"],
+            vec!["--call", CALL, "--until", "1e9", "sys", "kit"],
+            vec!["--call", CALL, "--until", "", "sys", "kit"],
+            vec!["--call", CALL, "--until", "123456789012", "sys", "kit"],
+            vec!["--call", CALL, "--until", "5", "--until", "6", "sys", "kit"],
+            vec!["--call", CALL, "--until"],
+            vec!["--call", CALL, "sys", "kit", "--until", "5"],
+        ] {
+            assert!(admit(&sudo("jan"), &words(&bad)).is_err(), "{bad:?}");
+        }
+        let call = admit(&sudo("jan"), &words(&["--until", &future, "--call", CALL, "sys", "kit"])).unwrap();
+        assert_eq!(call.until, Some(future.parse().unwrap()));
+    }
+
     // -- what may follow the flags, and what the environment may change --------------
 
     #[test]
@@ -780,7 +998,13 @@ mod tests {
         }
         let dir = crate::testdir::new("locks");
         let _held = lock::take(&dir, "jan").unwrap();
-        let busy = call_with(&Memory::default(), &dir, &sudo("jan"), &["--call", CALL, "sys", "kit"]);
+        let busy = call_waiting(
+            &Memory::default(),
+            &dir,
+            &sudo("jan"),
+            &["--call", CALL, "sys", "kit"],
+            std::time::Duration::from_millis(100),
+        );
         assert_eq!(busy.rc, RC_BUSY);
         assert!(busy.lines[0].contains(&format!(" call={CALL}")), "{:?}", busy.lines);
         // A call without the flag has no such field.

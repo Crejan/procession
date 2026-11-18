@@ -798,6 +798,82 @@ fn only_so_many_calls_wait_and_the_next_is_busy_without_taking_its_identifier() 
     assert_eq!(rig.outcome(&second), Outcome::Declined);
 }
 
+/// A runner that answers with a fixed exit code, and remembers what it was asked.
+struct Fixed {
+    rc: u8,
+    asked: Arc<Mutex<Vec<(String, i64)>>>,
+}
+
+impl crate::runner::Runner for Fixed {
+    fn run(
+        &self,
+        _: Rating,
+        call_id: &str,
+        until: i64,
+        _: &str,
+        _: &[String],
+    ) -> Result<crate::runner::RunOutput, String> {
+        self.asked.lock().unwrap().push((call_id.to_string(), until));
+        Ok(crate::runner::RunOutput { rc: self.rc, timed_out: false, stdout: String::new() })
+    }
+}
+
+#[test]
+fn the_dispatchers_exit_codes_reach_the_agent_as_the_documented_outcomes_and_the_deadline_goes_with_the_call() {
+    let rig = Rig::new(Plan::Silent);
+    rig.pledge.set(confirmed(&rig));
+    for (rc, expected, exact) in [
+        (75, "refused/try-later", "dispatcher-busy"),
+        (76, "expired", "dispatcher-deadline"),
+        (64, "refused/not-allowed", "dispatcher-refused"),
+        (3, "unavailable", "dispatcher-unavailable"),
+        (0, "done", "ran"),
+    ] {
+        let asked = Arc::new(Mutex::new(Vec::new()));
+        let (mut service, log) = make_service(
+            &rig.pki,
+            rig.pledge.link(),
+            &rig.used,
+            InProcess { audit_file: rig.audit.clone(), lock_dir: rig.used.clone(), user: "probe".into(), before: None },
+            16,
+        );
+        service.runner = Box::new(Fixed { rc, asked: asked.clone() });
+        let sent = rig.jan("sys kit", &[]);
+        match service.handle(&sent.tool(), &AtomicBool::new(false)) {
+            Handled::Outcome { outcome, .. } => assert_eq!(word(&outcome), expected, "rc {rc}"),
+            other => panic!("{other:?}"),
+        }
+        assert!(log.lock().unwrap().iter().any(|l| l.contains(exact)), "{exact}: {:?}", log.lock().unwrap());
+        let (id, until) = asked.lock().unwrap()[0].clone();
+        let call = Call::parse(base64::engine::general_purpose::STANDARD.decode(&sent.call).unwrap()).unwrap();
+        assert_eq!(
+            (id.as_str(), until),
+            (sent.id.as_str(), call.deadline().unix()),
+            "the dispatcher is told the call's deadline"
+        );
+    }
+}
+
+#[test]
+fn a_call_whose_dispatcher_waits_past_the_deadline_for_the_lock_is_expired_and_nothing_runs() {
+    let rig = Rig::new(Plan::Silent);
+    rig.pledge.set(confirmed(&rig));
+    // Something else holds the identity's lock for longer than the call has left.
+    let held = crate::lock::take(&rig.dispatcher_dir.path().join("locks"), "probe").unwrap();
+    let sent = sign(&CallSpec { secs: 3, ..spec(&rig.pki.jan_agent, "sys kit", &[]) });
+    let started = Instant::now();
+    assert_eq!(rig.outcome(&sent), Outcome::Expired);
+    assert!(started.elapsed() < Duration::from_secs(6), "{:?}", started.elapsed());
+    drop(held);
+    std::thread::sleep(Duration::from_millis(300));
+    assert!(!rig.ran().iter().any(|l| l.starts_with("event=start")), "the verb did not start: {:?}", rig.ran());
+    assert!(
+        rig.ran().iter().any(|l| l.starts_with("event=expired ") && l.contains(&format!(" call={}", sent.id))),
+        "{:?}",
+        rig.ran()
+    );
+}
+
 #[test]
 fn a_tool_call_that_is_malformed_is_a_protocol_error_not_an_outcome() {
     let rig = Rig::new(Plan::Decline);
