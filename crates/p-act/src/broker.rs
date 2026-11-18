@@ -391,6 +391,9 @@ pub enum FromService {
 pub enum ToPledge {
     Challenge(Secret32),
     Ready,
+    /// The broker is up and cannot vouch for anything: it has no valid certificate of its own. Sent in place of the
+    /// standing (connections document 3.7 and 5); a pledge treats it as connected without a standing.
+    NotReady,
     /// The standing: its bytes and the broker's signature, to be verified with [`Standing::parse_verified`].
     Notice(Signed),
     Registered(Fingerprint),
@@ -581,7 +584,7 @@ impl ToPledge {
     pub fn parse(line: &[u8]) -> Result<ToPledge, ExchangeError> {
         let Some((kind, mut o)) = broker_object(
             line,
-            &["challenge", "ready", "notice", "registered", "not-registered", "withdrawn", "carried"],
+            &["challenge", "ready", "not-ready", "notice", "registered", "not-registered", "withdrawn", "carried"],
         )?
         else {
             return Ok(ToPledge::Exchange(Box::new(Message::parse(line, ClearancePolicy::Refused)?)));
@@ -589,6 +592,7 @@ impl ToPledge {
         let message = match kind.as_str() {
             "challenge" => ToPledge::Challenge(decode32("nonce", &o.take_string("nonce")?)?),
             "ready" => ToPledge::Ready,
+            "not-ready" => ToPledge::NotReady,
             "notice" => ToPledge::Notice(take_signed(&mut o)?),
             "carried" => {
                 let namespace = o.take_string("namespace")?;
@@ -621,6 +625,7 @@ impl ToPledge {
         match self {
             ToPledge::Challenge(n) => line(&WithText { nonce: Some(STANDARD.encode(n)), ..text_message("challenge") }),
             ToPledge::Ready => line(&head("ready")),
+            ToPledge::NotReady => line(&head("not-ready")),
             ToPledge::Notice(s) => signed_line("notice", s),
             ToPledge::Carried { namespace, signed } => {
                 if !looks_armoured(&signed.sig) {
@@ -990,6 +995,7 @@ mod tests {
         for m in [
             ToPledge::Challenge(N),
             ToPledge::Ready,
+            ToPledge::NotReady,
             ToPledge::Notice(signed()),
             ToPledge::Registered(fp('Q')),
             ToPledge::NotRegistered { delegation: fp('Q'), reason: NotRegisteredReason::TooLong },
@@ -1008,6 +1014,9 @@ mod tests {
         let sig = signature_to_base64(SIG);
         assert_eq!(FromPledge::Ping.encode().unwrap(), b"{\"schema_version\":1,\"type\":\"ping\"}\n");
         assert_eq!(ToPledge::Ready.encode().unwrap(), b"{\"schema_version\":1,\"type\":\"ready\"}\n");
+        assert_eq!(ToPledge::NotReady.encode().unwrap(), b"{\"schema_version\":1,\"type\":\"not-ready\"}\n");
+        // `not-ready` carries nothing else.
+        assert!(ToPledge::parse(br#"{"schema_version":1,"type":"not-ready","x":1}"#).is_err());
         assert_eq!(
             FromPledge::Signin(signed()).encode().unwrap(),
             format!("{{\"schema_version\":1,\"type\":\"signin\",\"doc\":\"{doc}\",\"doc_sig\":\"{sig}\"}}\n")

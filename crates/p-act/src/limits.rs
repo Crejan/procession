@@ -19,6 +19,11 @@ pub const MAX_PARAMS_SHOWN_CHARS: usize = crate::call::MAX_PARAMS_SHOWN_CHARS;
 /// A prompt carries a call's service name, host and action, together at most this many characters (as shown, not
 /// bytes): `Call::showable`. The service name and the action have no limit of their own in the formats, the host has 64.
 pub const MAX_PROMPT_NAMES_CHARS: usize = crate::call::MAX_PROMPT_NAMES_CHARS;
+/// A login shown by pledge: the user is at most this many characters,
+pub const MAX_LOGIN_USER_CHARS: usize = 64;
+/// the host name at most this many, and the two with the separator between them are within
+/// [`MAX_PROMPT_NAMES_CHARS`] (64 + 1 + 170 = 235).
+pub const MAX_LOGIN_HOST_CHARS: usize = 170;
 /// A claim is at most this many characters.
 pub const MAX_CLAIM_CHARS: usize = crate::call::MAX_CLAIM_CHARS;
 
@@ -69,6 +74,12 @@ pub fn prompt_names_fit(parts: &[&str]) -> bool {
 #[cfg(test)]
 mod prompt_tests {
     use super::*;
+
+    #[test]
+    fn a_login_fits_the_prompt_budget_at_its_limits() {
+        const { assert!(MAX_LOGIN_USER_CHARS + 1 + MAX_LOGIN_HOST_CHARS <= MAX_PROMPT_NAMES_CHARS) };
+        assert!(prompt_names_fit(&[&"u".repeat(MAX_LOGIN_USER_CHARS), "@", &"h".repeat(MAX_LOGIN_HOST_CHARS)]));
+    }
 
     #[test]
     fn names_fit_by_characters_not_bytes() {

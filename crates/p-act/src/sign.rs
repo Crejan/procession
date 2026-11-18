@@ -131,6 +131,8 @@ pub enum SignError {
     BadGroups(&'static str),
     #[error("`{0}` is not a fingerprint like SHA256:<43 base64 characters>")]
     MalformedFingerprint(String),
+    #[error("the certificate's principal `{0}` is not `broker`")]
+    NotBrokerName(String),
     #[error("there is no ssh-keygen to trust: {0}")]
     Keygen(#[from] crate::keygen::KeygenError),
     #[error("ssh-keygen reported success without having read all its input, so it did not check what was asked")]
@@ -1001,14 +1003,7 @@ impl ApprovalCertificate {
     /// Whether `now` is within the certificate's validity: at or after its start, before its end (the end is exclusive,
     /// as `ssh-keygen` treats it).
     pub fn valid_at(&self, now: crate::time::Timestamp) -> Result<(), SignError> {
-        let now = u64::try_from(now.unix()).unwrap_or(0);
-        if now < self.valid_after {
-            Err(SignError::CertificateNotYetValid)
-        } else if now >= self.valid_before {
-            Err(SignError::CertificateExpired)
-        } else {
-            Ok(())
-        }
+        valid_between(self.valid_after, self.valid_before, now)
     }
 }
 
@@ -1075,18 +1070,100 @@ fn site_certificate_in(sig: &str) -> Result<(), SignError> {
     no_option_or_extension(&signature_certificate(sig)?)
 }
 
-/// Everything of [`verify_approval_certificate`] except the time: the shape, the name, the issuer and the signature. The
-/// caller judges validity itself, from `valid_after` and `valid_before` or [`ApprovalCertificate::valid_at`].
-pub fn check_approval_certificate(line: &str, site_ca: &PublicKey) -> Result<ApprovalCertificate, SignError> {
+/// What every certificate the site CA issues has: one certificate line whose blob ends with its signature, a user
+/// certificate, no critical option, no extension, exactly one principal. Returns it and that principal.
+fn site_certificate_shape(line: &str) -> Result<(Certificate, String), SignError> {
     let cert = certificate_from_blob(&certificate_line_blob(line)?)?;
     if cert.cert_type != 1 {
         return Err(SignError::NotUserCertificate);
     }
     no_option_or_extension(&cert)?;
-    let principal = match <[String; 1]>::try_from(cert.principals.clone()) {
-        Ok([p]) => p,
-        Err(many) => return Err(SignError::PrincipalCount { found: many.len() }),
-    };
+    match <[String; 1]>::try_from(cert.principals.clone()) {
+        Ok([principal]) => Ok((cert, principal)),
+        Err(many) => Err(SignError::PrincipalCount { found: many.len() }),
+    }
+}
+
+/// The signature and the issuer, by `ssh-keygen`, before anything of the certificate is believed: the issuer is
+/// `site_ca` and no other.
+fn issued_by(line: &str, site_ca: &PublicKey) -> Result<(), SignError> {
+    if certificate_issuer(line)? != site_ca.fingerprint() {
+        return Err(SignError::WrongIssuer);
+    }
+    Ok(())
+}
+
+/// What a verified certificate of the broker's key says.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BrokerCertificate {
+    /// The key the certificate certifies (Ed25519 or ECDSA P-256).
+    pub key: PublicKey,
+    /// The certificate's label; never to decide on.
+    pub key_id: String,
+    /// Seconds since the Unix epoch.
+    pub valid_after: u64,
+    /// Seconds since the Unix epoch (the largest value for "forever").
+    pub valid_before: u64,
+}
+
+impl BrokerCertificate {
+    /// Whether this certificate is for `key`.
+    #[must_use]
+    pub fn certifies(&self, key: &PublicKey) -> bool {
+        self.key == *key
+    }
+
+    /// As [`ApprovalCertificate::valid_at`].
+    pub fn valid_at(&self, now: crate::time::Timestamp) -> Result<(), SignError> {
+        valid_between(self.valid_after, self.valid_before, now)
+    }
+}
+
+fn valid_between(after: u64, before: u64, now: crate::time::Timestamp) -> Result<(), SignError> {
+    let now = u64::try_from(now.unix()).unwrap_or(0);
+    if now < after {
+        Err(SignError::CertificateNotYetValid)
+    } else if now >= before {
+        Err(SignError::CertificateExpired)
+    } else {
+        Ok(())
+    }
+}
+
+/// The broker's own certificate, as the site CA issued it (the line of a `-cert.pub` file), at the time `now`: a user
+/// certificate with exactly one principal, `broker`, issued by `site_ca` and no other, valid at `now`, with **no
+/// critical option, no extension** and nothing after its signature (formats section 3.2). The same rules as
+/// [`verify_approval_certificate`], for the one name that one refuses.
+pub fn verify_broker_certificate(
+    line: &str,
+    site_ca: &PublicKey,
+    now: crate::time::Timestamp,
+) -> Result<BrokerCertificate, SignError> {
+    let cert = check_broker_certificate(line, site_ca)?;
+    cert.valid_at(now)?;
+    Ok(cert)
+}
+
+/// Everything of [`verify_broker_certificate`] except the time: the caller judges validity from `valid_after` and
+/// `valid_before` or [`BrokerCertificate::valid_at`].
+pub fn check_broker_certificate(line: &str, site_ca: &PublicKey) -> Result<BrokerCertificate, SignError> {
+    let (cert, principal) = site_certificate_shape(line)?;
+    if principal != "broker" {
+        return Err(SignError::NotBrokerName(shown(&principal)));
+    }
+    issued_by(line, site_ca)?;
+    Ok(BrokerCertificate {
+        key: PublicKey::from_blob(&cert.key_blob)?,
+        key_id: cert.key_id,
+        valid_after: cert.valid_after,
+        valid_before: cert.valid_before,
+    })
+}
+
+/// Everything of [`verify_approval_certificate`] except the time: the shape, the name, the issuer and the signature. The
+/// caller judges validity itself, from `valid_after` and `valid_before` or [`ApprovalCertificate::valid_at`].
+pub fn check_approval_certificate(line: &str, site_ca: &PublicKey) -> Result<ApprovalCertificate, SignError> {
+    let (cert, principal) = site_certificate_shape(line)?;
     let (person, kind) = match principal.rsplit_once(':') {
         Some((person, "confirmed")) => (person, ApprovalKind::Confirmed),
         Some((person, "automatic")) => (person, ApprovalKind::Automatic),
@@ -1098,10 +1175,7 @@ pub fn check_approval_certificate(line: &str, site_ca: &PublicKey) -> Result<App
     if RESERVED_PERSONS.contains(&person) {
         return Err(SignError::ReservedName(person.to_owned()));
     }
-    // The signature and the issuer, by `ssh-keygen`, before anything of the certificate is believed.
-    if certificate_issuer(line)? != site_ca.fingerprint() {
-        return Err(SignError::WrongIssuer);
-    }
+    issued_by(line, site_ca)?;
     Ok(ApprovalCertificate {
         person: person.to_owned(),
         kind,
