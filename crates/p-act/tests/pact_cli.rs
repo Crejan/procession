@@ -10,6 +10,16 @@ use std::path::Path;
 use std::process::{Child, Command, Stdio};
 use std::time::Duration;
 
+/// A fresh directory under which a test may bind a Unix socket: under `PACT_TEST_DIR` if set, else `/tmp/claude` if it
+/// is there (some sandboxes allow sockets only under one directory), else the system's temporary directory.
+fn socket_tempdir() -> tempfile::TempDir {
+    let base = std::env::var_os("PACT_TEST_DIR").map(std::path::PathBuf::from).unwrap_or_else(|| {
+        let sandbox = std::path::PathBuf::from("/tmp/claude");
+        if sandbox.is_dir() { sandbox } else { std::env::temp_dir() }
+    });
+    tempfile::Builder::new().prefix("pact-").tempdir_in(base).unwrap()
+}
+
 fn pact() -> Command {
     Command::new(env!("CARGO_BIN_EXE_pact"))
 }
@@ -128,7 +138,7 @@ fn wait_for_socket(path: &Path, child: &mut Child) {
 
 #[test]
 fn serve_speaks_mcp_on_its_socket_and_stdio_is_a_shim_to_it() {
-    let dir = tempfile::tempdir().unwrap();
+    let dir = socket_tempdir();
     // Some sandboxes do not let a process bind a Unix socket; then there is nothing here to test, and it is said.
     if let Err(e) = std::os::unix::net::UnixListener::bind(dir.path().join("probe.sock")) {
         // Under PACT_REQUIRE_TCP=1 (which also covers this Unix socket) not being able to bind is a failure.
@@ -192,7 +202,7 @@ fn serve_speaks_mcp_on_its_socket_and_stdio_is_a_shim_to_it() {
 
 #[test]
 fn serve_refuses_to_replace_a_socket_and_needs_one() {
-    let dir = tempfile::tempdir().unwrap();
+    let dir = socket_tempdir();
     let (good, _) = bundle(dir.path(), "20200101Z:20990101Z");
     let (code, _, stderr) = run(&["serve"], &good);
     assert_eq!(code, 1);
@@ -325,7 +335,7 @@ fn the_options_for_who_may_connect_are_checked_at_start() {
 
 #[test]
 fn serve_admits_the_running_user_only_and_says_so_and_drops_other_clients_in_silence() {
-    let dir = tempfile::tempdir().unwrap();
+    let dir = socket_tempdir();
     if !sockets_allowed(dir.path()) {
         return;
     }
