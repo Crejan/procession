@@ -53,6 +53,8 @@ required-features = ["formats"]
 
 [dev-dependencies]
 tempfile = "3"
+# The probe strings (control characters, a bidirectional mark) and `assert_clean`.
+p-ermit = { path = "../p-ermit", version = "0.1.0", features = ["test-support"] }
 # For the TLS tests of `pact`'s HTTP client (feature pact-tls): a test CA and a fake https server.
 rcgen = { version = "0.14", default-features = false, features = ["ring", "pem"] }
 rustls = { version = "0.23.46", default-features = false, features = ["ring", "std"] }

@@ -333,13 +333,13 @@ pub enum ExchangeError {
     #[error("the clearance in the answer is refused: {0}")]
     BadClearance(ParseError),
     /// A certificate in a message breaks formats section 3.1 in its form (the text says how).
-    #[error("the certificate is refused: {0}")]
+    #[error("the certificate is refused: {}", crate::error::shown(.0, 128))]
     BadCertificate(String),
     #[error("an approved answer needs both clearance members")]
     ClearanceMissing,
     #[error("an answer must not carry clearance members here")]
     ClearanceNotAllowed,
-    #[error("cannot read: {0}")]
+    #[error("cannot read: {}", crate::error::shown(.0, 128))]
     Io(String),
 }
 
