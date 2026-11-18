@@ -10,7 +10,7 @@ use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::thread;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use serde_json::json;
 
@@ -20,10 +20,10 @@ use crate::dialog::Dialogs;
 use crate::error::{Error, Result};
 use crate::holder::ChildHolder;
 use crate::paths::{Paths, ensure_private_dir, ensure_socket_dir};
-use crate::peer::{self, own_uid};
 use crate::record::Record;
 use crate::shared::{Parts, Shared, system_clock};
 use crate::{agent_conn, control};
+use p_act::peer::{Peer, Policy, Throttle};
 
 /// What `pledge serve` needs to start.
 pub struct Config {
@@ -179,103 +179,55 @@ fn bind_service_socket(paths: &Paths, group: Option<&str>) -> Result<UnixListene
     Ok(listener)
 }
 
-/// One line on stderr per [`LOG_INTERVAL`] for the connections pledge drops, with a count of the lines
-/// held back since, so that something connecting in a loop cannot fill a log. Not the record.
-pub struct Throttle {
-    interval: Duration,
-    last: Option<Instant>,
-    held_back: u64,
-}
-
 /// At most one such line per ten seconds per socket.
-pub const LOG_INTERVAL: Duration = Duration::from_secs(10);
+pub const LOG_INTERVAL: Duration = p_act::peer::LOG_INTERVAL;
 
-impl Throttle {
-    /// A throttle that lets one line through per `interval`.
-    #[must_use]
-    pub fn new(interval: Duration) -> Self {
-        Self { interval, last: None, held_back: 0 }
-    }
-
-    /// The line to print for `message` at `now`, or `None` if it is held back (and counted).
-    pub fn line(&mut self, now: Instant, message: &str) -> Option<String> {
-        if self.last.is_some_and(|last| now.duration_since(last) < self.interval) {
-            self.held_back += 1;
-            return None;
-        }
-        let held = std::mem::take(&mut self.held_back);
-        self.last = Some(now);
-        Some(if held == 0 {
-            format!("pledge: {message}")
-        } else {
-            format!("pledge: {message} ({held} more like it in the last {}s were not printed)", self.interval.as_secs())
-        })
-    }
+/// The throttle of one socket: lines for dropped connections start with `pledge: `. Not the record.
+fn throttle() -> Throttle {
+    Throttle::new("pledge", LOG_INTERVAL)
 }
 
-fn report(throttle: &mut Throttle, message: &str) {
-    if let Some(line) = throttle.line(Instant::now(), message) {
-        eprintln!("{line}");
-    }
+fn to_stderr(line: &str) {
+    eprintln!("{line}");
+}
+
+/// The peer of `socket` if it may connect under `policy`; otherwise one (throttled) line on stderr and
+/// `None`, and the peer is told nothing. This is not a record entry: it is not a request, and anything that
+/// can connect could otherwise fill the record with them.
+fn admitted<S: std::os::unix::io::AsRawFd>(
+    socket: &S,
+    policy: &Policy<'_>,
+    which: &str,
+    throttle: &mut Throttle,
+) -> Option<Peer> {
+    p_act::peer::accept(socket, policy, which, throttle, &mut to_stderr)
 }
 
 /// `service.sock`: who connects is the file mode's business (a service may run under another account),
 /// but a connection whose peer credentials cannot be read is dropped, as on the other two sockets: no
 /// request is handled for it and the peer is told nothing (the connection just ends).
-fn service_peer<S: std::os::unix::io::AsRawFd>(socket: &S, throttle: &mut Throttle) -> Option<peer::Seen> {
-    match peer::peer(socket) {
-        Ok(p) => Some(peer::Seen::of(p)),
-        Err(e) => {
-            report(
-                throttle,
-                &format!("service socket: could not read the peer's credentials ({e}): the connection was dropped"),
-            );
-            None
-        }
-    }
-}
-
 fn accept_service(shared: &Arc<Shared>, listener: &UnixListener) {
-    let mut throttle = Throttle::new(LOG_INTERVAL);
+    let mut throttle = throttle();
     for stream in listener.incoming().flatten() {
-        let Some(peer) = service_peer(&stream, &mut throttle) else { continue };
+        let Some(peer) = admitted(&stream, &Policy::AnyReadable, "service socket", &mut throttle) else { continue };
         let shared = Arc::clone(shared);
-        thread::spawn(move || crate::service_conn::serve(&shared, stream, Some(peer)));
+        thread::spawn(move || crate::service_conn::serve(&shared, stream, Some(crate::peer::Seen::of(&peer))));
     }
-}
-
-/// Whether the peer of `socket` is this user. `Err` says why not, for a line on stderr; the peer is
-/// told nothing. This is not a record entry: it is not a request, and anything that can connect
-/// could otherwise fill the record with them.
-fn check_peer<S: std::os::unix::io::AsRawFd>(socket: &S, which: &str) -> std::result::Result<peer::Peer, String> {
-    match peer::peer(socket) {
-        Ok(peer) if peer.uid == own_uid() => Ok(peer),
-        Ok(peer) => Err(format!("{which}: a connection from user {} (not this user) was dropped", peer.uid)),
-        Err(e) => Err(format!("{which}: could not read the peer's credentials ({e}): the connection was dropped")),
-    }
-}
-
-/// The peer of `stream` if it is this user; otherwise one (throttled) line on stderr and `None`.
-fn is_own(stream: &UnixStream, which: &str, throttle: &mut Throttle) -> Option<peer::Peer> {
-    check_peer(stream, which).map_err(|why| report(throttle, &why)).ok()
 }
 
 fn accept_agent(shared: &Arc<Shared>, listener: &UnixListener) {
-    let mut throttle = Throttle::new(LOG_INTERVAL);
+    let mut throttle = throttle();
     for stream in listener.incoming().flatten() {
-        let Some(peer) = is_own(&stream, "SSH agent socket", &mut throttle) else { continue };
+        let Some(peer) = admitted(&stream, &Policy::OwnUser, "SSH agent socket", &mut throttle) else { continue };
         let shared = Arc::clone(shared);
-        thread::spawn(move || {
-            let program = peer.pid.and_then(peer::program_path);
-            agent_conn::serve(&shared, stream, program.as_deref());
-        });
+        thread::spawn(move || agent_conn::serve(&shared, stream, peer.program()));
     }
 }
 
 fn accept_control(shared: &Arc<Shared>, listener: &UnixListener) {
-    let mut throttle = Throttle::new(LOG_INTERVAL);
+    let mut throttle = throttle();
     for stream in listener.incoming().flatten() {
-        if is_own(&stream, "control socket", &mut throttle).is_none() {
+        if admitted(&stream, &Policy::OwnUser, "control socket", &mut throttle).is_none() {
             continue;
         }
         let shared = Arc::clone(shared);
@@ -294,6 +246,7 @@ mod tests {
     use super::*;
     use crate::paths::ensure_socket_dir;
     use crate::testing::TestDir;
+    use p_act::peer::own_uid;
 
     #[test]
     fn a_socket_is_bound_private_and_a_live_one_is_not_replaced() {
@@ -351,28 +304,19 @@ mod tests {
     }
 
     #[test]
-    fn the_log_line_for_dropped_connections_is_throttled_with_a_count() {
-        let mut throttle = Throttle::new(Duration::from_secs(10));
-        let start = Instant::now();
-        assert_eq!(throttle.line(start, "x").as_deref(), Some("pledge: x"));
-        for second in 1..10 {
-            assert_eq!(throttle.line(start + Duration::from_secs(second), "x"), None, "{second}");
-        }
-        let line = throttle.line(start + Duration::from_secs(10), "x").expect("printed again");
-        assert_eq!(line, "pledge: x (9 more like it in the last 10s were not printed)");
-        assert_eq!(throttle.line(start + Duration::from_secs(25), "x").as_deref(), Some("pledge: x"));
-    }
-
-    #[test]
     fn service_sock_drops_a_connection_whose_peer_cannot_be_read_and_takes_any_other_user_that_can() {
         let dir = TestDir::new("serve-service-peer");
         let file = fs::File::create(dir.path().join("not-a-socket")).expect("file");
-        let mut throttle = Throttle::new(LOG_INTERVAL);
-        assert_eq!(service_peer(&file, &mut throttle), None, "no request is handled for it");
+        let mut throttle = throttle();
+        assert!(
+            admitted(&file, &Policy::AnyReadable, "service socket", &mut throttle).is_none(),
+            "no request is handled"
+        );
         let (a, _b) = UnixStream::pair().expect("pair");
-        let seen = service_peer(&a, &mut throttle).expect("a readable peer is taken");
+        let peer =
+            admitted(&a, &Policy::AnyReadable, "service socket", &mut throttle).expect("a readable peer is taken");
         assert_eq!(
-            seen.uid,
+            peer.uid(),
             own_uid(),
             "a service under another account would be taken too: the door is the file mode"
         );
@@ -383,12 +327,12 @@ mod tests {
         // A regular file is not a socket: asking it for peer credentials fails.
         let dir = TestDir::new("serve-peer");
         let file = fs::File::create(dir.path().join("not-a-socket")).expect("file");
-        let why = check_peer(&file, "SSH agent socket").expect_err("not readable");
+        let why = p_act::peer::admit(&file, &Policy::OwnUser).expect_err("not readable").message("SSH agent socket");
         assert!(why.starts_with("SSH agent socket: could not read the peer's credentials"), "{why}");
         assert!(why.ends_with("the connection was dropped"), "{why}");
         // A socket pair's peer is this very process: accepted.
         let (a, _b) = UnixStream::pair().expect("pair");
-        assert!(check_peer(&a, "control socket").is_ok());
+        assert!(p_act::peer::admit(&a, &Policy::OwnUser).is_ok());
     }
 
     #[test]

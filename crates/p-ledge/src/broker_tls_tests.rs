@@ -64,9 +64,15 @@ impl Site2 {
                 line(&format!("{role}-tls-cert.pub"))
             })
             .collect();
+        let key = |role: &str| {
+            let public = lab.rig.shared.key_with_purpose(role).expect("key").public_line();
+            json!({"key": public, "verified_on": "2026-11-10"})
+        };
         let site = json!({
-            "persons": [{"name": "jan", "enabled": true, "connection_key": connection, "delegation_key": delegation_key,
-                         "groups": ["ops"], "certificates": certificates}],
+            "persons": [{"name": "jan", "enabled": true, "groups": ["ops"], "certificates": certificates,
+                         "keys": {"confirmed": key("confirmed"), "automatic": key("automatic"),
+                                  "delegation": {"key": delegation_key, "verified_on": "2026-11-10"},
+                                  "connection": {"key": connection, "verified_on": "2026-11-10"}}}],
             "hosts": [{"name": "a.example", "key": lab.material.host_line()}],
         });
         let site = Arc::new(Site::from_json(&site.to_string()).expect("site"));
@@ -222,7 +228,8 @@ fn a_delegation_is_registered_a_request_goes_through_the_broker_and_the_approval
 #[test]
 fn a_delegation_the_site_does_not_certify_is_refused_by_the_broker_and_nothing_is_issued() {
     let lab = Lab::stage2();
-    let site = Site2::new(&lab, &lab.material.host_line());
+    let site =
+        Site2::new(&lab, std::fs::read_to_string(lab.material.dir.path().join("other-host.pub")).expect("key").trim());
     let link = site.link(&lab, "jan", Arc::default());
     eventually("standing", || link.can_issue());
     lab.rig.dialogs.push(yes());
