@@ -52,7 +52,7 @@ pub fn usage() -> String {
     }
     text.push_str(
         "\nserve    [--state-dir D] [--socket-dir D] [--known-hosts FILE]...\n\
-         keys     list | create shared|confirmed|automatic|delegation [--type T] | create bound --program P --user U --host-key SHA256:... [--type T] | retire FINGERPRINT\n\
+         keys     list | create shared|confirmed|automatic|delegation|connection [--type T] | create bound --program P --user U --host-key SHA256:... [--type T] | retire FINGERPRINT\n\
          programs list | admit PROGRAM | block PROGRAM | forget PROGRAM\n\
          agents   start [--groups A,B] [--automatic E,D,S] [--ask E,D,S] [--valid 8h] [--label L] [--service host/name=url]... [--tls-root FILE] [--deadline S] [--output FILE] | list | withdraw ID\n\
          history  [--type T] [--result R] [--format json] [--verify]\n\
@@ -204,7 +204,11 @@ fn keys_verb(mut args: Vec<String>) -> Done {
             }
             Ok(0)
         }
-        (Some("create"), Some(purpose @ ("shared" | "bound" | "confirmed" | "automatic" | "delegation")), None) => {
+        (
+            Some("create"),
+            Some(purpose @ ("shared" | "bound" | "confirmed" | "automatic" | "delegation" | "connection")),
+            None,
+        ) => {
             let mut create = json!({"purpose": purpose});
             for (name, value) in [("key_type", key_type), ("program", program), ("user", user), ("host_key", host_key)]
             {
@@ -319,7 +323,7 @@ pub fn history_line(entry: &Value) -> String {
         }
         Some("event") => {
             add("", text("event"));
-            for name in ["program", "purpose", "key_fingerprint", "count"] {
+            for name in ["program", "purpose", "key_fingerprint", "count", "delegation", "by", "broker", "why"] {
                 add(&format!("{name}="), text(name));
             }
         }

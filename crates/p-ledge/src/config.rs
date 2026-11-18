@@ -40,6 +40,82 @@ pub struct ServiceEntry {
     pub url: String,
 }
 
+/// The broker (stage 2). Without it, stage 1 is unchanged: no connection, nothing registered.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct BrokerEntry {
+    /// `host:port`.
+    pub address: String,
+    /// The name the broker's certificate must have; the host part of `address` if absent.
+    #[serde(default)]
+    pub server_name: Option<String>,
+    /// The site's TLS root, a PEM certificate: the only anchor for *reaching* the broker.
+    pub tls_root: String,
+    /// The site CA's public key line: the anchor for *who signed what* (the broker's signature on the
+    /// standing, the certificates of the person's keys).
+    pub site_ca: String,
+}
+
+impl BrokerEntry {
+    /// The name the broker's certificate is checked for.
+    #[must_use]
+    pub fn name(&self) -> &str {
+        self.server_name
+            .as_deref()
+            .unwrap_or_else(|| self.address.rsplit_once(':').map_or(&self.address, |(host, _)| host))
+    }
+
+    fn check(&self) -> std::result::Result<(), String> {
+        let host_port =
+            self.address.rsplit_once(':').filter(|(host, port)| !host.is_empty() && port.parse::<u16>().is_ok());
+        if host_port.is_none() {
+            return Err("broker.address is host:port".into());
+        }
+        let name = self.name();
+        if name.is_empty() || name.contains(char::is_whitespace) {
+            return Err("broker.server_name is not a name".into());
+        }
+        use rustls_pki_types::pem::PemObject as _;
+        let roots: Vec<Vec<u8>> = rustls_pki_types::CertificateDer::pem_slice_iter(self.tls_root.as_bytes())
+            .map(|cert| cert.map(|der| der.as_ref().to_vec()))
+            .collect::<std::result::Result<_, _>>()
+            .map_err(|_| "broker.tls_root is not a PEM certificate".to_owned())?;
+        if roots.is_empty() {
+            return Err("broker.tls_root holds no certificate".into());
+        }
+        let site_ca = PublicKey::parse(&self.site_ca).map_err(|e| format!("broker.site_ca: {e}"))?;
+        // `site_ca` and `tls_root` must never stand in for each other: the same key material in both is refused.
+        // An SSH public key and an X.509 certificate are different encodings, so they are compared by the key's
+        // raw bytes (32 for Ed25519, the 65-byte uncompressed point for P-256) occurring inside the
+        // certificate's DER, which holds its public key as one run of bytes. Not compared: the same key
+        // re-encoded (a compressed P-256 point), and a certificate whose key merely *signed* the SSH key's
+        // certificate.
+        let raw =
+            raw_key_bytes(&site_ca).ok_or_else(|| "broker.site_ca is not an Ed25519 or ECDSA P-256 key".to_owned())?;
+        if roots.iter().any(|der| der.windows(raw.len()).any(|window| window == raw.as_slice())) {
+            return Err("broker.tls_root and broker.site_ca hold the same key material: they must never stand in for each other".into());
+        }
+        Ok(())
+    }
+}
+
+/// The raw public key bytes inside an SSH public key line: the 32 bytes of an Ed25519 key, or the
+/// uncompressed point of a P-256 key.
+fn raw_key_bytes(key: &PublicKey) -> Option<Vec<u8>> {
+    use base64::Engine as _;
+    let blob = base64::engine::general_purpose::STANDARD.decode(key.to_string().split_whitespace().nth(1)?).ok()?;
+    let mut reader = crate::agent::wire::Reader::new(&blob);
+    let kind = reader.utf8()?;
+    match kind {
+        "ssh-ed25519" => reader.string().map(<[u8]>::to_vec),
+        "ecdsa-sha2-nistp256" => {
+            reader.utf8()?;
+            reader.string().map(<[u8]>::to_vec)
+        }
+        _ => None,
+    }
+}
+
 /// The configuration.
 #[derive(Debug, Clone, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -62,6 +138,9 @@ pub struct Config {
     /// Requests of one agent that may wait at once.
     #[serde(default)]
     pub max_waiting: Option<usize>,
+    /// The broker, if there is one (stage 2).
+    #[serde(default)]
+    pub broker: Option<BrokerEntry>,
     /// A group (of the operating system) that may use `service.sock`.
     #[serde(default)]
     pub service_group: Option<String>,
@@ -94,6 +173,9 @@ impl Config {
     }
 
     fn check(&self) -> std::result::Result<(), String> {
+        if let Some(broker) = &self.broker {
+            broker.check()?;
+        }
         if self.person.as_deref().is_some_and(|p| !is_name(p)) {
             return Err("person is not a name ([A-Za-z0-9._-], at most 64)".into());
         }
@@ -253,6 +335,45 @@ mod tests {
         fs::write(&path, r#"{"person":"top-secret-value","unknown":"also-secret"}"#).expect("write");
         let Err(Error::Corrupt { problem, .. }) = Config::load(&path) else { panic!("refused") };
         assert!(!problem.contains("also-secret") && !problem.contains("top-secret-value"), "{problem}");
+    }
+
+    fn broker(root: &str, site_ca: &str) -> String {
+        format!(
+            r#"{{"broker":{{"address":"broker.example:8443","tls_root":{},"site_ca":"{site_ca}"}}}}"#,
+            serde_json::to_string(root).expect("json")
+        )
+    }
+
+    #[test]
+    fn a_broker_needs_a_root_and_a_site_ca_that_are_not_the_same_key_material() {
+        let root = include_str!("../testdata/tls_root.pem");
+        let same = include_str!("../testdata/tls_root_key.pub").trim();
+        let other = include_str!("../testdata/other_key.pub").trim();
+        let config = load(&broker(root, other)).expect("a broker with two different anchors");
+        let entry = config.broker.expect("broker");
+        assert_eq!(entry.name(), "broker.example", "the host part of the address");
+        // The same key material as the root's key, as an SSH key: refused.
+        let result = load(&broker(root, same));
+        let Err(Error::Corrupt { problem, .. }) = result else { panic!("refused: {result:?}") };
+        assert!(problem.contains("same key material"), "{problem}");
+        // And the other ways it can be wrong.
+        for (what, text) in [
+            ("no PEM", broker("not a certificate", other)),
+            (
+                "a root that holds no certificate",
+                broker("-----BEGIN PRIVATE KEY-----\nAAAA\n-----END PRIVATE KEY-----\n", other),
+            ),
+            ("a site CA that is not a key", broker(root, "nonsense")),
+            ("an RSA site CA", broker(root, "ssh-rsa AAAAB3NzaC1yc2E")),
+            (
+                "an address without a port",
+                r#"{"broker":{"address":"broker.example","tls_root":"x","site_ca":"y"}}"#.to_owned(),
+            ),
+            ("an unknown member", r#"{"broker":{"address":"a:1","tls_root":"x","site_ca":"y","extra":1}}"#.to_owned()),
+        ] {
+            assert!(matches!(load(&text), Err(Error::Corrupt { .. })), "{what}");
+        }
+        assert!(load("{}").expect("no broker").broker.is_none(), "stage 1: no broker, nothing changes");
     }
 
     #[test]

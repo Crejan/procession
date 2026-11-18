@@ -238,6 +238,34 @@ withdrawal, a renewed certificate, the names of the person's groups) pledge
 accepts only with a signature by the key the site CA certified as `broker`.
 A request passed on needs no such signature: it carries the service's.
 
+**Stage 2 as built (step 6).** `config.json` has a `broker` member (`address`
+host:port, `server_name`, `tls_root` a PEM, `site_ca` a public key line that is not
+the key material of the TLS root). With it `pledge serve` needs a `person` and a
+`connection` key and keeps one TLS 1.3 connection to the broker on a thread of its
+own, signing in with that key over what both ends export from the connection; it
+reconnects after 1 s, doubling to 60 s with jitter. What it does with the broker's
+word:
+
+- A `standing` counts only if it verifies as `broker` against `site_ca`, is for
+  this person and this connection, and is newer than the last one. `blocked`,
+  `blocked_keys` and `withdrawn` only restrict, at once, and are kept in
+  `broker-state.json` so that a restart does not forget them; a request that waits
+  is refused `blocked` or `delegation-withdrawn`. Certificates of the person's
+  approval keys are each checked by pledge against `site_ca` and are re-checked
+  when the file is loaded; an approval then carries the certificate instead of the
+  bare key. Groups are shown, decide nothing and are not trusted from disk.
+- `carried` is ignored in this step (stage 2 reads hosts from `config.json`).
+- A request from the broker is answered on the connection and recorded with
+  `via: broker`. A lost connection cancels nothing: the broker sends it again and
+  it is answered from what pledge kept.
+- `agents start` registers the delegation with the broker before the bundle is
+  handed over. No connection, no answer or `unavailable`: refused,
+  `broker-unavailable` ("the broker could not take it, try again"); any other
+  reason: `broker-refused`. A delegation is never issued for pledge alone.
+- A withdrawal is local at once, then told to the broker and followed:
+  `not told`, `not stored yet`, `stored` in `pledge agents list`; sent again at every
+  sign-in and at most once a minute until the broker says it stored it.
+
 ## 5. Dialogs
 
 - One at a time.
