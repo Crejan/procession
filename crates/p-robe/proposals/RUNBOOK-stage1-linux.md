@@ -29,7 +29,7 @@ service over HTTP. Nothing in it has been run on Linux. Terms are those of
 | `pact` composer, signer, catalogue, `pact call` / `pact tools` | built (p-act) |
 | `pact`'s HTTP client | p-act's, `ureq` 3 (`pact::http::HttpTransport`), merged; its socket tests never ran over a real socket either |
 | the cross run through `SudoRunner` | **run and passed** by the owner on 2026-11-18 at `2a38839` (Debian 13, unprivileged LXC container; writer: p-act): `tests/stage1_sudo.rs`, 1.13 s |
-| the cross run over real HTTP with the real `pact` | **written, not run:** `tests/stage1_http.rs` (needs a TCP port and `pact`'s client) |
+| the cross run over real HTTP with the real `pact` | **run and passed** by the owner on 2026-11-18 at `51920c2` (Debian 13, unprivileged LXC, as root, `PROBE_PLEDGE_BIN`/`PROBE_PACT_BIN` set by hand): `tests/stage1_http.rs`, 0.26 s. Shown for the first time: the HTTP transport on a real TCP port; the real `pact` (ureq) reading the stream; pledge and the service starting `/usr/bin/ssh-keygen` under the `Keygen` rule (OpenSSH 10.0p2); `pact`'s bundle and peer checks. **Not shown:** the verb through sudo (not run with `PROBE_STAGE1_SUDO`); a wait long enough for a keepalive comment (15 s) or the 45 s idle timeout; the service as its own account and unit; a person at the dialog; the account split and the group on `service.sock` (everything ran as root) |
 | the scripts of Stage A (`stage1/*.sh`) | **run and passed** by the owner on 2026-11-18 at `2a38839`, unedited: a1, a2 (23 PASS lines), a3 ("PASSED (exit 0)"). a3 has since changed (it names the test executable from cargo's JSON; `ac1fcba`) and is not yet run in that form |
 
 So the runbook has two stages. **Stage A runs today on a Linux machine**: the
@@ -532,6 +532,12 @@ run through the sudo rule as in Stage A. It is ignored and gated:
 cargo build --workspace --features p-robe/test-verbs,p-act/pact
 PROBE_STAGE1_HTTP=1 cargo test -p p-robe --features test-verbs --test stage1_http -- --ignored --nocapture
 ```
+
+As written, on either layout of cargo's build directory: the test finds `pledge` and `pact` in the directory of `probe` (cargo gives
+the test `CARGO_BIN_EXE_probe` at compile time, the path of the built binary, which is `target/debug/probe` whether the test
+executables are under `target/debug/deps/` or under `target/debug/build/<package>/<hash>/out/`); nothing is derived from where
+the test executable is. `PROBE_PLEDGE_BIN` and `PROBE_PACT_BIN` still override (a3 sets the first, for a copy it runs as another user). The first
+line it prints, `test binary built from: <commit>`, is now the checkout's commit (`build.rs` reads git; `-dirty` if tracked files differ), not `unknown`.
 
 (or, through the rule, built as in A3 and run as `probe-svc` with both variables set.) Passed: `PASSED: the real
 pact called the real probe over HTTP`, and the four calls `test_echo`, `test_peak` (asked and confirmed),

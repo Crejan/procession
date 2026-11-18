@@ -99,6 +99,7 @@ pub fn keygen(args: &[&str]) {
 
 /// The commit this test binary was built from, if the build line said (`PROBE_BUILT_FROM=... cargo test`).
 pub const BUILT_FROM: Option<&str> = option_env!("PROBE_BUILT_FROM");
+// (`build.rs` sets it from git when the build line does not: "unknown" only without git.)
 
 /// Whether a binary built from `built` is the one that was expected (`PROBE_EXPECT_BUILT_FROM`): a run that
 /// states what it expects does not go on with another binary, the one left from an earlier build.
@@ -141,17 +142,21 @@ pub fn resolve_binary(given: Option<std::ffi::OsString>, classic: PathBuf, varia
         }
         None if classic.exists() => Ok(classic),
         None => Err(format!(
-            "{} is not there: this cargo may keep test executables elsewhere; build it with `cargo build --workspace \
-             --features p-robe/test-verbs,p-act/pact` and name it in {variable}",
+            "{} is not there: build it with `cargo build --workspace --features p-robe/test-verbs,p-act/pact`, or name it in {variable}",
             classic.display()
         )),
     }
 }
 
 /// A program of this workspace that the test starts, as [`resolve_binary`] finds it.
+///
+/// Where it is by default: in the directory of `probe` (`CARGO_BIN_EXE_probe`, which cargo gives this test at
+/// compile time as the path of the built binary: the profile's directory of the workspace, **whatever layout cargo
+/// keeps its test executables in**, and not derived from where this test executable happens to be). A run that
+/// copies the test elsewhere (as `a3` does, for another user) names the program in `variable`.
 pub fn workspace_binary(variable: &str, name: &str) -> PathBuf {
-    let exe = std::env::current_exe().unwrap();
-    let classic = exe.parent().and_then(Path::parent).unwrap().join(name);
+    let probe = Path::new(env!("CARGO_BIN_EXE_probe"));
+    let classic = probe.parent().expect("probe has a directory").join(name);
     resolve_binary(std::env::var_os(variable), classic, variable).unwrap_or_else(|why| panic!("{why}"))
 }
 

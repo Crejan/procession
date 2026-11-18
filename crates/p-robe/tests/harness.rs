@@ -115,3 +115,25 @@ fn a_program_named_by_the_run_is_taken_as_given_and_only_if_it_is_there() {
     // A name that is not a file is not quietly replaced by the classic place.
     assert!(said(Some(&dir.join("nothing")), &classic).unwrap_err().contains("not a file"));
 }
+
+#[test]
+fn the_default_place_of_a_workspace_program_is_the_directory_of_probe_not_the_place_of_this_test() {
+    // `pledge` is built (the stage-1 tests need it too); where this test executable is does not matter.
+    let found = workspace_binary("PROBE_TEST_NOT_SET_ANYWHERE", "pledge");
+    let probe = std::path::Path::new(env!("CARGO_BIN_EXE_probe"));
+    assert_eq!(found, probe.parent().unwrap().join("pledge"));
+    assert!(!found.starts_with(std::env::current_exe().unwrap().parent().unwrap()) || found.parent() == probe.parent());
+}
+
+#[test]
+fn a_build_in_a_checkout_says_which_commit_without_being_told() {
+    let built = BUILT_FROM.expect("build.rs sets it");
+    let in_git = std::process::Command::new("git")
+        .args(["rev-parse", "--short=12", "HEAD"])
+        .output()
+        .is_ok_and(|o| o.status.success());
+    if in_git {
+        assert!(built != "unknown" && built.len() >= 12, "{built}");
+    }
+    assert!(!built.contains(char::is_whitespace));
+}
