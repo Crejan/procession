@@ -118,7 +118,12 @@ rule is made here.
 
 ## What it keeps
 
-- The register of delegations, until each one's end.
+- The register of delegations, until each one's end. On disk it is
+  `register.json` in the state directory: the file readable and writable by
+  its owner only (0600, the directory 0700), with a member `v`, replaced by
+  writing a new file and renaming it. The broker refuses to start on a
+  register it cannot read whole; it never starts with an empty one in its
+  place, because that would drop blocks without a word.
 - Blocks, until lifted.
 - A log of every request: when, from which host, for which person, what
   became of it. Not the parameters of the action; those are in the person's

@@ -580,6 +580,17 @@ specifications:
   arrives when the broker's host is converged, and stopping someone at once
   is `page block` (for a leaver: block, then a limited converge of the
   broker's host, then the rest). Stages 1 and 2 need no issuer.
+- A service's key is certified by its host's key (section 5), not by the
+  site CA; the signed list of hosts' keys stays.
+- On a site with a directory, who is in which group comes from the
+  directory, through the job beside the broker (section 6).
+- Settings files are JSON for all three programs (`pledge`, `probe`,
+  `page`): one object, an unknown member refused, the file refused if anyone
+  but its owner or root can write it. A person cannot comment in them; a
+  site's roll-out renders them.
+- The broker listens for services and pledges on one address; the first
+  message says which exchange a connection carries
+  (`approval-connections.md`, section 4).
 - The broker is built on tokio and rustls; `pact` uses an HTTP client crate
   instead of one written here.
 
@@ -592,9 +603,6 @@ Open:
   groups may use a service is a required `groups` parameter on the service's
   binding, and that is its one home (finer rules per action or noun only
   when one is needed).
-- **Whether a service's key is certified by the site CA instead of its
-  host's key**, which would make the list of hosts' keys unnecessary. With
-  the owner. Nothing is built on either answer yet.
 - **How a command (U6) is matched against grants.** "As sudo matches" is not
   a design: it makes the broker a second sudo matcher, and gives the service
   a sudo rule as wide as every group grant on its host. Stage 4.

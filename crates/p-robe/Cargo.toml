@@ -26,6 +26,11 @@ p-act = { path = "../p-act", version = "0.0.0" }
 libc = "0.2"
 serde_json = "1"
 base64 = "0.23"
+hyper = { version = "1.11", default-features = false, features = ["server", "http1"] }
+hyper-util = { version = "0.1.20", default-features = false, features = ["tokio"] }
+http-body-util = "0.1.5"
+bytes = "1"
+tokio = { version = "1", features = ["rt-multi-thread", "net", "time", "sync", "macros"] }
 
 [dev-dependencies]
 tempfile = "3"

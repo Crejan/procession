@@ -53,8 +53,8 @@ defines its own.
 | the issuer is the operator at a converge; 90-day certificates, renewed at a converge once fewer than 60 days remain; no always-on issuer | decided (J1) |
 | which groups may use a service: a required `groups` parameter on the binding | decided |
 | an agent's certificate: the person its only principal, groups in the extension `groups@procession` | decided; nothing in the model follows from it but the login grammar of point 1 |
-| a service's key certified by its host's key or by the site CA | open with the owner (J8) |
-| memberships on directory sites | open with the owner (C2) |
+| a service's key certified by its host's key, not by the site CA | decided by the owner on 2026-11-18 (J8). Where the text below still calls it open, it is not |
+| memberships on a directory site come from the directory, through the sync job beside the broker | decided by the owner on 2026-11-18 (C2). Where the text below still calls it open, it is not |
 | whether the first sandboxes separate model and signer | open with the owner; not a model question, see the end of [Open](#open-for-the-owner) |
 
 ## 1. A person's approval keys
