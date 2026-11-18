@@ -167,10 +167,12 @@ fn serve_speaks_mcp_on_its_socket_and_stdio_is_a_shim_to_it() {
 
     // Directly on the socket.
     let mut s = UnixStream::connect(&socket).unwrap();
-    s.set_read_timeout(Some(Duration::from_secs(20))).unwrap();
+    // The timeout only matters while the server keeps the connection; if the peer is gone, `set_read_timeout` fails
+    // (EINVAL on macOS) and the read that follows shows it.
+    let _ = s.set_read_timeout(Some(Duration::from_secs(20)));
     let mut r = BufReader::new(s.try_clone().unwrap());
     let mut ask = |v: Value| {
-        writeln!(s, "{v}").unwrap();
+        let _ = writeln!(s, "{v}"); // a closed server shows in the read below
         let mut line = String::new();
         r.read_line(&mut line).unwrap();
         serde_json::from_str::<Value>(&line).unwrap()
@@ -187,7 +189,7 @@ fn serve_speaks_mcp_on_its_socket_and_stdio_is_a_shim_to_it() {
         .stderr(Stdio::null())
         .spawn()
         .unwrap();
-    writeln!(shim.stdin.as_mut().unwrap(), "{}", json!({"jsonrpc": "2.0", "id": 3, "method": "ping"})).unwrap();
+    let _ = writeln!(shim.stdin.as_mut().unwrap(), "{}", json!({"jsonrpc": "2.0", "id": 3, "method": "ping"}));
     let mut line = String::new();
     BufReader::new(shim.stdout.as_mut().unwrap()).read_line(&mut line).unwrap();
     assert_eq!(serde_json::from_str::<Value>(&line).unwrap()["result"], json!({}));
@@ -361,14 +363,16 @@ fn serve_admits_the_running_user_only_and_says_so_and_drops_other_clients_in_sil
     };
     let ping = |socket: &Path| -> String {
         let mut s = UnixStream::connect(socket).unwrap();
-        s.set_read_timeout(Some(Duration::from_secs(20))).unwrap();
+        // A server that drops this client has closed its end: setting the timeout may fail (EINVAL on macOS), and
+        // the read below shows the drop, which is what the test is about.
+        let _ = s.set_read_timeout(Some(Duration::from_secs(20)));
         let _ = writeln!(s, "{}", json!({"jsonrpc": "2.0", "id": 1, "method": "ping"}));
         let mut line = String::new();
         let _ = BufReader::new(s).read_line(&mut line);
         line
     };
     let finish = |mut server: Child| {
-        server.kill().unwrap();
+        let _ = server.kill(); // it may have ended already
         let mut stderr = String::new();
         server.stderr.take().unwrap().read_to_string(&mut stderr).unwrap();
         server.wait().unwrap();
