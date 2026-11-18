@@ -253,3 +253,11 @@ The SPEC section "What `page load` reads", against what the broker reads today:
 My own tests are built on it (the world in `tests/common`, `tests/tls.rs`), so it is exercised. What p-ledge's `Site2::new` does by hand is `SiteBuilder` + `BrokerSetup` + `TestPki`; the lab's key material (certificates, the broker key) stays theirs.
 
 **3. TLS 1.3 is in code.** `tls.rs`: `.with_protocol_versions(&[&rustls::version::TLS13])` in both `server_config` and `client_config`, not the absence of rustls's `tls12` feature. Test `a_tls_1_2_client_is_refused_whatever_features_the_build_has`: p-age's dev-dependency switches `tls12` on, a client offering only TLS 1.2 is refused by the broker's acceptor, and a client that offers 1.3 gets TLS 1.3.
+
+## Proposal: certificates as a separate input (before building)
+
+Two configuration members, both paths, read with the rest of the configuration (unknown members still refused):
+- `"site_ca": "/etc/page/site-ca.pub"`: the site CA's public key, one `.pub` line (the key the standing's readers verify against; it is used here for `p_act::sign::verify_approval_certificate`).
+- `"certificates": "/var/lib/page/certificates"`: a directory; every `*.pub` file in it holds one approval-key certificate line (the name of the file is free; the person, the purpose and the key are read from the certificate).
+
+Each is checked when loaded: shape, name (`<person>:confirmed` or `:automatic`), no critical option, signature and issuer = `site_ca`, validity now, **and** that the certificate certifies the key the site file has for that person and purpose (`keys.confirmed`/`keys.automatic`). One that fails is not carried and is reported (a line on standard error naming the file and the reason; counted in `page status`). Loaded at start and read again once a minute by the sweep when the directory changed or a carried certificate has ended; a connected pledge is sent a new standing when its person's set changed. The per-person `certificates` member of the site file goes (refused as unknown).
