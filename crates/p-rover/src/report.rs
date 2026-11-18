@@ -2,10 +2,11 @@
 
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use p_roc::change::Change;
 use p_roc::Unreadable;
+use p_roc::change::Change;
 use serde::Serialize;
 use serde_json::Value;
+use serde_json::value::RawValue;
 
 use crate::env::Env;
 
@@ -119,8 +120,11 @@ pub struct Report {
     pub cost: Cost,
     /// Every source the run could not read.
     pub unreadable: Vec<Unreadable>,
-    /// Flat typed records, one per observed object.
-    pub records: Vec<Value>,
+    /// Flat typed records, one per observed object; written with their fields in struct order.
+    pub records: Vec<Box<RawValue>>,
+    /// The same records as values, for callers and tests that inspect them (not serialized).
+    #[serde(skip)]
+    pub values: Vec<Value>,
     /// What a probe restored; empty for observe.
     pub restored: Vec<Value>,
     /// The findings.
@@ -140,6 +144,7 @@ impl Report {
             cost,
             unreadable: Vec::new(),
             records: Vec::new(),
+            values: Vec::new(),
             restored: Vec::new(),
             findings: Vec::new(),
         }
@@ -147,12 +152,19 @@ impl Report {
 
     /// Appends a record (an enum tagged with `type`).
     pub fn push(&mut self, record: &impl Serialize) {
-        self.records.push(serde_json::to_value(record).unwrap_or(Value::Null));
+        let raw = serde_json::to_string(record).ok().and_then(|s| RawValue::from_string(s).ok());
+        let raw = raw.unwrap_or_else(|| RawValue::NULL.to_owned());
+        self.values.push(serde_json::from_str(raw.get()).unwrap_or(Value::Null));
+        self.records.push(raw);
     }
 
     /// Appends the unreadable sources of a scan.
     pub fn unreadable(&mut self, more: impl IntoIterator<Item = Unreadable>) {
-        self.unreadable.extend(more);
+        for u in more {
+            if !self.unreadable.contains(&u) {
+                self.unreadable.push(u);
+            }
+        }
     }
 
     /// The process exit code the findings call for: 0 nothing above info, 1 warnings, 2 critical.
@@ -170,6 +182,12 @@ impl Report {
 #[must_use]
 pub fn round1(x: f64) -> f64 {
     (x * 10.0).round() / 10.0
+}
+
+/// Rounds to two decimals, for small rates.
+#[must_use]
+pub fn round2(x: f64) -> f64 {
+    (x * 100.0).round() / 100.0
 }
 
 /// `2026-11-18T09:30:00Z` from a system time (seconds, UTC).

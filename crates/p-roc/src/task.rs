@@ -510,3 +510,87 @@ mod tests {
         assert_eq!(irq_thread("kworker/0:1"), None);
     }
 }
+
+/// The argument vector of a process (`/proc/<pid>/cmdline`); `None` for a
+/// kernel thread, an empty command line or an unreadable one.
+#[must_use]
+pub fn cmdline(root: &Root, pid: i32) -> Option<Vec<String>> {
+    let raw = std::fs::read(root.proc.join(pid.to_string()).join("cmdline")).ok()?;
+    let args: Vec<String> =
+        raw.split(|b| *b == 0).filter(|a| !a.is_empty()).map(|a| String::from_utf8_lossy(a).into_owned()).collect();
+    (!args.is_empty()).then_some(args)
+}
+
+/// Every thread of one process, with `stat` and `status`.
+///
+/// # Errors
+/// When the process does not exist or its `task` directory cannot be read.
+pub fn process_tasks(root: &Root, tgid: i32) -> Result<Scan<Task>, Error> {
+    let mut out = Scan::default();
+    for tid in numeric_entries(&root.proc.join(tgid.to_string()).join("task"))? {
+        match read_task(root, tgid, tid, &|_: &Stat| true) {
+            Ok(Some(t)) => out.items.push(t),
+            Ok(None) => {}
+            Err(e) if e.is_gone() => {}
+            Err(e) => out.unreadable.push(Unreadable::new(format!("{tgid}/{tid}"), &e)),
+        }
+    }
+    Ok(out)
+}
+
+/// Memory of a process from `/proc/<pid>/status`, in kB.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Vm {
+    /// `VmRSS`.
+    pub rss_kb: u64,
+    /// `VmLck`.
+    pub locked_kb: u64,
+}
+
+/// Parses `VmRSS` and `VmLck`; `None` for a kernel thread, which has neither.
+#[must_use]
+pub fn parse_vm(s: &str) -> Option<Vm> {
+    let kb = |key: &str| -> Option<u64> {
+        s.lines().find_map(|l| l.strip_prefix(key)?.strip_prefix(':')?.split_whitespace().next()?.parse().ok())
+    };
+    Some(Vm { rss_kb: kb("VmRSS")?, locked_kb: kb("VmLck").unwrap_or(0) })
+}
+
+/// The system call a thread is blocked in, from `/proc/<pid>/task/<tid>/syscall`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Syscall {
+    /// The syscall number (architecture specific).
+    pub nr: i64,
+    /// The six arguments.
+    pub args: [u64; 6],
+}
+
+/// Parses the `syscall` file: `running` and `-1 sp pc` mean not in a syscall.
+#[must_use]
+pub fn parse_syscall(s: &str) -> Option<Syscall> {
+    let mut f = s.split_whitespace();
+    let nr: i64 = f.next()?.parse().ok()?;
+    if nr < 0 {
+        return None;
+    }
+    let mut args = [0u64; 6];
+    for a in &mut args {
+        *a = u64::from_str_radix(f.next()?.trim_start_matches("0x"), 16).ok()?;
+    }
+    Some(Syscall { nr, args })
+}
+
+#[cfg(test)]
+mod more_tests {
+    use super::*;
+
+    #[test]
+    fn vm_and_syscall() {
+        assert_eq!(parse_vm("VmRSS:\t  2048 kB\nVmLck:\t   512 kB\n"), Some(Vm { rss_kb: 2048, locked_kb: 512 }));
+        assert_eq!(parse_vm("Name:\tkthreadd\n"), None);
+        let s = parse_syscall("230 0x0 0x0 0x7ffd 0x0 0x0 0x0 0x7ffc 0x7f00\n").unwrap();
+        assert_eq!((s.nr, s.args[0], s.args[2]), (230, 0, 0x7ffd));
+        assert_eq!(parse_syscall("running"), None);
+        assert_eq!(parse_syscall("-1 0x7ffc 0x7f00"), None);
+    }
+}

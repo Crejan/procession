@@ -1,0 +1,18 @@
+{
+  "schema_version": 1,
+  "subcommand": "serial",
+  "host": "testhost",
+  "started_at": "2026-11-06T21:20:00Z",
+  "mode": "observe",
+  "cost": "light",
+  "unreadable": [],
+  "records": [
+    {"type":"cmdline","console":["ttyS0,115200"]},
+    {"type":"active_console","ttys":["ttyS0"]},
+    {"type":"port","tty_s":0,"uart":"16550A","port":"000003F8","irq":4,"tx":12,"rx":3456,"modem_lines":["RTS","CTS","DTR","DSR","CD"],"errors":{"oe":2}},
+    {"type":"sysfs","tty":"ttyS0","pci":"0000:00:16.3","port":"0x3F8","irq":"4","kind":"4"},
+    {"type":"getty","pid":40,"tty":"ttyS0","cmdline":"/sbin/agetty --keep-baud 115200 ttyS0 vt220"}
+  ],
+  "restored": [],
+  "findings": []
+}

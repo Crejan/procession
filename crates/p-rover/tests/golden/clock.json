@@ -1,0 +1,40 @@
+{
+  "schema_version": 1,
+  "subcommand": "clock",
+  "host": "testhost",
+  "started_at": "2026-11-06T21:20:00Z",
+  "mode": "observe",
+  "cost": "light",
+  "unreadable": [],
+  "records": [
+    {"type":"chrony_tracking","fields":{"leap_status":"Normal","reference_id":"0A000001 (ntp.lab)","stratum":"3","system_time":"0.000001234 seconds fast of NTP time"}},
+    {"type":"chrony_source","state":"^*","source":"10.0.0.1","stratum":"2","poll":"6","reach":"377","last_rx":"33","offset":"+12us[ +15us] +/- 1100us"},
+    {"type":"chrony_source","state":"^-","source":"10.0.0.2","stratum":"3","poll":"6","reach":"377","last_rx":"35","offset":"-80us[ -80us] +/- 10ms"},
+    {"type":"service","name":"chronyd","disciplines_realtime":true,"pids":[30],"cmdlines":["/usr/sbin/chronyd -F 1"]},
+    {"type":"service","name":"phc2sys","disciplines_realtime":true,"pids":[31],"cmdlines":["/usr/sbin/phc2sys -s /dev/ptp0 -w"]},
+    {"type":"service","name":"ptp4l","disciplines_realtime":false,"pids":[32],"cmdlines":["/usr/sbin/ptp4l -i lan0"]},
+    {"type":"ptp_clock","name":"ptp0","device":true,"clock_name":"igb"},
+    {"type":"summary","disciplining":["chronyd","phc2sys"],"conflict":true}
+  ],
+  "restored": [],
+  "findings": [
+    {
+      "id": "two-clock-masters",
+      "severity": "warn",
+      "subject": {
+        "kind": "host"
+      },
+      "evidence": [
+        {
+          "name": "disciplining",
+          "value": [
+            "chronyd",
+            "phc2sys"
+          ]
+        }
+      ],
+      "recommendation": "two services steer CLOCK_REALTIME at once and fight each other; one of them must be the only writer",
+      "changes": []
+    }
+  ]
+}

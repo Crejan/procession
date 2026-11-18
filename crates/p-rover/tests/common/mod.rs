@@ -5,8 +5,8 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use p_rover::{Config, Env, FakeClock, Report};
 use p_roc::Root;
+use p_rover::{Config, Env, FakeClock, Report};
 use tempfile::TempDir;
 
 pub fn fixtures() -> PathBuf {
@@ -18,7 +18,10 @@ fn copy_dir(from: &Path, to: &Path) {
     for e in fs::read_dir(from).unwrap() {
         let e = e.unwrap();
         let dest = to.join(e.file_name());
-        if e.file_type().unwrap().is_dir() {
+        let kind = e.file_type().unwrap();
+        if kind.is_symlink() {
+            std::os::unix::fs::symlink(fs::read_link(e.path()).unwrap(), dest).unwrap();
+        } else if kind.is_dir() {
             copy_dir(&e.path(), &dest);
         } else {
             fs::copy(e.path(), dest).unwrap();
@@ -53,6 +56,9 @@ impl Host {
             config,
             host: "testhost".into(),
             clock: Box::new(FakeClock::new(1_794_000_000, on_pause)),
+            ethtool: Box::new(p_rover::ethtool::Fixed::default()),
+            runner: Box::new(p_rover::runner::Scripted::default()),
+            arch: "x86_64",
         }
     }
 }
@@ -67,6 +73,7 @@ pub fn golden(name: &str, report: &Report) {
         fs::write(&path, &got).unwrap();
         return;
     }
-    let want = fs::read_to_string(&path).unwrap_or_else(|_| panic!("missing golden {}; run with UPDATE_GOLDEN=1", path.display()));
+    let want = fs::read_to_string(&path)
+        .unwrap_or_else(|_| panic!("missing golden {}; run with UPDATE_GOLDEN=1", path.display()));
     assert_eq!(got, want, "golden {name} differs; rerun with UPDATE_GOLDEN=1 to accept");
 }

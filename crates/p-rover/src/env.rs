@@ -8,6 +8,9 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use p_roc::Root;
 
 use crate::config::Config;
+use crate::ethtool::Ethtool;
+use crate::ethtool_cli::EthtoolCli;
+use crate::runner::{Runner, SystemRunner};
 
 /// Time, and waiting for it to pass. A fake lets a test change the fixture
 /// tree between two samples.
@@ -73,6 +76,12 @@ pub struct Env {
     pub host: String,
     /// Time.
     pub clock: Box<dyn Clock>,
+    /// Driver settings and counters that only `ethtool` knows.
+    pub ethtool: Box<dyn Ethtool>,
+    /// External tools (`chronyc`, `journalctl`).
+    pub runner: Box<dyn Runner>,
+    /// The architecture whose syscall numbers `/proc/<pid>/task/<tid>/syscall` shows.
+    pub arch: &'static str,
 }
 
 impl Env {
@@ -86,6 +95,9 @@ impl Env {
             config,
             host: hostname(),
             clock: Box::new(SystemClock),
+            ethtool: Box::new(EthtoolCli::new(Box::new(SystemRunner))),
+            runner: Box::new(SystemRunner),
+            arch: std::env::consts::ARCH,
         }
     }
 }

@@ -67,7 +67,8 @@ impl Isolation {
             })
         };
         let cmdline = Cmdline::read(root);
-        let from_cmd = |key: &str| cmdline.as_ref().map_err(|e| Error::parse("cmdline", e)).and_then(|c| c.cpu_list(key));
+        let from_cmd =
+            |key: &str| cmdline.as_ref().map_err(|e| Error::parse("cmdline", e)).and_then(|c| c.cpu_list(key));
         let sysfs_isolated = keep("sys/devices/system/cpu/isolated", sysfs_isolated(root));
         let nohz_sys = cpu_list(root, "nohz_full");
         let nohz_full = match nohz_sys {

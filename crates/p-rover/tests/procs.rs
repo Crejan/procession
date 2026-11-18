@@ -17,9 +17,9 @@ fn procs_lists_rt_and_isolated_and_flags_housekeeping() {
 fn procs_caps_records_and_says_so() {
     let host = Host::new("host1");
     let report = procs::run(&host.env(|_| {}), &Args { max: 2 }).unwrap();
-    assert_eq!(report.records.len(), 3);
-    assert_eq!(report.records[2]["shown"], 2);
-    assert_eq!(report.records[2]["truncated"], true);
+    assert_eq!(report.values.len(), 3);
+    assert_eq!(report.values[2]["shown"], 2);
+    assert_eq!(report.values[2]["truncated"], true);
 }
 
 #[test]

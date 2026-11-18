@@ -1,9 +1,14 @@
 //! The observe subcommands: each reads, none changes anything.
 
+pub mod clock;
 pub mod cmdline;
+pub mod hung;
 pub mod irq;
+pub mod lastboot;
+pub mod nic;
 pub mod procs;
 pub mod sched;
+pub mod serial;
 
 use p_roc::cpus::{self, Isolation};
 use p_roc::{CpuSet, Unreadable};
@@ -56,7 +61,8 @@ pub fn finish(env: &Env, report: &mut Report) {
             severity: Severity::Warn,
             subject: Subject::Host,
             evidence: vec![Metric::new("ledgers", &stale), Metric::new("ledger_dir", dir.display().to_string())],
-            recommendation: "a probe left knobs changed; run `prover probe status`, then `prover probe restore --all`".into(),
+            recommendation: "a probe left knobs changed; run `prover probe status`, then `prover probe restore --all`"
+                .into(),
             changes: Vec::new(),
         });
     }

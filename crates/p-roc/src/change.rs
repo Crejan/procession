@@ -70,7 +70,9 @@ impl Change {
             Self::SetPolicy { tid, from, to } => Self::SetPolicy { tid, from: to, to: from },
             Self::SetNice { tid, from, to } => Self::SetNice { tid, from: to, to: from },
             Self::SetIrqAffinity { irq, from, to } => Self::SetIrqAffinity { irq, from: to, to: from },
-            Self::SetIrqThreadPriority { irq, tid, from, to } => Self::SetIrqThreadPriority { irq, tid, from: to, to: from },
+            Self::SetIrqThreadPriority { irq, tid, from, to } => {
+                Self::SetIrqThreadPriority { irq, tid, from: to, to: from }
+            }
         }
     }
 }

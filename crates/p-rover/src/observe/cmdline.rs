@@ -85,7 +85,8 @@ pub fn replay_grub(etc: &std::path::Path) -> Declared {
     let shown = |f: &std::path::Path| PathBuf::from("/etc").join(f.strip_prefix(etc).unwrap_or(f));
     let mut files = vec![etc.join("default/grub")];
     if let Ok(rd) = std::fs::read_dir(etc.join("default/grub.d")) {
-        let mut cfg: Vec<PathBuf> = rd.filter_map(Result::ok).map(|e| e.path()).filter(|p| p.extension().is_some_and(|x| x == "cfg")).collect();
+        let mut cfg: Vec<PathBuf> =
+            rd.filter_map(Result::ok).map(|e| e.path()).filter(|p| p.extension().is_some_and(|x| x == "cfg")).collect();
         cfg.sort();
         files.extend(cfg);
     }
@@ -105,15 +106,26 @@ pub fn replay_grub(etc: &std::path::Path) -> Declared {
             assignments.push(Assignment { file: shown(&f).display().to_string(), key: key.to_string(), value });
         }
     }
-    let cmdline = (!assignments.is_empty()).then(|| Cmdline::parse(&format!("{} {}", vars["GRUB_CMDLINE_LINUX"], vars["GRUB_CMDLINE_LINUX_DEFAULT"])));
-    Declared { source: if cmdline.is_some() { Source::Grub } else { Source::None }, files: read_files, assignments, cmdline }
+    let cmdline = (!assignments.is_empty())
+        .then(|| Cmdline::parse(&format!("{} {}", vars["GRUB_CMDLINE_LINUX"], vars["GRUB_CMDLINE_LINUX_DEFAULT"])));
+    Declared {
+        source: if cmdline.is_some() { Source::Grub } else { Source::None },
+        files: read_files,
+        assignments,
+        cmdline,
+    }
 }
 
 /// The declared command line: the config's `declared_cmdline`, else the bootloader replay.
 #[must_use]
 pub fn declared(env: &Env) -> Declared {
     match &env.config.declared_cmdline {
-        Some(c) => Declared { source: Source::Config, files: Vec::new(), assignments: Vec::new(), cmdline: Some(Cmdline::parse(c)) },
+        Some(c) => Declared {
+            source: Source::Config,
+            files: Vec::new(),
+            assignments: Vec::new(),
+            cmdline: Some(Cmdline::parse(c)),
+        },
         None => replay_grub(&env.etc),
     }
 }
@@ -131,15 +143,26 @@ fn ignored(token: &str) -> bool {
 }
 
 fn rt_map(c: &Cmdline) -> Map<String, Value> {
-    c.rt_keys().into_iter().map(|(k, v)| (k.to_string(), v.map_or(Value::Bool(true), |v| Value::String(v.into())))).collect()
+    c.rt_keys()
+        .into_iter()
+        .map(|(k, v)| (k.to_string(), v.map_or(Value::Bool(true), |v| Value::String(v.into()))))
+        .collect()
 }
 
 #[derive(Serialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 enum Record {
     GrubAssignment(Assignment),
-    Live { cmdline: String, rt: Map<String, Value> },
-    Declared { source: Source, files: Vec<String>, cmdline: Option<String>, rt: Map<String, Value> },
+    Live {
+        cmdline: String,
+        rt: Map<String, Value>,
+    },
+    Declared {
+        source: Source,
+        files: Vec<String>,
+        cmdline: Option<String>,
+        rt: Map<String, Value>,
+    },
     Diff {
         declared_not_live: Vec<String>,
         live_not_declared: Vec<String>,
@@ -148,8 +171,14 @@ enum Record {
         isolated_live: CpuSet,
         isolated_declared: Option<CpuSet>,
     },
-    Kernel { release: Option<String>, version: Option<String>, preempt_rt: bool },
-    Sysctl { values: BTreeMap<String, Option<String>> },
+    Kernel {
+        release: Option<String>,
+        version: Option<String>,
+        preempt_rt: bool,
+    },
+    Sysctl {
+        values: BTreeMap<String, Option<String>>,
+    },
 }
 
 /// Runs `cmdline`.
@@ -182,7 +211,12 @@ pub fn run(env: &Env) -> Result<Report, Error> {
         missing = want.tokens().iter().filter(|t| !ignored(t) && !has(&live, t)).cloned().collect();
         extra = live.tokens().iter().filter(|t| !ignored(t) && !has(want, t)).cloned().collect();
         let live_rt: BTreeMap<_, _> = live.rt_keys().into_iter().collect();
-        differs = want.rt_keys().into_iter().filter(|(k, v)| live_rt.get(k).is_some_and(|lv| lv != v)).map(|(k, _)| k.to_string()).collect();
+        differs = want
+            .rt_keys()
+            .into_iter()
+            .filter(|(k, v)| live_rt.get(k).is_some_and(|lv| lv != v))
+            .map(|(k, _)| k.to_string())
+            .collect();
         match declared_isolation(want) {
             Ok(s) => declared_iso = Some(s),
             Err(e) => report.unreadable([Unreadable::new("declared cmdline: isolation", &e)]),
@@ -213,7 +247,8 @@ pub fn run(env: &Env) -> Result<Report, Error> {
             severity: Severity::Warn,
             subject: Subject::Host,
             evidence: vec![Metric::new("live_isolated", &cpus.isolated), Metric::new("declared_isolated", &d)],
-            recommendation: "the live isolated set differs from the declared one; probes refuse until they agree".into(),
+            recommendation: "the live isolated set differs from the declared one; probes refuse until they agree"
+                .into(),
             changes: Vec::new(),
         });
     }
@@ -226,7 +261,9 @@ pub fn run(env: &Env) -> Result<Report, Error> {
         preempt_rt: realtime || version.as_deref().is_some_and(|v| v.contains("PREEMPT_RT")),
         version,
     });
-    report.push(&Record::Sysctl { values: SYSCTLS.iter().map(|n| ((*n).replace('/', "."), read(&format!("sys/{n}")))).collect() });
+    report.push(&Record::Sysctl {
+        values: SYSCTLS.iter().map(|n| ((*n).replace('/', "."), read(&format!("sys/{n}")))).collect(),
+    });
     finish(env, &mut report);
     Ok(report)
 }
@@ -238,7 +275,10 @@ mod tests {
     #[test]
     fn assignments() {
         assert_eq!(assignment("GRUB_CMDLINE_LINUX=\"a b\""), Some(("GRUB_CMDLINE_LINUX", "a b".into())));
-        assert_eq!(assignment("  GRUB_CMDLINE_LINUX_DEFAULT = 'quiet'"), Some(("GRUB_CMDLINE_LINUX_DEFAULT", "quiet".into())));
+        assert_eq!(
+            assignment("  GRUB_CMDLINE_LINUX_DEFAULT = 'quiet'"),
+            Some(("GRUB_CMDLINE_LINUX_DEFAULT", "quiet".into()))
+        );
         assert_eq!(assignment("GRUB_CMDLINE_LINUX=quiet"), Some(("GRUB_CMDLINE_LINUX", "quiet".into())));
         assert_eq!(assignment("# GRUB_CMDLINE_LINUX=\"x\""), None);
         assert_eq!(assignment("GRUB_CMDLINE_LINUXX=\"x\""), None);
