@@ -77,7 +77,13 @@ preserve-gui ─────┼──> p-reserve.sock ──> preserve serve
   each has an identifier, goes on when the connection that started it closes, is
   cancelled only by an explicit message naming it, and a front end that connects
   later lists the running jobs and attaches to their events. The protocol is
-  `proposals/socket-protocol.md` (a proposal, for the designer).
+  `proposals/socket-protocol.md` (accepted by the designer as the protocol to
+  build on). Only the daemon's own uid is served. One thing about a job is
+  persisted: a start marker, written before a writing job begins and removed
+  with the ledger entry; a marker left behind becomes, at the next start, a
+  `failed` entry with the cause `interrupted` (`p_reserve_core::marker`).
+  `cancelled` means no snapshot was written and never touches the ledger; a
+  stored snapshot always does.
 - **The core decides, once.** What a run's outcome is called, which freshness
   band a source is in, which pair last succeeded: one function each, in
   `p-reserve-core`. A front end that needs words for a band maps the band,
@@ -129,20 +135,89 @@ Implemented, with tests:
   umask), read back strictly: a malformed file is an error and never an empty
   ledger (which would read as stale everywhere); a missing file is the first
   run.
+- **`marker`**: the start marker of a writing job (see "Architecture", jobs).
+  The ledger also records when the last run of any outcome was recorded
+  (`backup_last_attempt_timestamp_seconds`) and an optional cause (`interrupted`,
+  a label of `backup_last_outcome`).
 - **`health`**: the level of every declared pair, from one rule (below).
 
 ### Health
 
-`preserve health` reads the ledger file, needs no daemon, and exits with the
-worst level: 0 ok, 1 warnings, 2 critical; 3 the ledger or configuration could
-not be read; 4 a usage error. Per pair, the level is the loudest of: the
+`preserve health` reads the ledger file and the configuration, needs no
+daemon, and its exit code is for a monitor:
+
+| Code | Meaning |
+|---|---|
+| 0 | ok: every pair is fresh and its last run was clean |
+| 1 | warning: some pair is overdue, its last run was `incomplete` or failed, or its last snapshot could not read some files |
+| 2 | critical: some pair is stale, or declared and never seen |
+| 3 | unknown: the ledger or the configuration could not be read or understood; nothing is said about the pairs |
+| 4 | usage error |
+
+No code has two meanings. Per pair, the level is the loudest of: the
 freshness band (`overdue` warning, `stale` critical); the last outcome
 (`incomplete` and every failure are warnings, `ok` and `deferred` are not);
 files the last successful snapshot could not read (any: warning). So an
 `incomplete` snapshot counts for freshness and is never shown as `ok`; a
-failure keeps the pair a warning until its age makes it critical; repeating a
-failure raises nothing. A declared pair the ledger has not seen is critical.
-Without declared pairs, every pair in the ledger is reported.
+failure keeps the pair a warning until its age makes it critical, and
+repeating a failure raises nothing. **Only a success moves freshness.** A pair
+that never succeeded is pending for its grace period, counted from its first
+attempt, and critical after it, however many attempts, failed or deferred, come
+later and however recent the last one is; it is never fresh and never "up to
+date". A declared pair the ledger has not seen is critical. Without declared
+pairs, every pair in the ledger is reported.
+
+Limits: `fresh_within` 26 hours, `stale_after` 72 hours, `first_run_grace` one
+hour. They are provisional and **assume a daily schedule**; the file's
+`[freshness]` changes them for every pair, and a `[[pair]]` sets its own (a
+weekly pair is not judged by a daily one).
+
+The configuration (`/etc/p-reserve.toml`, TOML because a person writes it) is
+read as strictly as the JSON settings files: a regular file, owned by root or
+the running user (`p_act::settings::check_owner_and_mode`, not a copy), no group
+or other write bit, an unknown key refused, a key given twice refused, at most
+1 MiB, and no error text carries a value from the file. A repository password is
+never in it: a path to a 0600 file, or the key store.
+
+The ledger file (mode 0644, whatever the umask, readable by the metrics
+exporter) holds what a local user may read: source and target names, outcomes,
+times, byte and file counts. A configured name of a source or a target is a plain
+word, `[a-z0-9][a-z0-9._-]{0,63}`: no slash, no upper case, not `.` or `..`. That
+is what goes into the ledger, the metrics' labels and the socket's messages; the
+path it stands for stays in the configuration. A configuration with a name outside
+the class is refused at load, with the name (cut, printable) and the rule. It holds no
+repository address, no credential, no path from inside a home directory.
+
+### Reading a repository
+
+The engine is a cargo feature, `engine-rustic` of `p-reserve` (and of
+`p-reserve-core`), off by default: `rustic_core` and `rustic_backend` are about
+500 crates and minutes of build. A build without it still has everything else
+(core, ledger, health, freshness, configuration); `snapshots`, `ls` and
+`restore` then fail with the outcome `not-run` and the words "this build has no
+repository engine", exit 3, and `preserve catalog` does not mark them
+implemented. Test it with `cargo test -p p-reserve --features engine-rustic`.
+
+`preserve snapshots <target>`, `preserve ls <target> <snapshot> [path]` and
+`preserve restore <target> <snapshot> <path> --to <destination>` open the
+repository themselves (no daemon), through `RusticEngine` on `rustic_core`;
+`--format json` carries `schema_version` and one record type per verb
+(`snapshots`, `ls`, `restore`, and `error` with the outcome's name). Nothing
+here writes to a repository. A snapshot is `latest`, an id or a prefix of one.
+A target is a `[[target]]` of the configuration: `name`, `repository` (a local
+path, or `opendal:sftp`, `rest:...`), `password_file`, optional `options`.
+The password is only ever in the file named by `password_file`, which must be a
+regular file owned by root or the running user with no group or other
+permission; it is never an argument, an environment variable or in the
+configuration. A restore never overwrites or deletes: the destination is
+absolute and does not exist (a file) or does not exist or is empty (a
+directory, whose contents are restored into it).
+
+| Code | Meaning (snapshots, ls, restore) |
+|---|---|
+| 0 | done |
+| 3 | failed: the outcome is named (`no-repository`, `wrong-password`, `failed`, or `not-run` for a configuration or password file that was refused) |
+| 4 | usage error |
 
 To come, in the order of "Order of work":
 
@@ -200,6 +275,9 @@ From Atticus:
 
 Where they disagree:
 
+- **A run that began and never ended** is a `failed` ledger entry with the
+  cause `interrupted`, found from the start marker at the next start; it keeps
+  the last success, so the pair ages, and `health` reports it as a warning.
 - **A snapshot with unreadable files.** Atticus counts it as a success
   ("complete with warnings"); fundament counts restic's exit 3 as a failure.
   Decided: it counts for freshness (a snapshot was made), is never shown as
@@ -297,10 +375,10 @@ the owner on 2026-11-18 (`trial/REPORT.md`). The rest was not tried.
 |---|---|---|
 | SFTP | `rustic_backend` reaches SFTP through OpenDAL, which drives the system `ssh` (the `openssh` crate). Unix only; no password login; host keys through a `known_hosts` strategy. | Run: a key file with strict checking works; an agent works with `key` naming the public half (`SSH_AUTH_SOCK` is inherited). Read: OpenDAL's sftp takes only `endpoint`, `root`, `user`, `key`, `known_hosts_strategy`. **A pinned `known_hosts` file cannot be passed**: strict checking fails unless the host key is in the real `~/.ssh/known_hosts` (run, A1/A2); no `-F`, no extra `-o`. Open: open time and memory (the run did not finish), and whether to pin through the real `known_hosts` or write a backend of our own that spawns `ssh -s sftp` (below). |
 | Maturity | `rustic_core` 0.13.0 and `rustic_backend` 0.7.0 (August 2026). rustic's own comparison page lists few tests against restic's coverage. | Its current stability statement; an older README advised against production use. |
-| Toolchain | `rustic_core` and `rustic_backend` state a minimum rustc of 1.91. | Decided: the workspace has one `rust-version` for all crates, raised to what its dependencies need (1.91). |
+| Toolchain | `rustic_core` and `rustic_backend` state a minimum rustc of 1.91. | Decided: the workspace has one `rust-version` for all crates, raised to what its dependencies need (1.91). The dependency closure of `rustic_core` 0.14.0 and `rustic_backend` 0.8.0 (default features, OpenDAL included) builds offline from the unpacked registry; adding it took 4 min 17 s of a debug build on a loaded machine (about 700 crates in all), and a test build of the three p-reserve crates with optimised dependencies about 30 min on the same machine. Debug-build dependencies make the key derivation and the index load about 30 times slower (140 s against 4 s): the workspace wants `[profile.dev.package."*"] opt-level = 2` (requested from the orchestrator). |
 | Fresh snapshot mounts | restic needs `device-id-for-hardlinks`, or every run from a freshly mounted ZFS snapshot rewrites every tree. | Read from the source, not run: rustic's `set_devid` defaults to `hardlink` (the device id only for hardlinks), and its parent match compares size, mtime, ctime and inode, not the device. Run against a real fresh mount. |
 | macOS metadata | - | Extended attributes, ACLs, flags, resource forks, firmlinks, compared with restic. |
-| Index held open | - | Memory of a loaded index for a large repository (the Atticus test repository: about 1.4 million files, 233 index files), and how the daemon learns that another writer changed the repository. |
+| Index held open | Measured once, release build, a tiny local repository, on a machine with a load average of about 145: init and one snapshot 6.3 s, open and load the index 4.3 s (a debug build: 140 s, nearly all in dependencies, see the Toolchain row). Memory not measured. | Memory of a loaded index for a large repository (the Atticus test repository: about 1.4 million files, 233 index files), and how the daemon learns that another writer changed the repository. |
 
 If SFTP through the predecessors' SSH setups does not work, the fallbacks
 are, in order: a backend of our own on `rustic_core`'s backend trait that
@@ -319,6 +397,8 @@ loses the open index.
 3. **Read-only engine**: `snapshots`, `list`, `dump`, `restore` behind
    `Engine`; `preserve snapshots`, `ls`, `restore`. Verified with fundament's
    restore test (SHA-256 against the source snapshot) run through p-reserve.
+   (Built and tested against a local repository made in a temporary directory;
+   not yet against SFTP, a restic-written repository, or with the SHA-256 test.)
 4. **The daemon and the socket**; `ls` answered from an open repository.
    Measure open time and memory.
 5. **Ledger persistence and `preserve health`**; fundament's metrics from
