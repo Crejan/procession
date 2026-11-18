@@ -59,7 +59,7 @@ pub struct Responder {
     /// Writes an answer to the connection.
     pub send: Send,
     /// Information for the record: the peer's user and process.
-    pub peer: Option<(u32, Option<i32>)>,
+    pub peer: Option<crate::peer::Seen>,
 }
 
 struct Inflight {
@@ -165,7 +165,7 @@ struct Facts {
     mode: Option<&'static str>,
     key: Option<(&'static str, String)>,
     clamped: bool,
-    peer: Option<(u32, Option<i32>)>,
+    peer: Option<crate::peer::Seen>,
 }
 
 /// Seconds from `now` that a stored entry is kept: to the call's deadline, but
@@ -236,7 +236,7 @@ pub fn submit(shared: &Shared, submit: &Submit, responder: Responder) {
         );
         cancelled
     };
-    let mut facts = Facts { peer: responder.peer, ..Facts::default() };
+    let mut facts = Facts { peer: responder.peer.clone(), ..Facts::default() };
     let ending = process(shared, submit, &key, &cancelled, &mut facts);
     finish(shared, hash, ending, facts);
 }
@@ -251,7 +251,7 @@ pub fn refuse_malformed(shared: &Shared, hash: DocumentHash, responder: &Respond
         (responder.send)(&answer);
         return;
     }
-    let facts = Facts { peer: responder.peer, ..Facts::default() };
+    let facts = Facts { peer: responder.peer.clone(), ..Facts::default() };
     if let Ok(mut open) = shared.approvals.inflight.lock() {
         open.entry(key).or_insert_with(|| Inflight {
             responders: vec![responder.clone()],
@@ -463,6 +463,16 @@ fn process(shared: &Shared, submit: &Submit, hash: &str, cancelled: &Arc<AtomicI
     }
 }
 
+/// What was read about the connecting process, as the record holds it: `uid` always, `pid` and
+/// `program` when they could be read (the program only if it can be shown as it is).
+fn peer_json(seen: &crate::peer::Seen) -> Value {
+    let mut peer = json!({"uid": seen.uid, "pid": seen.pid});
+    if let Some(program) = seen.program.as_deref().filter(|p| is_clean(p)) {
+        peer["program"] = program.into();
+    }
+    peer
+}
+
 fn received_entry(hash: &str, facts: &Facts) -> Value {
     let mut entry = Map::new();
     entry.insert("type".into(), "received".into());
@@ -475,6 +485,7 @@ fn received_entry(hash: &str, facts: &Facts) -> Value {
         ("deadline", facts.deadline.map(|d| Value::from(d.to_string()))),
         ("rating", facts.rating.map(|r| json!(RatingWords::of(r)))),
         ("mode", facts.mode.map(Value::from)),
+        ("peer", facts.peer.as_ref().map(peer_json)),
     ] {
         if let Some(value) = value {
             entry.insert(name.into(), value);
@@ -530,7 +541,7 @@ fn entry(hash: &str, ending: &Ending, facts: &Facts) -> Value {
     if facts.clamped {
         put("automatic_ceiling_clamped", Some(true.into()));
     }
-    put("peer", facts.peer.map(|(uid, pid)| json!({"uid": uid, "pid": pid})));
+    put("peer", facts.peer.as_ref().map(peer_json));
     Value::Object(entry)
 }
 

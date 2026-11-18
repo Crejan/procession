@@ -270,6 +270,11 @@ fn programs_verb(mut args: Vec<String>) -> Done {
     }
 }
 
+/// The uid of the connecting account of `service.sock`, as the record holds it.
+fn peer_uid(entry: &Value) -> Option<String> {
+    entry["peer"]["uid"].as_u64().map(|uid| uid.to_string())
+}
+
 /// One line of `pledge history` for an entry.
 #[must_use]
 pub fn history_line(entry: &Value) -> String {
@@ -298,11 +303,13 @@ pub fn history_line(entry: &Value) -> String {
             add("agent=", text("delegation"));
             add("call=", text("call"));
             add("action=", text("action"));
+            add("peer-uid=", peer_uid(entry));
         }
         Some("request") => {
             add("", text("result"));
             add("(", text("reason").map(|r| format!("{r})")));
             add("mode=", text("mode"));
+            add("peer-uid=", peer_uid(entry));
             add("person=", text("person"));
             add("agent=", text("delegation"));
             add("call=", text("call"));

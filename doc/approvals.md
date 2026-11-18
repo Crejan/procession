@@ -297,9 +297,14 @@ request in front of a person that is not from that person's agent.
 
 **Signatures.** SSHSIG, one namespace per use (call, request, approval,
 clearance, connection), verified with `ssh-keygen -Y verify`. A service
-needs no library. An agent's call is the one signature not made by
-`ssh-keygen`: the signer in the sandbox writes it itself, so that the key is
-never a file there, and is tested against `ssh-keygen` byte for byte.
+needs no library. Every signature is verified with `ssh-keygen -Y verify`;
+not every one is made by `ssh-keygen`. An agent's call, and everything pledge
+signs, are produced without it: the signer in the sandbox must never have
+its key as a file, and a person's keys are in key hardware, where
+`ssh-keygen` cannot reach them. All of these are written by one writer of
+the form, in `p-act`, which is handed the signer; it is tested against
+`ssh-keygen` byte for byte where the algorithm allows and by verification
+where it does not.
 
 **A person's keys**, made in the machine's key hardware. pledge prints their
 public parts as one block; an administrator enters it in the site project.

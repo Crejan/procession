@@ -57,6 +57,35 @@ pub fn write_private(path: &Path, bytes: &[u8]) {
     fs::set_permissions(path, fs::Permissions::from_mode(0o600)).unwrap();
 }
 
+/// Prints, for every entry of pledge's record that answers or holds a request that reached it on `service.sock`,
+/// the peer pledge read (user, process, program), and **asserts** that the peer is there and that its user is
+/// the one this test runs as: that pledge read the peer of `service.sock` on this system. A `lost` entry was
+/// written at a start, not by a connection, and has none.
+pub fn check_peers(history: &[Value]) {
+    // SAFETY: `geteuid` has no preconditions.
+    let uid = u64::from(unsafe { libc::geteuid() });
+    let mut seen = 0;
+    for entry in history.iter().filter(|e| (e["type"] == "received" || e["type"] == "request") && e["result"] != "lost")
+    {
+        let what = format!("{} {} call={}", entry["type"], entry["result"], entry["call"]);
+        let peer = &entry["peer"];
+        assert!(peer["uid"].is_u64(), "pledge's record has no peer for: {what}\n{entry}");
+        assert_eq!(
+            peer["uid"].as_u64(),
+            Some(uid),
+            "the peer's user is not the one this test runs as: {what}\n{entry}"
+        );
+        eprintln!(
+            "peer: {what} uid={} pid={} program={}",
+            peer["uid"],
+            peer["pid"],
+            peer["program"].as_str().unwrap_or("(not readable)")
+        );
+        seen += 1;
+    }
+    assert!(seen > 0, "no entry of pledge's record reached it on service.sock");
+}
+
 pub fn keygen(args: &[&str]) {
     let out = Command::new("ssh-keygen").args(args).stdin(Stdio::null()).output().expect("ssh-keygen");
     assert!(

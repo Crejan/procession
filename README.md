@@ -34,7 +34,7 @@ not published (`publish = false`).
 
 ## Conventions
 
-- License MIT OR Apache-2.0; edition 2024; MSRV 1.85; published on
+- License MIT OR Apache-2.0; edition 2024; MSRV 1.91; published on
   crates.io, so `cargo install p-usher` etc. needs nothing but cargo.
 - Linux at runtime; p-lumber also on macOS. Readers take a root (`/proc`,
   `/sys`) so tests run against fixture trees on any OS.

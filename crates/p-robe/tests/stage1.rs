@@ -389,6 +389,7 @@ fn the_real_parts_against_each_other() {
             .any(|e| e["type"] == "request" && e["result"] == "approved" && &e["request_hash"] == hash),
         "the same bytes were asked about again after the restart"
     );
+    check_peers(&history);
     let events: Vec<(String, String)> = history
         .iter()
         .filter_map(|e| e["event"].as_str().map(|ev| (ev.to_owned(), e["by"].as_str().unwrap_or("").to_owned())))

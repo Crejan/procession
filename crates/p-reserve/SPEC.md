@@ -244,7 +244,7 @@ Checked against documentation only, in November 2026; none of it tried.
 |---|---|---|
 | SFTP | `rustic_backend` reaches SFTP through OpenDAL, which drives the system `ssh` (the `openssh` crate). Unix only; no password login; host keys through a `known_hosts` strategy. | Whether an agent socket (`SSH_AUTH_SOCK`), a specific key file, a pinned `known_hosts` file and extra `ssh` options can be passed the way both predecessors pass them through `sftp.command`. This decides whether rustic can be the engine. |
 | Maturity | `rustic_core` 0.13.0 and `rustic_backend` 0.7.0 (August 2026). rustic's own comparison page lists few tests against restic's coverage. | Its current stability statement; an older README advised against production use. |
-| Toolchain | `rustic_backend` 0.6.2 stated a minimum rustc of 1.88; this workspace states 1.85. | The current minimum. p-reserve either raises its own `rust-version` or the workspace's. |
+| Toolchain | `rustic_core` and `rustic_backend` state a minimum rustc of 1.91. | Decided: the workspace has one `rust-version` for all crates, raised to what its dependencies need (1.91). |
 | Fresh snapshot mounts | restic needs `device-id-for-hardlinks`, or every run from a freshly mounted ZFS snapshot rewrites every tree. | rustic's equivalent. |
 | macOS metadata | - | Extended attributes, ACLs, flags, resource forks, firmlinks, compared with restic. |
 | Index held open | - | Memory of a loaded index for a large repository (the Atticus test repository: about 1.4 million files, 233 index files), and how the daemon learns that another writer changed the repository. |

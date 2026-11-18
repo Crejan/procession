@@ -50,6 +50,27 @@ pub fn peer<S: AsRawFd>(socket: &S) -> io::Result<Peer> {
     }
 }
 
+/// What was read about the connecting process of `service.sock`, for the record: it is information,
+/// not a decision.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Seen {
+    /// The user of the connecting account.
+    pub uid: u32,
+    /// The process, when the platform says (0 or absent across pid namespaces).
+    pub pid: Option<i32>,
+    /// The program's path, when it could be read (Linux `/proc/<pid>/exe`, macOS `proc_pidpath`).
+    pub program: Option<String>,
+}
+
+impl Seen {
+    /// Reads the program of `peer`, if there is a process to ask about.
+    #[must_use]
+    pub fn of(peer: Peer) -> Self {
+        let program = peer.pid.filter(|pid| *pid > 0).and_then(program_path);
+        Self { uid: peer.uid, pid: peer.pid, program }
+    }
+}
+
 /// This process's own user.
 #[must_use]
 pub fn own_uid() -> u32 {

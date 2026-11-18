@@ -2,7 +2,7 @@
 name = "p-age"
 version = "0.0.0"
 edition = "2024"
-rust-version = "1.85"
+rust-version = "1.91"
 description = "The broker of the approval system: checks that a request may be asked, carries it to the person's machine and back, registers delegations"
 license = "MIT OR Apache-2.0"
 keywords = ["approval", "broker", "agent", "delegation"]

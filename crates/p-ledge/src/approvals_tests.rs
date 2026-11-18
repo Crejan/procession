@@ -234,7 +234,13 @@ impl Lab {
     fn connect(&self) -> Svc {
         let (client, server) = UnixStream::pair().expect("pair");
         let shared = Arc::clone(&self.rig.shared);
-        thread::spawn(move || service_conn::serve(&shared, server, Some((0, None))));
+        thread::spawn(move || {
+            service_conn::serve(
+                &shared,
+                server,
+                Some(crate::peer::Seen { uid: 4242, pid: Some(77), program: Some("/usr/bin/fake-service".into()) }),
+            )
+        });
         Svc::new(client)
     }
 
@@ -1133,4 +1139,29 @@ fn a_hello_on_service_sock_is_a_protocol_error_and_ends_the_connection() {
         other => panic!("expected an error, got {other:?}"),
     }
     assert!(matches!(svc.lines.read_message(ClearancePolicy::Refused), Ok(None) | Err(_)), "the connection is closed");
+}
+
+#[test]
+fn the_record_shows_who_connected_to_service_sock_in_received_and_in_the_answer() {
+    let mut lab = Lab::new();
+    let agent = lab.default_agent();
+    // At once (automatic): the single entry has the peer.
+    let (request, sig) = lab.make(&agent, &[], Rating::HARMLESS);
+    approval(&lab.connect().ask(&request, &sig));
+    // One that waits: `received` has it too, and so has the answer.
+    lab.rig.dialogs.push(hold());
+    let (waiting, waiting_sig) = lab.make(&agent, &["w"], INTERNAL);
+    let mut svc = lab.connect();
+    svc.submit(&waiting, &waiting_sig);
+    thread::sleep(Duration::from_millis(400));
+    svc.cancel(&waiting);
+    thread::sleep(Duration::from_millis(400));
+    let peer = json!({"uid": 4242, "pid": 77, "program": "/usr/bin/fake-service"});
+    let entries = lab.rig.record();
+    let with_peer: Vec<&str> =
+        entries.iter().filter(|e| e["peer"] == peer).filter_map(|e| e["type"].as_str()).collect();
+    assert_eq!(with_peer, ["request", "received", "request"], "{entries:?}");
+    // And `pledge history` shows the uid.
+    let line = crate::cli::history_line(entries.iter().find(|e| e["type"] == "received").expect("received"));
+    assert!(line.contains("peer-uid=4242"), "{line}");
 }
