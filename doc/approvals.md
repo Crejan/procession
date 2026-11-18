@@ -563,7 +563,12 @@ specifications:
   never a longer one.
 - What a model can be told of a call's outcome is a closed list: `done`,
   `declined`, `expired`, `refused` (with its class), `unavailable` (nothing
-  was done) and `unknown` (the call was sent; whether it ran is not known;
+  was done, and trying again is safe), `failed` (the call was approved and
+  the action was started, and it did not complete: there is no result,
+  something may have happened on the host, and the exact cause is in the
+  service's log and the host's audit lines under the call's identifier; an
+  agent must not blindly repeat an action that changes something) and
+  `unknown` (the call was sent; whether it ran is not known;
   only the signer makes this one, and its text tells the model to find out
   by a query before repeating anything that changes something). While the
   signer waits for an answer it tells the model's client so at a fixed

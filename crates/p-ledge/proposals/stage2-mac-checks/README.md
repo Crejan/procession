@@ -45,38 +45,59 @@ codesign -dv ./sechecks 2>&1 | grep -E 'Identifier|Signature|TeamIdentifier'
 codesign -dv ./sechecks-other 2>&1 | grep -E 'Identifier|Signature|TeamIdentifier'
 ```
 
-**The first compile is slow and silent; that is not a hang.** Reported
-from the owner's Mac on 2026-11-18: `swiftc -O` seemed not to finish.
-What I found, without running the program:
+**The first compile takes minutes and prints nothing; later ones take
+seconds. The source is not the cause, and it was not changed.** Reported
+on 2026-11-18: on the owner's Mac the build finished after a long wait; in
+the designer's session `swiftc -typecheck` did not finish within four
+minutes. What I measured, on this Mac (Apple Swift 6.3.3, Command Line
+Tools, SDK 26.5), without running the program:
 
-- The first Swift compile with these Command Line Tools builds the
-  compiler's own module cache: the modules of the standard library,
-  Foundation, CryptoKit, LocalAuthentication and what they import, about 25
-  modules and 100 MB. Here that took more than five minutes for a mere
-  `-typecheck`, with no output at all. It is paid once per user and
-  toolchain, with or without `-O`, and by any Swift file, not by this one.
-- With the cache built, this file takes: type-check 3 s, `-Onone
-  -emit-object` 4 s, `-O -emit-object` 35 s (wall time; an object file
-  written to a temporary directory, nothing linked, nothing run). So the
-  optimiser does not hang on this source, and it is slower for no gain.
-- The source has nothing known to slow the compiler: about 300 lines, no
-  large literal or table, the longest expression a sum of five `Data`
-  values, top-level code of some twenty lines.
+| What | Module cache | Wall time |
+|---|---|---|
+| `swiftc -typecheck` of a **five-line file** with the same four imports and `print(1)` | empty | **330 s**; for the first 254 s the cache directory held only a lock for the standard library's module |
+| `swiftc -typecheck sechecks.swift`, my first one (the one reported as "exit 0") | empty | more than 5 minutes: it outran a two-minute limit and went on in the background; I did not time it to the second |
+| `swiftc -typecheck sechecks.swift` | built | 2.4 s |
+| `swiftc -Onone sechecks.swift -o …` (full build with linking) | built | 3.0 s |
+| `swiftc -O sechecks.swift -o …` (full build with linking) | built | 19 s |
 
-That the cache is what he saw is my reading from this machine, not
-something I observed on his build. So: build with `-Onone`, as above, and
-let the first compile run for up to ten minutes. To see that it is
-working, in a second terminal:
+The two full builds wrote binaries into a temporary directory. They were
+not run.
+
+- **The cause is the toolchain's module cache.** These Command Line Tools
+  ship no prebuilt modules
+  (`/Library/Developer/CommandLineTools/usr/lib/swift/macosx/prebuilt-modules/`
+  is empty here), so the first Swift compile of any file builds the
+  modules of the standard library, Foundation, CryptoKit and what they
+  import from their interface files: about 20 modules, 120 MB, five to six
+  minutes, silent. The five-line file shows that it is paid whatever the
+  source is. It is paid once per cache directory.
+- **No expression in the source is slow.** With `-Xfrontend
+  -warn-long-expression-type-checking=50 -Xfrontend
+  -warn-long-function-bodies=50` (both flags exist in this toolchain) the
+  compiler names nothing: no expression and no function body takes 50 ms.
+  There is no large literal, no nested ternary; the longest expression is
+  a sum of five `Data` values.
+- **So nothing was split, and `sechecks.swift` is byte for byte what the
+  owner built.** His results for checks 0 and 3 stand for this source;
+  nothing needs running again.
+- **For the owner** the cache is built now: a rebuild takes seconds.
+- **For a session that cannot write the default cache** (a sandbox: here
+  the default one under `/var/folders/…/C/clang/ModuleCache` was refused
+  with "Operation not permitted"), give the compiler a directory that
+  lasts: `swiftc -module-cache-path <dir> …`. The first compile there
+  takes the five to six minutes; a limit of four cuts it off each time and
+  it starts again from nothing, which is what "did not finish" looks like.
+
+Build with `-Onone`, as above: it is the faster of the two and loses
+nothing (below). To see a first compile working, in a second terminal:
 
 ```
 du -sh "$(getconf DARWIN_USER_CACHE_DIR)clang/ModuleCache"
 ```
 
-The number grows while the cache is built. Adding `-v` to the `swiftc`
-line prints the compiler's steps. If the cache stops growing for minutes
-and the compiler still does not end, that is a fault of the toolchain on
-that machine and not of this file; `swiftc -Onone -typecheck
-sechecks.swift` is then the smaller thing to try.
+The number stays small for about four minutes (the standard library's
+module is built in memory first) and then grows to about 120 MB. Adding
+`-v` to the `swiftc` line prints the compiler's steps.
 
 **`-Onone` is a sound substitute for these checks.** They observe what the
 frameworks and the Secure Enclave do: whether a prompt appears, which error
@@ -122,7 +143,7 @@ them.
 
 | # | Check of section 1.5 | Do | Observe | Result |
 |---|---|---|---|---|
-| 0 | | The five `make` lines above | Whether any `make` shows a prompt (expected: none), and whether all five print `MADE` | |
+| 0 | | The five `make` lines above | Whether any `make` shows a prompt (expected: none), and whether all five print `MADE` | **Owner, 2026-11-18:** all five printed `MADE`, each with an `ecdsa-sha2-nistp256` public key line and a blob under `sechecks-keys/`. No prompt during `make`. No entitlement error |
 | 1a | 1 | `./sechecks sign plain` | `SIGNED`, no prompt | |
 | 1b | 1 | `./sechecks sign touch` and touch | A Touch ID prompt; `SIGNED` only after the touch. Copy the prompt's whole text, with the program name it shows | |
 | 1c | 1 | `./sechecks sign touchpw` and touch | The same. Whether the prompt offers "Use Password" | |
@@ -130,8 +151,8 @@ them.
 | 2b | 2 | `./sechecks sign touch`, do nothing | How many seconds until it ends by itself, if it does (wait 5 minutes at most); `domain` and `code` | |
 | 2c | 2 | `./sechecks sign touch --invalidate-after 10`, do nothing | The prompt closes after 10 s; `NOT SIGNED`; `domain` and `code`. If the prompt stays: a dialog cannot be closed at a deadline this way | |
 | 2d | 2 | `./sechecks sign touch`, use a wrong finger three times | What the prompt does; `domain` and `code` | |
-| 3a | 3 | `cp -R sechecks-keys copy-keys` then `./sechecks-other --dir copy-keys sign plain` | `SIGNED` means: any program of yours can use a copied key that has no presence check. `LOAD FAILED` or `NOT SIGNED` means it cannot: copy the error | |
-| 3b | 3 | `./sechecks-other --dir copy-keys sign touch` and touch | Whether a prompt appears, **which program name it shows**, and whether it signs | |
+| 3a | 3 | `cp -R sechecks-keys copy-keys` then `./sechecks-other --dir copy-keys sign plain` | `SIGNED` means: any program of yours can use a copied key that has no presence check. `LOAD FAILED` or `NOT SIGNED` means it cannot: copy the error | **Owner, 2026-11-18:** `sechecks-other: SIGNED plain after 0.0 s`. No prompt |
+| 3b | 3 | `./sechecks-other --dir copy-keys sign touch` and touch | Whether a prompt appears, **which program name it shows**, and whether it signs | **Owner, 2026-11-18:** a Touch ID prompt appeared and named the other program (his words: "eine touch id anfrage von sechecks other (trying to sign 32 bytes)"); after the touch, `sechecks-other: SIGNED touch after 2.6 s` |
 | 3c | 3 | `./sechecks-other --dir sechecks-keys sign plain` (the original files, the other program) | The same as 3a; tells a copied file from another program | |
 | 4a | 4 | `./sechecks twice touch fresh`, touch each time asked | Two prompts, two `SIGNED` | |
 | 4b | 4 | `./sechecks twice touch shared`, touch each time asked | One prompt or two. One means: a context that is kept signs again without the person | |
@@ -153,6 +174,26 @@ them.
 
 Check 15 changes your enrolled fingers; do it last or leave it out. Check
 16 costs a restart.
+
+### Results so far
+
+Run by the owner on his Mac on 2026-11-18, from this source as it is on
+`integration`; relayed by the designer. They are his observations, not the
+author's. Not yet run: 1, 2, 3c, 4, 5 and the rest.
+
+- **Check 0.** An ad-hoc signed command line program without a bundle and
+  without entitlements can make and use Secure Enclave keys through
+  CryptoKit, in all five protections tried. Making a key raises no prompt.
+- **Check 3a.** Another program of the same user, with another ad-hoc
+  signature, loads a copied blob of a key without a presence check and
+  signs with it, at once and unasked. The blob file is the key.
+- **Check 3b.** The same other program can use a copied blob of a key with
+  Touch ID. The system then asks for the touch **in that program's name
+  and with that program's words**, and signs after it. The presence check
+  holds (no signature without the touch); who is asking is told only by
+  the prompt.
+
+What follows from them is in `../stage2-mac.md`, section 1.6.
 
 ## 5. What it leaves on the machine, and how to remove it
 
