@@ -184,6 +184,8 @@ struct Facts {
     clamped: bool,
     peer: Option<crate::peer::Seen>,
     via_broker: bool,
+    /// Pledge's own exact reason for a refusal, for the person and the record; the agent hears the coarse class.
+    why: Option<&'static str>,
 }
 
 /// Seconds from `now` that a stored entry is kept: to the call's deadline, but
@@ -372,6 +374,10 @@ fn process(
     let Some(issuer) = shared.key_by_fingerprint(&delegation.issuer) else {
         return refuse(PledgeReason::UnknownDelegation);
     };
+    if shared.broker_state.is_key_blocked(&delegation.issuer) {
+        facts.why = Some("the delegation key is blocked by the broker: nothing under its delegations is signed");
+        return refuse(PledgeReason::Blocked);
+    }
     let Ok(issuer_key) = PublicKey::parse(&issuer.public_line()) else {
         return refuse(PledgeReason::UnknownDelegation);
     };
@@ -447,6 +453,7 @@ fn process(
         Mode::Automatic => {
             let Some(key) = shared.key_with_purpose("automatic") else { return refuse(PledgeReason::Unavailable) };
             if shared.broker_state.is_key_blocked(&key.fingerprint) {
+                facts.why = Some("the automatic approval key is blocked by the broker: nothing is signed with it");
                 return refuse(PledgeReason::Blocked);
             }
             let Ok(carried) = approval_key_blob(shared, &key, "automatic") else {
@@ -462,6 +469,7 @@ fn process(
         Mode::Ask => {
             let Some(key) = shared.key_with_purpose("confirmed") else { return refuse(PledgeReason::Unavailable) };
             if shared.broker_state.is_key_blocked(&key.fingerprint) {
+                facts.why = Some("the confirmed approval key is blocked by the broker: nothing is signed with it");
                 return refuse(PledgeReason::Blocked);
             }
             let Ok(carried) = approval_key_blob(shared, &key, "confirmed") else {
@@ -605,6 +613,7 @@ fn entry(hash: &str, ending: &Ending, facts: &Facts) -> Value {
     }
     put("peer", facts.peer.as_ref().map(peer_json));
     put("via", facts.via_broker.then(|| Value::from("broker")));
+    put("why", facts.why.map(Value::from));
     Value::Object(entry)
 }
 

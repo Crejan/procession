@@ -1,0 +1,3 @@
+# Linux kernel
+CONFIG_HZ_250=y
+CONFIG_HZ=250

@@ -80,7 +80,7 @@ fn the_cases_through_a_real_sudo_rule() {
         Signer::certified(dir.join("probe/service-key")).unwrap(),
         UsedStore::new(dir.join("used")),
         pledge::PledgeLink { socket: pledge.sockets.join("service.sock"), uid: unsafe { libc::geteuid() } },
-        Box::new(SudoRunner { sudo, probe }),
+        Box::new(SudoRunner { sudo, probe, limit: p_robe::runner::RUN_LIMIT }),
         Box::new(move |line| sink.lock().unwrap().push(line.to_string())),
     ));
     let transport =

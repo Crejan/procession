@@ -6,9 +6,10 @@ use std::process::ExitCode;
 use std::time::Duration;
 
 use clap::{Args, Parser, Subcommand, ValueEnum};
-use p_rover::observe::{cmdline, irq, procs, sched};
-use p_rover::{Config, Env, Error, Report, render};
 use p_roc::{CpuSet, Root};
+use p_rover::analyze;
+use p_rover::observe::{clock, cmdline, hung, irq, lastboot, nic, procs, sched, serial};
+use p_rover::{Config, Env, Error, Report, render};
 
 #[derive(Copy, Clone, Debug, ValueEnum)]
 enum Format {
@@ -77,6 +78,54 @@ enum Cmd {
         #[arg(long, default_value_t = sched::DEFAULT_MAX)]
         max: usize,
     },
+    /// Link, driver, counters, rings, coalescing, queues and their IRQs of one interface (cost: light; heavy with --delta).
+    Nic {
+        /// The interface.
+        iface: String,
+        /// Report only the counters that moved over this window (1s to 300s).
+        #[arg(long, value_parser = humantime::parse_duration)]
+        delta: Option<Duration>,
+        /// List every counter, not only errors and drops.
+        #[arg(long)]
+        all_stats: bool,
+    },
+    /// Serial ports: the console, IRQ, counters, modem lines, getty (cost: light).
+    Serial,
+    /// Who disciplines CLOCK_REALTIME: chrony, ptp4l, phc2sys, PTP clocks (cost: light).
+    Clock,
+    /// Freeze post-mortem: the previous boot's kernel log, filtered (cost: light).
+    Lastboot {
+        /// Boot offset: -1 the previous boot, 0 the current one.
+        #[arg(long, default_value = "-1", allow_hyphen_values = true)]
+        boot: String,
+    },
+    /// Live hang triage: tasks in D state across two samples, with wait class and kernel stack (cost: light).
+    Hung {
+        /// Also list tasks in S whose wait is NFS or RPC.
+        #[arg(long)]
+        all: bool,
+        /// Time between the two samples, 1s to 60s.
+        #[arg(long, default_value = "2s", value_parser = humantime::parse_duration)]
+        duration: Duration,
+        /// Kernel stack lines per task.
+        #[arg(long, default_value_t = hung::DEFAULT_STACK_LINES)]
+        stack_lines: usize,
+        /// At most this many tasks.
+        #[arg(long, default_value_t = hung::DEFAULT_MAX)]
+        max: usize,
+    },
+    /// Explore one process: placement, memory, endpoints, interfaces, kernel bypass, host settings.
+    Analyze {
+        /// The process.
+        #[arg(long)]
+        pid: i32,
+        /// Threads declared critical (repeatable): always listed.
+        #[arg(long = "tid")]
+        tids: Vec<i32>,
+        /// Procfs and sysfs only, no tracing (the only mode in this version).
+        #[arg(long = "static")]
+        static_only: bool,
+    },
     /// Live kernel command line against the declared one, kernel flavour, sysctls (cost: light).
     Cmdline,
     /// IRQ affinity, /proc/interrupts delta, timer ticks (cost: light).
@@ -109,6 +158,18 @@ fn run(cli: &Cli) -> Result<Report, Error> {
         Cmd::Procs { max } => procs::run(&env, &procs::Args { max: *max }),
         Cmd::Sched { cpus, duration, max } => {
             sched::run(&env, &sched::Args { cpus: cpus.clone(), duration: *duration, max: *max })
+        }
+        Cmd::Nic { iface, delta, all_stats } => {
+            nic::run(&env, &nic::Args { iface: iface.clone(), delta: *delta, all_stats: *all_stats })
+        }
+        Cmd::Serial => serial::run(&env),
+        Cmd::Clock => clock::run(&env),
+        Cmd::Lastboot { boot } => lastboot::run(&env, &lastboot::Args { boot: boot.clone() }),
+        Cmd::Hung { all, duration, stack_lines, max } => {
+            hung::run(&env, &hung::Args { all: *all, duration: *duration, stack_lines: *stack_lines, max: *max })
+        }
+        Cmd::Analyze { pid, tids, static_only } => {
+            analyze::run(&env, &analyze::Args { pid: *pid, tids: tids.clone(), static_only: *static_only })
         }
         Cmd::Cmdline => cmdline::run(&env),
         Cmd::Irq { duration, top } => irq::run(&env, &irq::Args { duration: *duration, top: *top }),

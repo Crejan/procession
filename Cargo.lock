@@ -913,12 +913,12 @@ dependencies = [
  "globset",
  "humantime",
  "libc",
+ "p-act",
  "p-roc",
  "serde",
  "serde_json",
  "tempfile",
  "thiserror",
- "toml",
 ]
 
 [[package]]
