@@ -232,6 +232,7 @@ fn not_sent(e: &ureq::Error) -> bool {
         // `ureq` reports a failed connect as a plain I/O error. These kinds can only come from making the connection
         // (a refused or unreachable address, or an environment that does not allow it); a reset, a broken pipe or a
         // timeout can come from a request that was sent, and are a lost answer.
+        E::Io(io) if is_handshake_refusal(io) => true,
         E::Io(io) => matches!(
             io.kind(),
             std::io::ErrorKind::ConnectionRefused
@@ -243,6 +244,26 @@ fn not_sent(e: &ureq::Error) -> bool {
         ),
         _ => false,
     }
+}
+
+/// A TLS handshake that failed because the service's certificate was refused (unknown issuer, not valid for
+/// the name, expired) or the peer cannot speak what we do: the request was not sent.
+#[cfg(feature = "pact-tls")]
+fn is_handshake_refusal(io: &std::io::Error) -> bool {
+    io.get_ref().and_then(|e| e.downcast_ref::<rustls::Error>()).is_some_and(|e| {
+        matches!(
+            e,
+            rustls::Error::InvalidCertificate(_)
+                | rustls::Error::NoCertificatesPresented
+                | rustls::Error::PeerIncompatible(_)
+                | rustls::Error::UnsupportedNameType
+        )
+    })
+}
+
+#[cfg(not(feature = "pact-tls"))]
+fn is_handshake_refusal(_: &std::io::Error) -> bool {
+    false
 }
 
 impl Transport for HttpTransport {
@@ -463,6 +484,40 @@ mod tests {
 
     // --- real sockets (skipped where a port cannot be bound) -----------------------------------
 
+    /// Under `PACT_REQUIRE_TCP=1` not being able to bind a port fails the test; otherwise the test says
+    /// `SKIPPED` on standard error and passes, which proves nothing about the socket code.
+    fn cannot_bind(e: &std::io::Error) {
+        assert!(
+            std::env::var_os("PACT_REQUIRE_TCP").is_none_or(|v| v.is_empty() || v == "0"),
+            "PACT_REQUIRE_TCP is set and this environment does not allow binding a TCP port: {e}"
+        );
+        eprintln!("SKIPPED: this environment does not allow binding a TCP port: {e}");
+    }
+
+    trait Stream: Read + Write + Send {}
+    impl<T: Read + Write + Send> Stream for T {}
+
+    #[cfg(feature = "pact-tls")]
+    type TlsServer = Option<std::sync::Arc<rustls::ServerConfig>>;
+    #[cfg(not(feature = "pact-tls"))]
+    type TlsServer = Option<()>;
+
+    #[cfg(feature = "pact-tls")]
+    fn wrap(tcp: TcpStream, tls: &TlsServer) -> Box<dyn Stream> {
+        match tls {
+            None => Box::new(tcp),
+            Some(config) => Box::new(rustls::StreamOwned::new(
+                rustls::ServerConnection::new(std::sync::Arc::clone(config)).unwrap(),
+                tcp,
+            )),
+        }
+    }
+
+    #[cfg(not(feature = "pact-tls"))]
+    fn wrap(tcp: TcpStream, _: &TlsServer) -> Box<dyn Stream> {
+        Box::new(tcp)
+    }
+
     struct Fake {
         url: String,
         requests: mpsc::Receiver<String>,
@@ -471,22 +526,29 @@ mod tests {
 
     /// A server that accepts connections, reads one request each, sends the head of it to the test, and
     /// then runs `respond` on the connection. `None` where this environment does not let a port be bound.
-    fn fake(respond: impl Fn(&mut TcpStream) + Send + Sync + 'static) -> Option<Fake> {
+    fn fake(respond: impl Fn(&mut dyn Stream) + Send + Sync + 'static) -> Option<Fake> {
+        fake_with(None, respond)
+    }
+
+    fn fake_with(tls: TlsServer, respond: impl Fn(&mut dyn Stream) + Send + Sync + 'static) -> Option<Fake> {
         let listener = match TcpListener::bind("127.0.0.1:0") {
             Ok(l) => l,
             Err(e) => {
-                eprintln!("SKIPPED: this environment does not allow binding a TCP port: {e}");
+                cannot_bind(&e);
                 return None;
             }
         };
-        let url = format!("http://{}/mcp", listener.local_addr().unwrap());
+        let scheme = if tls.is_some() { "https" } else { "http" };
+        let url = format!("{scheme}://{}/mcp", listener.local_addr().unwrap());
+        let tls = std::sync::Arc::new(tls);
         let (tx, requests) = mpsc::channel();
         let respond = std::sync::Arc::new(respond);
         let handle = thread::spawn(move || {
             for stream in listener.incoming() {
-                let Ok(mut stream) = stream else { break };
-                let (tx, respond) = (tx.clone(), std::sync::Arc::clone(&respond));
+                let Ok(tcp) = stream else { break };
+                let (tx, respond, tls) = (tx.clone(), std::sync::Arc::clone(&respond), std::sync::Arc::clone(&tls));
                 thread::spawn(move || {
+                    let mut stream = wrap(tcp, &tls);
                     let mut head = Vec::new();
                     let mut byte = [0u8; 1];
                     while !head.ends_with(b"\r\n\r\n") {
@@ -507,7 +569,7 @@ mod tests {
                     let mut body = vec![0u8; length];
                     let _ = stream.read_exact(&mut body);
                     let _ = tx.send(format!("{text}{}", String::from_utf8_lossy(&body)));
-                    respond(&mut stream);
+                    respond(&mut *stream);
                 });
             }
         });
@@ -522,7 +584,7 @@ mod tests {
         json!({"jsonrpc": "2.0", "id": 7, "method": "tools/call", "params": {"name": "rt_procs"}})
     }
 
-    fn send(s: &mut TcpStream, text: &str) {
+    fn send(s: &mut dyn Stream, text: &str) {
         let _ = s.write_all(text.as_bytes());
         let _ = s.flush();
     }
@@ -688,9 +750,12 @@ mod tests {
 
     #[test]
     fn nothing_listening_means_nothing_was_sent() {
-        let Ok(listener) = TcpListener::bind("127.0.0.1:0") else {
-            eprintln!("SKIPPED: this environment does not allow binding a TCP port");
-            return;
+        let listener = match TcpListener::bind("127.0.0.1:0") {
+            Ok(l) => l,
+            Err(e) => {
+                cannot_bind(&e);
+                return;
+            }
         };
         let url = format!("http://{}/mcp", listener.local_addr().unwrap());
         drop(listener);
@@ -750,5 +815,132 @@ mod tests {
     fn https_without_tls_is_not_sent() {
         let r = quick().post(&service("https://a.example/mcp"), &request(), &CancelToken::default());
         assert!(matches!(r, Err(TransportError::NotSent(m)) if m.contains("pact-tls")));
+    }
+
+    // --- https, over a fake server with a test CA (feature pact-tls) -------------------------------
+
+    #[cfg(feature = "pact-tls")]
+    mod tls {
+        use super::*;
+        use rcgen::{BasicConstraints, CertificateParams, IsCa, Issuer, KeyPair, SanType};
+        use rustls_pki_types::{CertificateDer, PrivateKeyDer, pem::PemObject};
+        use std::net::{IpAddr, Ipv4Addr};
+        use std::sync::Arc;
+
+        struct Pki {
+            root_pem: String,
+            cert_pem: String,
+            key_pem: String,
+        }
+
+        /// A root and a server certificate for the IP address `san` (the server listens on 127.0.0.1).
+        fn pki(san: Ipv4Addr) -> Pki {
+            let ca_key = KeyPair::generate().unwrap();
+            let mut ca_params = CertificateParams::new(Vec::<String>::new()).unwrap();
+            ca_params.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
+            let ca = ca_params.self_signed(&ca_key).unwrap();
+            let server_key = KeyPair::generate().unwrap();
+            let mut params = CertificateParams::new(Vec::<String>::new()).unwrap();
+            params.subject_alt_names.push(SanType::IpAddress(IpAddr::V4(san)));
+            let server = params.signed_by(&server_key, &Issuer::new(ca_params, &ca_key)).unwrap();
+            Pki { root_pem: ca.pem(), cert_pem: server.pem(), key_pem: server_key.serialize_pem() }
+        }
+
+        fn server_config(p: &Pki) -> Arc<rustls::ServerConfig> {
+            let chain: Vec<CertificateDer<'static>> =
+                CertificateDer::pem_slice_iter(p.cert_pem.as_bytes()).collect::<Result<_, _>>().unwrap();
+            let key = PrivateKeyDer::from_pem_slice(p.key_pem.as_bytes()).unwrap();
+            Arc::new(
+                rustls::ServerConfig::builder_with_provider(Arc::new(rustls::crypto::ring::default_provider()))
+                    .with_protocol_versions(&[&rustls::version::TLS13])
+                    .unwrap()
+                    .with_no_client_auth()
+                    .with_single_cert(chain, key)
+                    .unwrap(),
+            )
+        }
+
+        fn json_ok() -> impl Fn(&mut dyn Stream) + Send + Sync + 'static {
+            let a = answer();
+            move |s| {
+                send(
+                    s,
+                    &format!(
+                        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{a}",
+                        a.len()
+                    ),
+                )
+            }
+        }
+
+        fn with_root(root: &str) -> HttpTransport {
+            HttpTransport::new(Some(root.to_owned())).with_timeouts(Duration::from_secs(5), Duration::from_secs(5))
+        }
+
+        #[test]
+        fn an_https_answer_from_a_server_the_root_vouches_for() {
+            let p = pki(Ipv4Addr::LOCALHOST);
+            let Some(f) = fake_with(Some(server_config(&p)), json_ok()) else { return };
+            let r = with_root(&p.root_pem).post(&service(&f.url), &request(), &CancelToken::default()).unwrap();
+            assert_eq!(r["id"], 7);
+            let head = f.requests.recv_timeout(Duration::from_secs(5)).unwrap().to_ascii_lowercase();
+            assert!(
+                head.contains("accept: application/json, text/event-stream") && !head.contains("user-agent"),
+                "{head}"
+            );
+        }
+
+        #[test]
+        fn a_stream_over_https_with_keepalives() {
+            let a = answer();
+            let p = pki(Ipv4Addr::LOCALHOST);
+            let Some(f) = fake_with(Some(server_config(&p)), move |s| {
+                send(
+                    s,
+                    "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n",
+                );
+                let chunk = |t: &str| format!("{:x}\r\n{t}\r\n", t.len());
+                for _ in 0..3 {
+                    send(s, &chunk(": keepalive\n\n"));
+                    thread::sleep(Duration::from_millis(100));
+                }
+                send(s, &chunk(&format!("data: {a}\n\n")));
+                send(s, "0\r\n\r\n");
+            }) else {
+                return;
+            };
+            assert_eq!(
+                with_root(&p.root_pem).post(&service(&f.url), &request(), &CancelToken::default()).unwrap()["id"],
+                7
+            );
+        }
+
+        #[test]
+        fn a_certificate_the_root_does_not_vouch_for_is_refused_and_nothing_is_sent() {
+            let (server, other) = (pki(Ipv4Addr::LOCALHOST), pki(Ipv4Addr::LOCALHOST));
+            let Some(f) = fake_with(Some(server_config(&server)), json_ok()) else { return };
+            let r = with_root(&other.root_pem).post(&service(&f.url), &request(), &CancelToken::default());
+            assert!(matches!(r, Err(TransportError::NotSent(_))), "{r:?}");
+            assert!(f.requests.recv_timeout(Duration::from_millis(500)).is_err(), "no request reached the server");
+        }
+
+        #[test]
+        fn a_certificate_for_another_address_is_refused_and_nothing_is_sent() {
+            let p = pki(Ipv4Addr::new(127, 0, 0, 2));
+            let Some(f) = fake_with(Some(server_config(&p)), json_ok()) else { return };
+            let r = with_root(&p.root_pem).post(&service(&f.url), &request(), &CancelToken::default());
+            assert!(matches!(r, Err(TransportError::NotSent(_))), "{r:?}");
+            assert!(f.requests.recv_timeout(Duration::from_millis(500)).is_err());
+        }
+
+        #[test]
+        fn https_needs_a_root_and_a_root_must_be_a_certificate() {
+            let p = pki(Ipv4Addr::LOCALHOST);
+            let Some(f) = fake_with(Some(server_config(&p)), json_ok()) else { return };
+            let none = HttpTransport::new(None).post(&service(&f.url), &request(), &CancelToken::default());
+            assert!(matches!(none, Err(TransportError::NotSent(m)) if m.contains("TLS root")));
+            let junk = with_root("not a certificate").post(&service(&f.url), &request(), &CancelToken::default());
+            assert!(matches!(junk, Err(TransportError::NotSent(_))), "{junk:?}");
+        }
     }
 }

@@ -28,6 +28,7 @@ pub mod limits;
 #[cfg(feature = "pact")]
 pub mod pact;
 pub mod rating;
+pub mod settings;
 pub mod sign;
 
 pub use call::{Call, CallContent, CallId, NotShowable, ServiceId};

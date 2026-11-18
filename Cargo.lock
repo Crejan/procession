@@ -645,7 +645,10 @@ version = "0.0.0"
 dependencies = [
  "base64",
  "libc",
+ "rcgen",
  "ring",
+ "rustls",
+ "rustls-pki-types",
  "serde",
  "serde_json",
  "tempfile",

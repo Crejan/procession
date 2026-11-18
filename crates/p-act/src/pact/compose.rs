@@ -310,4 +310,27 @@ mod tests {
             .collect();
         assert!(tokens.windows(2).all(|w| w[0] != w[1]));
     }
+
+    #[test]
+    fn the_largest_request_fits_the_services_64_kib_limit() {
+        // `probe serve` refuses a request body over 64 KiB. The worst case is parameters that JSON escapes (a quote is two
+        // bytes in the call and again in `arguments`), as many as the call's own 16 KiB allows, and the longest claim.
+        let e = env();
+        let mut t = tool();
+        t.bounds = Bounds { max_items: 64, item_max_len: 512, claim_max_len: 200 };
+        let mut largest = 0;
+        for per_param in (1..=120).rev() {
+            for items in (1..=64).rev() {
+                let args = json!({"params": vec!["\"".repeat(per_param); items], "claim": "\u{e9}".repeat(200)});
+                let Ok(p) = prepare(&e.key, &s(), &Fixed(now()), &SystemRandomSource::default(), &service(), &t, &args)
+                else {
+                    continue;
+                };
+                largest = largest.max(serde_json::to_vec(&p.request(u64::MAX)).unwrap().len());
+                break;
+            }
+        }
+        assert!(largest > 30 * 1024, "the search found a call near the limit: {largest}");
+        assert!(largest < 64 * 1024, "{largest} bytes does not fit the service's 64 KiB");
+    }
 }

@@ -131,6 +131,11 @@ fn serve_speaks_mcp_on_its_socket_and_stdio_is_a_shim_to_it() {
     let dir = tempfile::tempdir().unwrap();
     // Some sandboxes do not let a process bind a Unix socket; then there is nothing here to test, and it is said.
     if let Err(e) = std::os::unix::net::UnixListener::bind(dir.path().join("probe.sock")) {
+        // Under PACT_REQUIRE_TCP=1 (which also covers this Unix socket) not being able to bind is a failure.
+        assert!(
+            std::env::var_os("PACT_REQUIRE_TCP").is_none_or(|v| v.is_empty() || v == "0"),
+            "PACT_REQUIRE_TCP is set and this environment does not allow binding a Unix socket: {e}"
+        );
         eprintln!("SKIPPED: this environment does not allow binding a Unix socket: {e}");
         return;
     }

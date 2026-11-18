@@ -12,9 +12,9 @@ publish = false
 
 [features]
 # The agent-side signer `pact` (proposals/pact.md): the library the binary is made of, and the binary.
-pact = ["dep:libc", "dep:ureq"]
+pact = ["dep:ureq"]
 # TLS for `pact`'s HTTP client (stage 2). Without it `pact` speaks plain http only.
-pact-tls = ["pact", "ureq/rustls"]
+pact-tls = ["pact", "ureq/rustls", "dep:rustls"]
 
 [[bin]]
 name = "pact"
@@ -22,11 +22,19 @@ path = "src/bin/pact.rs"
 required-features = ["pact"]
 
 [dependencies]
-libc = { version = "0.2", optional = true }
+libc = "0.2"
 ureq = { version = "3", default-features = false, optional = true }
+# Only to recognise a refused certificate in an error of the TLS handshake (feature pact-tls).
+rustls = { version = "0.23", default-features = false, optional = true }
 base64 = "0.23"
 serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["raw_value"] }
 ring = { version = "0.17", default-features = false }
 tempfile = "3"
 thiserror = "2"
+
+[dev-dependencies]
+# For the TLS tests of `pact`'s HTTP client (feature pact-tls): a test CA and a fake https server.
+rcgen = { version = "0.14", default-features = false, features = ["ring", "pem"] }
+rustls = { version = "0.23.46", default-features = false, features = ["ring", "std"] }
+rustls-pki-types = { version = "1.15", features = ["std"] }
