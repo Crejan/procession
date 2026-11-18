@@ -682,6 +682,8 @@ dependencies = [
  "libc",
  "p-act",
  "ring",
+ "rustls",
+ "rustls-pki-types",
  "serde",
  "serde_json",
  "thiserror",
