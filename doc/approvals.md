@@ -125,6 +125,23 @@ machine and is recorded there, and the key ends with the delegation; what
 is exposed is everything in mode automatic, from wherever the service can
 be reached, until the delegation ends or is withdrawn.
 
+**What an action returns may contain text that is not the service's.** A
+diagnostics action returns text from the host, and some of it was chosen by
+whoever runs processes there or wrote a file that is read: a thread's name,
+a command line, a file's bytes. It reaches the agent's model as data, and a
+model may be led by it. Escaping what does not display as written (which
+the service does to everything it passes on) is not the protection, and
+nothing fully is. What bounds the damage is what bounds an agent anyway: R1
+(nothing happens without an approval from the person's machine, and the
+person sees the call, not the agent's reasons), R3 (never more than the
+person), the sandbox (the agent reaches services and nothing else), and the
+record. What is exposed is what a misled agent can do without a person:
+calls in mode automatic, and what it tells its person. A service returns
+results as structured content with named fields, never as prose it
+composed, and says of each action whether its result can carry such text;
+that is a courtesy to an honest model and a handle for a person, not a
+control.
+
 **R3. An agent may have carried out at most what its person may.** A
 delegation names some of the person's groups and can only narrow. Nobody but
 the person can issue one, and it cannot be passed on.
@@ -295,6 +312,7 @@ request in front of a person that is not from that person's agent.
 | The broker is taken over | G3 | R1, R6, R8 are checked by pledge and by services without it | R10 is gone: a person can have carried out what the site would not let them. Withdrawals by an administrator and blocks are gone. It can refuse everything, and sees who asks for what |
 | The broker is taken over and a person's machine is stolen | G4 | The presence check for confirmed approvals | Automatic approvals, until that person's certificates run out |
 | Someone on the network | all | TLS; everything that matters is signed; calls and requests are single-use and end | Delay and loss, which end in "no" |
+| A local user of a host plants text in what an action returns (a process's name, a file) | G2 | R1, R3, the sandbox, the record: a misled agent still needs the person for everything not automatic | Calls in mode automatic that the agent makes because it was misled; what the agent tells its person |
 | Malware in the person's session | G4 | Presence checks; pledge checks which program connects to its sockets | Automatic approvals. A dialog imitated to obtain a touch. With keys kept as blobs in files (stage 2 on a Mac) such a program can use the automatic key and the connection key itself, without pledge, and can raise a Touch ID prompt for the confirmed key under its own name (`crates/p-ledge/SPEC.md`, section 11) |
 | A service lies about what it will do, or rates dishonestly | G1, G3 | Nothing (trusted) | Stated so that nobody assumes otherwise |
 
