@@ -122,7 +122,25 @@ print this table:
 | 3 | no broker answers |
 | 4 | in force but NOT stored (block, withdraw) |
 | 5 | the broker is degraded (`status` only; nothing else returns it) |
-| 6 | an enabled person has no valid certificate for a purpose (`status` only; when the broker is also degraded the code is 5, the more severe) |
+| 6 | an enabled person has no valid certificate for a purpose (`status` only) |
+| 7 | the broker has no valid certificate of its own and issues no clearances (`status` only) |
+
+When more than one of 5, 6 and 7 holds, `status` returns 7, then 5, then 6: the most severe first (nothing is cleared at all; the register cannot be stored; some person cannot be approved). Each code has one meaning.
+
+**The broker's own certificate** is not in that directory. It is what the broker
+presents: ssh-keygen puts it into every signature the broker makes (clearances
+and standings), and finds it as `<broker_key>-cert.pub` beside the key (the
+configuration's `broker_certificate`, if given, must be exactly that path).
+It is checked at start and once a minute against the site CA (`site_ca` is
+required): its one principal is `broker`, issued by the site CA, valid now, no
+critical option, no extension, and it certifies the key the broker holds (the
+check signs a probe with the key and reads the certificate out of that
+signature, which is what a service or a pledge verifies). A broker without a
+valid one **issues no clearance** (an approval that comes back is answered
+`refused` `busy`) **and no standing** (a pledge that signs in is told `busy`;
+one already connected is left as it is), says so on standard error, and
+`page status` says so with the reason (`missing`, `not-yet-valid`, `expired`,
+`refused`), or with the days left when it has one (exit code 7).
 
 **Certificates.** The certificates of persons' approval keys that the broker
 carries to pledge are a separate input, not part of the site file (which has no

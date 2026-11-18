@@ -29,8 +29,8 @@ pub enum ConfigError {
     State(#[from] crate::core::StateError),
     #[error("`listen` names no address")]
     NoAddress,
-    #[error("`site_ca` and `certificates` are given together or not at all")]
-    CertificatesPair,
+    #[error("`broker_certificate` must be {expected}: `ssh-keygen` finds the key by the certificate's name")]
+    BrokerCertificatePath { expected: String },
     #[error("the site CA key {path}: {why}")]
     SiteCa { path: String, why: String },
     #[error("cannot open the log {path}: {source}")]
@@ -68,10 +68,14 @@ pub struct Config {
     pub state_dir: PathBuf,
     /// The log: a JSON line per request.
     pub log: PathBuf,
-    /// The site CA's public key, one `.pub` line. With `certificates`: the key the approval-key certificates are
-    /// checked against. Both are given or neither is.
+    /// The broker's own certificate (`broker`, from the site CA). `ssh-keygen` finds the key by the certificate's name,
+    /// so it is `<broker_key>-cert.pub`, which is also the default; any other path is refused. It is checked at start
+    /// and once a minute, and a broker without a valid one issues no clearance.
     #[serde(default)]
-    pub site_ca: Option<PathBuf>,
+    pub broker_certificate: Option<PathBuf>,
+    /// The site CA's public key, one `.pub` line: what the broker's own certificate and the approval-key certificates
+    /// are checked against.
+    pub site_ca: PathBuf,
     /// A directory whose `*-cert.pub` files are the certificates the broker carries to pledge (a separate input; the
     /// site file has none). Owned by root or the broker's user, not writable by group or others.
     #[serde(default)]
@@ -94,8 +98,13 @@ impl Config {
         if config.listen.is_empty() {
             return Err(ConfigError::NoAddress);
         }
-        if config.site_ca.is_some() != config.certificates.is_some() {
-            return Err(ConfigError::CertificatesPair);
+        let expected = {
+            let mut name = config.broker_key.clone().into_os_string();
+            name.push("-cert.pub");
+            PathBuf::from(name)
+        };
+        if config.broker_certificate.as_ref().is_some_and(|p| *p != expected) {
+            return Err(ConfigError::BrokerCertificatePath { expected: expected.display().to_string() });
         }
         Ok(config)
     }
@@ -115,19 +124,18 @@ impl Config {
             crypto.clone(),
             Box::new(log),
         );
-        let core = match (&self.site_ca, &self.certificates) {
-            (Some(ca), Some(directory)) => {
-                // The CA key is trust material: read with the same rule as a settings file.
-                let sa = |why: String| ConfigError::SiteCa { path: ca.display().to_string(), why };
-                let bytes = p_act::settings::read_checked(ca, 4096).map_err(|e| sa(e.to_string()))?;
-                let text = String::from_utf8(bytes).map_err(|_| sa("not UTF-8".to_owned()))?;
-                let site_ca = p_act::sign::PublicKey::parse(text.trim_end()).map_err(|e| sa(e.to_string()))?;
-                core.with_certificates(
-                    crate::certs::CertificateInput { site_ca, directory: directory.clone() },
-                    std::time::SystemTime::now(),
-                )
+        // The CA key is trust material: read with the same rule as a settings file.
+        let sa = |why: String| ConfigError::SiteCa { path: self.site_ca.display().to_string(), why };
+        let bytes = p_act::settings::read_checked(&self.site_ca, 4096).map_err(|e| sa(e.to_string()))?;
+        let text = String::from_utf8(bytes).map_err(|_| sa("not UTF-8".to_owned()))?;
+        let site_ca = p_act::sign::PublicKey::parse(text.trim_end()).map_err(|e| sa(e.to_string()))?;
+        let now = std::time::SystemTime::now();
+        let core = core.with_broker_certificate_check(site_ca.clone(), now);
+        let core = match &self.certificates {
+            Some(directory) => {
+                core.with_certificates(crate::certs::CertificateInput { site_ca, directory: directory.clone() }, now)
             }
-            _ => core,
+            None => core,
         };
         Ok(Broker::new(core, crypto, site, Arc::new(SystemClock), Timeouts::default(), 8))
     }

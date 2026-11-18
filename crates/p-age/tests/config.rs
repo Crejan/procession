@@ -30,7 +30,7 @@ fn config_text(dir: &std::path::Path, extra: &str) -> String {
     format!(
         r#"{{"site":"{d}/site.json","listen":["127.0.0.1:0"],
             "tls_cert":"{d}/c.pem","tls_key":"{d}/k.pem","broker_key":"{d}/broker",
-            "state_dir":"{d}","log":"{d}/log.jsonl"{extra}}}"#
+            "state_dir":"{d}","site_ca":"{d}/site-ca.pub","log":"{d}/log.jsonl"{extra}}}"#
     )
 }
 
@@ -50,6 +50,8 @@ fn a_configuration_builds_a_broker_with_defaults_for_what_is_left_out() {
     // the first start is explicit: without a register the broker is not built
     assert!(matches!(config.build(), Err(ConfigError::State(_))));
     p_age::core::Core::init_state(&dir.path().join("register.json")).unwrap();
+    // the site CA key is read (with the settings rule); the broker has no certificate here, and says so, but is built
+    write(dir.path(), "site-ca.pub", KEY);
     let broker = config.build().unwrap();
     assert_eq!(broker.held_count(), 0);
     assert!(dir.path().join("log.jsonl").exists(), "the log is opened");

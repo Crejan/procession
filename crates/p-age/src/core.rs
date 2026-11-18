@@ -18,10 +18,10 @@ use p_act::exchange::{
     PledgeReason, Refused, Submit,
 };
 use p_act::limits::{CLOCK_TOLERANCE_SECONDS, MAX_DEADLINE_AHEAD_SECONDS, MAX_DELEGATION_SECONDS};
-use p_act::sign::{Agent, Fingerprint, signature_person};
+use p_act::sign::{Agent, Fingerprint, PublicKey, signature_person};
 use p_act::{Clearance, Document, DocumentHash, Timestamp};
 
-use crate::certs::{self, CertificateInput, Loaded};
+use crate::certs::{self, BrokerCertificate, BrokerCertificateFailure, CertificateInput, Loaded};
 use crate::crypto::Crypto;
 use crate::log::{LogEntry, LogSink};
 use crate::perm::{self, PermError};
@@ -140,6 +140,20 @@ struct Degraded {
 /// A degraded broker tries the whole write again at least this often.
 const RETRY_EVERY: Duration = Duration::from_secs(60);
 
+/// A line on standard error when the broker's own certificate becomes good or bad.
+fn report_broker_certificate(
+    before: Option<&Result<BrokerCertificate, BrokerCertificateFailure>>,
+    now: &Result<BrokerCertificate, BrokerCertificateFailure>,
+) {
+    match (before.map(Result::is_ok), now) {
+        (None | Some(true), Err(why)) => {
+            eprintln!("page: the broker's certificate is not valid ({why}): no clearances are issued");
+        }
+        (Some(false), Ok(_)) => eprintln!("page: the broker's certificate is valid again"),
+        _ => {}
+    }
+}
+
 /// A line on standard error for each certificate that was not carried, and for a directory that was refused.
 fn report_certificates(loaded: &Loaded) {
     if let Some(why) = &loaded.directory_refused {
@@ -164,6 +178,19 @@ pub struct Status {
     pub blocked_keys: Vec<String>,
     /// The certificate input, if one is configured.
     pub certificates: Option<CertificateStatus>,
+    /// The broker's own certificate, if it is checked.
+    pub broker_certificate: Option<BrokerCertificateStatus>,
+}
+
+/// What `page status` says of the broker's own certificate.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BrokerCertificateStatus {
+    /// Valid now: the broker issues clearances.
+    pub valid: bool,
+    /// Whole days until it ends, when it is valid.
+    pub days_left: Option<i64>,
+    /// `missing`, `not-yet-valid`, `expired` or `refused`, when it is not valid.
+    pub failure: Option<&'static str>,
 }
 
 /// What `page status` says of the certificates.
@@ -306,6 +333,15 @@ pub struct Core {
     degraded: Option<Degraded>,
     /// The certificates the broker carries to pledge, if that input is configured.
     certs: Option<CertState>,
+    /// The broker's own certificate, if it is checked (it always is in `page serve`).
+    broker_cert: Option<BrokerCertState>,
+}
+
+/// What was found when the broker's own certificate was last checked.
+struct BrokerCertState {
+    site_ca: PublicKey,
+    last_check: SystemTime,
+    result: Result<BrokerCertificate, BrokerCertificateFailure>,
 }
 
 /// The certificate input and what was read from it.
@@ -339,6 +375,38 @@ impl Core {
             seq: 0,
             degraded: None,
             certs: None,
+            broker_cert: None,
+        }
+    }
+
+    /// Check the broker's own certificate now and once a minute: a broker without a valid one issues no clearance and
+    /// no standing (nothing a service or a pledge could verify as `broker`), and `page status` says so.
+    #[must_use]
+    pub fn with_broker_certificate_check(mut self, site_ca: PublicKey, now: SystemTime) -> Core {
+        let result = self.crypto.check_broker_certificate(&site_ca, now);
+        report_broker_certificate(None, &result);
+        self.broker_cert = Some(BrokerCertState { site_ca, last_check: now, result });
+        self
+    }
+
+    /// Whether the broker may sign in its own name at `now`: its certificate is valid (or is not checked at all).
+    fn may_sign(&self, now: SystemTime) -> bool {
+        let secs = u64::try_from(unix(now)).unwrap_or(0);
+        self.broker_cert
+            .as_ref()
+            .is_none_or(|s| s.result.as_ref().is_ok_and(|c| c.valid_after <= secs && secs < c.valid_before))
+    }
+
+    fn recheck_broker_certificate(&mut self, now: SystemTime) {
+        let Some(state) = &self.broker_cert else { return };
+        if now < state.last_check + CERTIFICATES_EVERY {
+            return;
+        }
+        let result = self.crypto.check_broker_certificate(&state.site_ca, now);
+        report_broker_certificate(Some(&state.result), &result);
+        if let Some(state) = self.broker_cert.as_mut() {
+            state.last_check = now;
+            state.result = result;
         }
     }
 
@@ -647,6 +715,9 @@ impl Core {
     // --- pledges ----------------------------------------------------------
 
     fn standing(&mut self, person: &str, now: SystemTime) -> Result<Effect, ()> {
+        if !self.may_sign(now) {
+            return Err(());
+        }
         let Some(link) = self.links.get_mut(person) else { return Err(()) };
         let n = link.next_n;
         link.next_n += 1;
@@ -680,6 +751,14 @@ impl Core {
 
     /// A pledge signed in: it is told it is ready, then the standing, then every request that waited.
     pub fn pledge_signed_in(&mut self, person: &str, conn: ConnId, nonce: &Secret32, now: SystemTime) -> Vec<Effect> {
+        // A broker that cannot sign in its own name makes no standing a pledge could verify: the new connection is
+        // refused before anything else, and a pledge already connected is left as it is.
+        if !self.may_sign(now) {
+            return vec![
+                Effect::Pledge(conn, PledgeOut::Error(ErrorCode::Busy)),
+                Effect::Pledge(conn, PledgeOut::Close),
+            ];
+        }
         let mut fx = Vec::new();
         if let Some(old) = self.links.insert(person.to_owned(), Link { conn, nonce: *nonce, next_n: 0 }) {
             fx.push(Effect::Pledge(old.conn, PledgeOut::Error(ErrorCode::Superseded)));
@@ -769,6 +848,10 @@ impl Core {
     }
 
     fn clearance_for(&self, hash: DocumentHash, approval: &str, now: SystemTime) -> Result<Outcome, ()> {
+        if !self.may_sign(now) {
+            eprintln!("page: no clearance: the broker has no valid certificate");
+            return Err(());
+        }
         let clearance = Clearance::compose(hash, stamp(now)).map_err(drop)?;
         let sig =
             self.crypto.sign_clearance(&clearance).map_err(|e| eprintln!("page: cannot sign a clearance: {e}"))?;
@@ -1003,6 +1086,19 @@ impl Core {
             withdrawn,
             blocked_persons: self.register.blocked_persons(),
             blocked_keys: self.register.blocked_keys(),
+            broker_certificate: self.broker_cert.as_ref().map(|s| {
+                let secs = u64::try_from(unix(now)).unwrap_or(0);
+                match &s.result {
+                    Ok(c) if c.valid_after <= secs && secs < c.valid_before => BrokerCertificateStatus {
+                        valid: true,
+                        days_left: Some(i64::try_from((c.valid_before - secs) / 86_400).unwrap_or(i64::MAX)),
+                        failure: None,
+                    },
+                    // valid when last checked, ended since
+                    Ok(_) => BrokerCertificateStatus { valid: false, days_left: None, failure: Some("expired") },
+                    Err(f) => BrokerCertificateStatus { valid: false, days_left: None, failure: Some(f.code()) },
+                }
+            }),
             certificates: self.certs.as_ref().map(|s| CertificateStatus {
                 carried: s.loaded.carried_count(now),
                 not_carried: s.loaded.not_carried.len(),
@@ -1025,6 +1121,7 @@ impl Core {
                 fx.extend(h.conn.map(|c| Effect::Service(c, ServiceOut::Close)));
             }
         }
+        self.recheck_broker_certificate(now);
         fx.extend(self.reload_certificates(now));
         // Forgetting a registration restricts: in force in memory, stored if it can be.
         if self.register.forget_ended(now) > 0 {
@@ -1109,6 +1206,13 @@ mod tests {
             _: &PublicKey,
         ) -> Result<p_act::sign::ApprovalCertificate, CryptoError> {
             Err(CryptoError::Sign(SignError::MalformedSignature))
+        }
+        fn check_broker_certificate(
+            &self,
+            _: &PublicKey,
+            _: SystemTime,
+        ) -> Result<BrokerCertificate, BrokerCertificateFailure> {
+            Ok(BrokerCertificate { valid_after: 0, valid_before: u64::MAX })
         }
         fn sign_clearance(&self, _: &Clearance) -> Result<String, CryptoError> {
             Ok(SIG.to_owned())
