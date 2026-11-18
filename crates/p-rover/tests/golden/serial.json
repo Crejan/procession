@@ -9,7 +9,9 @@
   "records": [
     {
       "type": "cmdline",
-      "console": []
+      "console": [
+        "ttyS0,115200"
+      ]
     },
     {
       "type": "active_console",
@@ -48,7 +50,7 @@
       "type": "getty",
       "pid": 40,
       "tty": "ttyS0",
-      "cmdline": "/sbin/agetty --keep-baud\t5200 ttyS0 vt220"
+      "cmdline": "/sbin/agetty --keep-baud 115200 ttyS0 vt220"
     }
   ],
   "restored": [],

@@ -13,7 +13,7 @@ fn live_against_replayed_grub_config() {
     let diff = report.records.iter().find(|r| r["type"] == "diff").unwrap();
     // threadirqs and skew_tick are declared by grub.d but the live line lacks them.
     assert_eq!(diff["declared_not_live"], serde_json::json!(["threadirqs", "skew_tick=1"]));
-    assert_eq!(diff["live_not_declared"], serde_json::json!([]));
+    assert_eq!(diff["live_not_declared"], serde_json::json!(["console=ttyS0,115200"]));
     assert_eq!(diff["in_sync"], false);
     assert!(report.findings.iter().any(|f| f.id == "cmdline-drift"));
     assert!(!report.findings.iter().any(|f| f.id == "isolation-drift"));
