@@ -242,7 +242,9 @@ fn a_connection_the_broker_cuts_is_made_again_and_signed_in_again() {
 #[test]
 fn a_block_by_an_administrator_reaches_pledge_in_the_standing_and_lifting_it_does_too() {
     let (lab, site, _link) = world();
-    let stored = site.rt.block_on(site.broker.block_person("jan".into()));
+    let stored = site.rt.block_on(
+        site.broker.block_person("jan".into(), p_age::register::Actor::Administrator { uid: 0, account: None }),
+    );
     let _ = stored;
     eventually("blocked in pledge", || lab.rig.shared.broker_state.is_blocked());
     site.rt.block_on(site.broker.unblock_person("jan".into())).expect("unblocked");
