@@ -5,6 +5,7 @@
 
 use std::path::PathBuf;
 
+use p_act::broker::{ConnectionDocument, Standing};
 use p_act::sign::{self, Agent, PublicKey, SignError, Signer};
 use p_act::{Call, Clearance, Request};
 use thiserror::Error;
@@ -24,13 +25,13 @@ pub trait Crypto: Send + Sync {
     /// The agent's signature over a call, against the person's delegation key; the agent's certificate read.
     fn verify_call(&self, call: &Call, sig: &str, delegation_key: &PublicKey) -> Result<Agent, CryptoError>;
     /// pledge's sign-in: the connection document, against the person's connection key.
-    fn verify_connection(&self, doc: &[u8], sig: &str, person: &str, key: &PublicKey) -> Result<(), CryptoError>;
+    fn verify_connection(&self, doc: &ConnectionDocument, sig: &str, key: &PublicKey) -> Result<(), CryptoError>;
     /// An agent's certificate, read under formats section 3.1 and checked to be issued by `delegation_key`.
     fn check_agent_certificate(&self, line: &str, delegation_key: &PublicKey) -> Result<Agent, CryptoError>;
     /// The broker's signature over a clearance.
     fn sign_clearance(&self, clearance: &Clearance) -> Result<String, CryptoError>;
     /// The broker's signature over a standing (namespace `broker-v1@procession`).
-    fn sign_standing(&self, bytes: &[u8]) -> Result<String, CryptoError>;
+    fn sign_standing(&self, standing: &Standing) -> Result<String, CryptoError>;
 }
 
 /// The real thing: `ssh-keygen`, and the broker's key.
@@ -56,8 +57,8 @@ impl Crypto for SshCrypto {
         Ok(sign::verify_call_agent(call, sig, delegation_key)?)
     }
 
-    fn verify_connection(&self, doc: &[u8], sig: &str, person: &str, key: &PublicKey) -> Result<(), CryptoError> {
-        Ok(sign::verify_connection(person, key, sig, doc)?)
+    fn verify_connection(&self, doc: &ConnectionDocument, sig: &str, key: &PublicKey) -> Result<(), CryptoError> {
+        Ok(doc.verify(key, sig)?)
     }
 
     fn check_agent_certificate(&self, line: &str, delegation_key: &PublicKey) -> Result<Agent, CryptoError> {
@@ -69,7 +70,7 @@ impl Crypto for SshCrypto {
         Ok(sign::sign_clearance(&signer, clearance)?)
     }
 
-    fn sign_standing(&self, bytes: &[u8]) -> Result<String, CryptoError> {
-        Ok(sign::sign_broker(&Signer::certified(&self.broker_key)?, bytes)?)
+    fn sign_standing(&self, standing: &Standing) -> Result<String, CryptoError> {
+        Ok(standing.sign(&Signer::certified(&self.broker_key)?)?)
     }
 }

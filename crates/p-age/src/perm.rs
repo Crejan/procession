@@ -1,6 +1,5 @@
-//! Who may write what the broker reads and keeps. A configuration the wrong
-//! person can change is a broker the wrong person controls, so such a file is
-//! refused, not warned about.
+//! Who may read and write what the broker keeps: its register and the directory it is in. (The
+//! configuration and the site file are read with `p_act::settings`.)
 
 use std::os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt};
 use std::path::Path;
@@ -12,38 +11,12 @@ use thiserror::Error;
 pub enum PermError {
     #[error("cannot look at {path}: {source}")]
     Io { path: String, source: std::io::Error },
-    #[error("{path} can be written by someone who is neither its owner nor root (mode {mode:o})")]
-    WritableByOthers { path: String, mode: u32 },
-    #[error("{path} belongs to user {uid}, who is neither root nor the user running the broker")]
-    OtherOwner { path: String, uid: u32 },
     #[error("{path} can be read or written by someone but its owner (mode {mode:o}); it must be {wanted:o}")]
     NotPrivate { path: String, mode: u32, wanted: u32 },
 }
 
 fn io(path: &Path) -> impl FnOnce(std::io::Error) -> PermError + '_ {
     move |source| PermError::Io { path: path.display().to_string(), source }
-}
-
-/// The user id the broker runs as: that of a file it has just made.
-fn my_uid() -> Result<u32, PermError> {
-    let file =
-        tempfile::NamedTempFile::new().map_err(|source| PermError::Io { path: "a temporary file".into(), source })?;
-    Ok(file.as_file().metadata().map_err(|source| PermError::Io { path: "a temporary file".into(), source })?.uid())
-}
-
-/// A file the broker is configured from: nobody but its owner (or root) can write it, and its owner is root or
-/// the user the broker runs as.
-pub fn check_config_file(path: &Path) -> Result<(), PermError> {
-    let meta = std::fs::metadata(path).map_err(io(path))?;
-    let shown = path.display().to_string();
-    if meta.mode() & 0o022 != 0 {
-        return Err(PermError::WritableByOthers { path: shown, mode: meta.mode() & 0o7777 });
-    }
-    let uid = meta.uid();
-    if uid != 0 && uid != my_uid()? {
-        return Err(PermError::OtherOwner { path: shown, uid });
-    }
-    Ok(())
 }
 
 /// A file only its owner may read or write (0600).

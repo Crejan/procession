@@ -65,7 +65,7 @@ fn a_setting_can_be_changed_and_an_unknown_one_is_refused() {
     let ok = write(dir.path(), "a.json", &config_text(dir.path(), r#","max_waiting_per_agent":2"#));
     assert_eq!(Config::read(&ok).unwrap().max_waiting_per_agent, 2);
     let bad = write(dir.path(), "b.json", &config_text(dir.path(), r#","max_waiting":2"#));
-    assert!(matches!(Config::read(&bad), Err(ConfigError::Parse { .. })));
+    assert!(matches!(Config::read(&bad), Err(ConfigError::Settings(_))));
     assert!(Config::read(&dir.path().join("none.json")).is_err());
     let empty = write(
         dir.path(),
@@ -96,7 +96,13 @@ fn a_configuration_or_site_file_that_anyone_but_its_owner_can_write_is_refused()
     let path = write(dir.path(), "page.json", &config_text(dir.path(), ""));
     for bad in [0o666, 0o664, 0o646, 0o622] {
         mode(&path, bad);
-        assert!(matches!(Config::read(&path), Err(ConfigError::Perm(_))), "{bad:o}");
+        assert!(
+            matches!(
+                Config::read(&path),
+                Err(ConfigError::Settings(p_act::settings::SettingsError::WritableByOthers { .. }))
+            ),
+            "{bad:o}"
+        );
     }
     for good in [0o600, 0o640, 0o644, 0o400] {
         mode(&path, good);
@@ -153,4 +159,41 @@ fn a_register_that_cannot_be_read_stops_the_broker_from_being_built() {
     std::fs::write(&state, "garbage").unwrap();
     mode(&state, 0o600);
     assert!(matches!(Config::read(&page).unwrap().build(), Err(ConfigError::State(_))));
+}
+
+#[test]
+fn the_settings_files_are_read_as_p_act_reads_them_one_object_and_nothing_else() {
+    let dir = private_dir();
+    let good = config_text(dir.path(), "");
+    let refused = |text: String| {
+        let path = write(dir.path(), "x.json", &text);
+        Config::read(&path).is_err()
+    };
+    assert!(!refused(good.clone()));
+    assert!(refused(format!("{good} trailing")), "text after the object");
+    assert!(refused(format!("\u{feff}{good}")), "a byte order mark");
+    assert!(refused(format!("[{good}]")), "not an object");
+    assert!(
+        refused(good.replacen("{", r#"{"max_waiting_per_agent":1,"max_waiting_per_agent":2,"#, 1)),
+        "a member twice"
+    );
+    assert!(refused(good.replacen("{", r#"{"surprise":1,"#, 1)), "an unknown member");
+    // a file that is not a regular file (a link to a good one is a file; a directory is not)
+    assert!(Config::read(dir.path()).is_err());
+}
+
+#[test]
+fn a_site_file_whose_certificates_or_groups_a_standing_could_not_carry_is_refused_when_read() {
+    use p_age::site::Site;
+    let person = |extra: &str| {
+        format!(
+            r#"{{"persons":[{{"name":"jan","enabled":true,"connection_key":"{KEY}","delegation_key":"{KEY}"{extra}}}],"hosts":[]}}"#
+        )
+    };
+    assert!(Site::from_json(&person(r#","groups":["ops","dev"]"#)).is_ok());
+    assert!(Site::from_json(&person(r#","groups":["ops","ops"]"#)).is_ok(), "a duplicate is a set's one entry");
+    assert!(Site::from_json(&person(r#","groups":["has space"]"#)).is_err());
+    assert!(Site::from_json(&person(r#","groups":["a,b"]"#)).is_err());
+    assert!(Site::from_json(&person(r#","groups":[""]"#)).is_err());
+    assert!(Site::from_json(&person(r#","certificates":["not a certificate"]"#)).is_err());
 }
