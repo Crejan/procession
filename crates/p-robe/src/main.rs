@@ -79,8 +79,16 @@ fn main() -> ExitCode {
         }
         _ => {
             let mut caller = caller();
+            // A test build run by an ordinary user may be pointed at another `prover`; root never is.
+            #[cfg(feature = "test-verbs")]
+            let prover = p_robe::dispatch::test_sandbox(std::env::var_os("PROBE_TEST_PROVER"), caller.euid);
             let (sink, lock_dir) = wiring(&mut caller);
-            let dispatcher = Dispatcher::new(sink.as_ref(), lock_dir);
+            #[allow(unused_mut)]
+            let mut dispatcher = Dispatcher::new(sink.as_ref(), lock_dir);
+            #[cfg(feature = "test-verbs")]
+            {
+                dispatcher.prover = prover;
+            }
             let rc = dispatcher.run(&caller, &args, &mut std::io::stdout().lock(), &mut std::io::stderr().lock());
             ExitCode::from(rc)
         }

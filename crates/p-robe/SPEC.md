@@ -162,7 +162,9 @@ row's). It then writes the output convention, one JSON object per line:
 The types `header`, `unreadable`, `restored`, `finding`, `trailer` and `error` are the
 dispatcher's: a record of the tool with one of them is a disagreement (below). The
 cap of 1 MiB on the answer (`ANSWER_CAP`) applies to these lines as to any answer: past it
-the output ends with a `truncated` record and the trailer's `truncated` is `true`.
+the output ends with the `truncated` record and has **no trailer** (the writer refuses everything after
+that record; a trailer's `truncated` is therefore always `false`): an agent that finds no trailer knows the
+answer was cut. (`prover`'s own estimates, about 115 KB for `procs` and 150 KB for `irq`, are far below.)
 
 **Exit codes.** The dispatcher's own exit code says only what the dispatcher did: 0 it
 ran, 64 refused, 75 busy, 76 expired, 3 no audit line could be written. **The tool's
@@ -172,17 +174,23 @@ code never becomes the dispatcher's**; it travels in the output, as `rc`:
 |---|---|---|
 | 0, 1, 2 (the row's result codes: nothing above info, warnings, critical) | `done` | the lines above, trailer `rc` 0/1/2 and `result` `info`/`warnings`/`critical` |
 | 3 (the diagnostic itself failed) | `done` | the lines the tool gave, trailer `rc` 3 and `result` `failed-diagnostic`: an agent must not read an empty answer as "all fine" |
-| 4, any other code, a signal, a timeout | **failed** | no tool lines; one `error` record with a `code` (`tool-refused` for 4: the row and the tool disagree about the arguments; `tool-failed`, `tool-killed`, `tool-timeout`), then the trailer with `result` `failed` |
+| 4, any other code, a signal, a timeout, a tool that cannot be run | **failed** | no tool lines; one `error` record with a `code` (`tool-refused` for 4: the row and the tool disagree about the arguments; `tool-failed`, `tool-killed`, `tool-timeout`, `tool-unusable`), then the trailer with `rc` null and `result` `failed` |
 | not one JSON object, over the limit, the wrong `subcommand` or `schema_version`, a record of a reserved type | **failed** | no tool lines; one `error` record (`not-an-object`, `object-too-large`, `wrong-object`, `reserved-type`), trailer `result` `failed` |
 
 A failed call never ends with half an output. The dispatcher's exit code for a verb that was
 started and did not produce a usable result is **70** (decided; not 2): a tool code outside the row's
 result codes, a signal, a timeout, a bad or too large object, a reserved record type. The `done` audit
-line carries `rc=70` and `cause=` (today `verb-code:N` and `answer-lost`; `tool-killed`, `tool-timeout`,
-`not-an-object`, `object-too-large`, `wrong-object`, `reserved-type` with `prover`). The service tells the
-agent `failed` (not `unavailable`: that is only for a verb that certainly did not start) and logs the cause
-under the call's identifier. A verb of this program, until `prover` rows exist, is on the same rule: a code
-other than 0 is 70.
+line carries `rc=70` and `cause=` (`tool-refused`, `tool-failed:N`, `tool-killed:N`, `tool-timeout`,
+`tool-unusable:why`, `not-an-object`, `object-too-large`, `wrong-object`, `reserved-type`; for a verb of this
+program `verb-code:N` and `answer-lost`). The service tells the agent `failed` (not `unavailable`: that is
+only for a verb that certainly did not start) and logs the cause under the call's identifier.
+
+**Built** (`src/prover.rs`): `rt procs` (`max`) and `rt irq` (`duration`, `top`); the limit on the object is
+4 MiB, the tool's run is killed after 30 s (`procs`) or 60 s (`irq`: the longest window and then some), and
+the tool is not run at all unless, for root, it is a file that root owns and no one else can write
+(`tool-unusable`). **Where `prover` is:** the fixed `/usr/local/bin/prover` (`PROVER_PATH`), installed beside
+`probe` by the roll-out; not a setting (the dispatcher runs it as root, so nothing an account can edit may
+name it). `sys kit` reports the path and, if it cannot be run, a warning. `rt jitter` stays unbuilt.
 
 The first table (`src/main.rs`); the ratings are proposals:
 

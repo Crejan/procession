@@ -494,7 +494,7 @@ rm -rf /etc/systemd/system/probe-serve.service.d; systemctl daemon-reload`.
 
 As `alice`: `pledge agents start --groups admins --output /home/alice/bundle` (answer the dialog; pledge creates the bundle
 exclusively with mode 0600 itself, whatever the umask: it is the agent's key).
-Then, as the user the agent runs as (the bundle is the agent's key: guard it):
+Then, as the user the agent runs as (the bundle is the agent's key: guard it; `pact` refuses a bundle given as a regular file on standard input unless that user owns it and no permission bit is set for group or others, so if the agent's user is not `alice`, hand it over with `install -o <agent user> -m 0600 /home/alice/bundle <path>` and read that):
 
 ```
 pact tools < /home/alice/bundle
