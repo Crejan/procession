@@ -338,29 +338,37 @@ their number. So the budget is set well below it:
 - **300 characters for everything the holder puts into the prompt.**
 - **First the holder's fixed words** (section 1.6, consequence 2), at most
   40 characters, the same for every prompt of one purpose, for example
-  "pledge: approve a request." They are never cut and nothing stands
-  before them.
-- **Then, for a request: host, service, action**, in that order, each
-  with its label. The host is at most 64 characters by the formats and is
-  never cut. The service's name and the action have no stated maximum in
-  `doc/approval-formats.md`.
-- **What does not fit is cut at its end and marked.** Only the last field
-  can be cut (the action; for a login the host names from `known_hosts`;
-  for a delegation the groups), so that what identifies the target always
-  stands whole. The mark is `[CUT: n more]` with the number of characters
-  left out. Brackets, a colon and a space cannot occur in a host, a
-  service's name or an action, so the mark cannot be taken for part of
-  one, and a field cannot imitate it. A service's name longer than 64
-  characters is cut the same way before the action is added.
-- This is not a breach of R9. The dialog shows every field whole, and what
-  cannot be shown whole *there* is refused. The prompt is the second,
-  short line the person compares the dialog with (section 4.4); a cut
-  there is marked and says how much is missing.
-- The stricter alternative: refuse a request whose prompt line would not
-  fit. It costs nothing while actions are a few words, and it would make
-  the prompt as exact as the dialog. I propose the cut, because an
-  action's length is the service's choice and a refusal for it would be
-  explained to nobody; the designer may prefer the refusal.
+  "pledge: approve a request." Nothing stands before them.
+- **Then the names**: for a request the service, its host and the action.
+
+**What does not fit is refused, never cut** (decided by the designer on
+2026-11-18; I had proposed a marked cut). The prompt's words are the
+person's check against a dialog that lies (section 4.4). A prompt that
+ends in "… and more" checks nothing: what was left out is exactly where a
+lie would be. So the rule for the dialog, a field whole and longer is
+refused, holds for the prompt for the same reason.
+
+How that is made true:
+
+- **It is a property of the call, not a behaviour of the holder.** The
+  three names the prompt carries (service, host, action) have a combined
+  bound of 240 characters. With the fixed words (at most 40) and the
+  separators that stays inside 300. The bound goes into `Call::showable`
+  in p-act, which p-act builds, with the reason `not-showable`. A service
+  refuses such a call before anybody is asked; pledge refuses it too, and
+  pledge's refusal is the one that counts; the key holder never meets a
+  request whose words do not fit.
+- **The holder still checks the length of what it is handed**, and fails
+  if the reader ever gives it more: the fourth ending of `sign`, never a
+  shortened prompt. That is a guard, not the rule.
+- **The same for the other two prompts.** A login: the user and the host
+  (a name from `known_hosts`, or the fingerprint); a signing request whose
+  words do not fit is refused as not showable. A delegation: the person,
+  the **number** of groups and the validity. The prompt names the count
+  and the dialog shows the list whole; a prompt that lists groups until it
+  runs out of room is the same cut in another place.
+- **The budget holds with keys in files too**, where there is no prompt,
+  so that a call that is showable on Linux is showable on a Mac.
 
 What this does **not** give: the Secure Enclave does not know what was on
 the screen. A reader that is taken over can hand the key holder the bytes
@@ -910,11 +918,13 @@ framework replaced by a double, unless it says "by hand".
    `sign` returns "closed" at the deadline and the context was
    invalidated. By hand: an open prompt disappears at the deadline.
 6. **The prompt's words.** The fixed words are first and whole for every
-   input; the whole text is at most 300 characters; a host of 64
-   characters is never cut; an action that does not fit ends in
-   `[CUT: n more]` with the right number; no parameter and no claim ever
-   appears; a field that contains `[CUT:` cannot occur (the formats
-   exclude the characters) and the test says so.
+   input; the whole text is at most 300 characters; no parameter and no
+   claim ever appears; a delegation's prompt carries the number of groups
+   and no group's name. **Nothing is ever cut:** handed words that do not
+   fit, the holder returns "failed" and shows no prompt. In p-act:
+   `Call::showable` refuses a call whose service, host and action together
+   exceed 240 characters, with `not-showable`, and accepts one at exactly
+   240; the same on Linux with keys in files.
 7. **Each purpose has its flags.** A key made for confirmed approval or
    delegation asks for `.biometryAny`; for shared, `.userPresence`; for
    automatic, connection and bound, no presence flag and "after first
@@ -942,7 +952,7 @@ them.
 | 7 | Presence for what ends in no signature | decided | `LAContext.evaluatePolicy` in the key holder, said plainly to be software. Retiring a key with a presence check requires that key's signature first. No fifth key |
 | 8 | Who signs pledge's Mac programs, and as what | decided, by the owner | His Developer ID team (the one Atticus is signed with), with identifiers of pledge's own for the reader, the key holder and the dialog process |
 | 9 | A request while no presence check is possible | decided | It waits until its deadline and ends `expired`; the record says why it could not be asked (locked, sensor locked out) |
-| 10 | What the Touch ID prompt says | decided; check 5 has run | As recommended: service, host and action; user and host for a login; person, groups and validity for a delegation; never a parameter or the agent's claim. Check 5 gives the room (section 2.2, the budget: 300 characters, the holder's fixed words first, a marked cut at the end of the last field). The cut, or a refusal in its place, is put to the designer there |
+| 10 | What the Touch ID prompt says | decided; check 5 has run | As recommended: service, host and action; user and host for a login; person, groups and validity for a delegation; never a parameter or the agent's claim. Check 5 gives the room (section 2.2, the budget: 300 characters, the holder's fixed words first). Decided by the designer on 2026-11-18: what does not fit is refused, never cut; service, host and action together are at most 240 characters, a bound in `Call::showable`; a delegation's prompt names the number of groups |
 | 11 | A first Mac stage with `Terminal` and real keys | decided | Accepted, for the owner only |
 | 12 | One Mac app or two | decided, by the owner | Two Mac apps, from one Swift code base. preserve's app is admitted on pledge's `control.sock` for exactly `keys.create` of a bound key and `keys.list`, by a rule per command and peer |
 | 13 | Take Atticus's SwiftUI front end at all | decided | Yes, with the condition as written: it becomes preserve's Mac front end only after the logic still in its views and view models has moved into the daemon and the socket protocol offers what section 8.5 lists. The three bypasses and the prune marker (section 8.2) are the list of what goes behind the protocol first. Nothing is copied yet |
