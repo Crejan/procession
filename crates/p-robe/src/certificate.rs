@@ -34,12 +34,20 @@ impl<'a> Reader<'a> {
     }
 }
 
-/// When the certificate in `line` ends, in seconds since the epoch. Ed25519 and
-/// ECDSA P-256 certificates only (the key types of the system).
+/// What a certificate line says that matters here.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Facts {
+    /// When it ends, in seconds since the epoch (`u64::MAX`: never).
+    pub valid_before: u64,
+    /// The bytes of the key it certifies (an Ed25519 public key; the point of an ECDSA key).
+    pub subject: Vec<u8>,
+}
+
+/// Reads a certificate line. Ed25519 and ECDSA P-256 certificates only (the key types of the system).
 ///
 /// # Errors
 /// Why the line is not a certificate this reads.
-pub fn valid_before(line: &str) -> Result<u64, String> {
+pub fn facts(line: &str) -> Result<Facts, String> {
     let mut words = line.split_whitespace();
     let (kind, blob) = (words.next().ok_or("empty")?, words.next().ok_or("no key data")?);
     let blob = STANDARD.decode(blob).map_err(|_| "the key data is not base64")?;
@@ -49,22 +57,47 @@ pub fn valid_before(line: &str) -> Result<u64, String> {
         return Err("the line's type is not the blob's".into());
     }
     reader.string()?; // nonce
-    match kind {
-        "ssh-ed25519-cert-v01@openssh.com" => {
-            reader.string()?; // the public key
-        }
+    let subject = match kind {
+        "ssh-ed25519-cert-v01@openssh.com" => reader.string()?.to_vec(),
         "ecdsa-sha2-nistp256-cert-v01@openssh.com" => {
             reader.string()?; // the curve
-            reader.string()?; // the point
+            reader.string()?.to_vec()
         }
         other => return Err(format!("`{other}` is not a certificate type this reads")),
-    }
+    };
     reader.u64()?; // serial
     reader.u32()?; // user or host
     reader.string()?; // key id
     reader.string()?; // principals
     reader.u64()?; // valid after
-    reader.u64()
+    Ok(Facts { valid_before: reader.u64()?, subject })
+}
+
+/// When the certificate in `line` ends, in seconds since the epoch.
+///
+/// # Errors
+/// Why the line is not a certificate this reads.
+pub fn valid_before(line: &str) -> Result<u64, String> {
+    facts(line).map(|f| f.valid_before)
+}
+
+/// The key bytes of a public key line (`ssh-ed25519 <base64> [comment]`), the same bytes a certificate
+/// for that key carries as its subject. Ed25519 only: the service's key is one.
+///
+/// # Errors
+/// Why the line is not an Ed25519 public key.
+pub fn ed25519_public(line: &str) -> Result<Vec<u8>, String> {
+    let mut words = line.split_whitespace();
+    let (kind, blob) = (words.next().ok_or("empty")?, words.next().ok_or("no key data")?);
+    if kind != "ssh-ed25519" {
+        return Err(format!("`{kind}` is not an Ed25519 public key"));
+    }
+    let blob = STANDARD.decode(blob).map_err(|_| "the key data is not base64")?;
+    let mut reader = Reader(&blob);
+    if reader.string()? != b"ssh-ed25519" {
+        return Err("the line's type is not the blob's".into());
+    }
+    Ok(reader.string()?.to_vec())
 }
 
 /// The whole days left of the certificate in the file at `path` at `now` (seconds since the

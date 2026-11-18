@@ -5,6 +5,10 @@
 //! parts"; `doc/approvals.md`, section 7). In a site the provisioning runs it once as
 //! root; the service itself never reads the host key.
 //!
+//! `--if-due` is the form the daily timer runs: it does nothing while more than 10 of the 30 days
+//! remain, and renews otherwise, or at once when there is no certificate or the key changed. A
+//! failed renewal is an error, so the timer's unit shows as failed and the next day tries again.
+//!
 //! The certificate is replaced by a rename, so the service, which reads it on every
 //! signature (`ssh-keygen -Y sign` is given the certificate file), sees the old one or
 //! the new one and never half of one, and needs no restart. A renewal that fails leaves
@@ -19,6 +23,9 @@ use crate::service::SERVICE_NAME;
 /// How long a certificate is valid, as `ssh-keygen -V`.
 const VALIDITY: &str = "+30d";
 
+/// Renew when this many days or fewer remain.
+pub const RENEW_WHEN_DAYS_LEFT: i64 = 10;
+
 /// What `run` did.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Done {
@@ -26,6 +33,101 @@ pub enum Done {
     Made,
     /// The key was kept and the certificate replaced.
     Renewed,
+}
+
+/// Why a renewal is due.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Reason {
+    NoKey,
+    PublicKeyMissing,
+    NoCertificate,
+    /// The certificate is there and cannot be read.
+    Unreadable(String),
+    /// The certificate certifies another key than the service's.
+    KeyChanged,
+    /// The certificate has no end: not one this makes.
+    NoEnd,
+    /// Seconds left (negative once it has ended): not more than ten days.
+    Remaining(i64),
+}
+
+/// Whether a renewal is due.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Due {
+    /// More than ten days remain: seconds left.
+    No(i64),
+    Yes(Reason),
+}
+
+/// What is found in the directory of the key and the certificate.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Found {
+    /// The service's public key bytes: `None` if there is no key (or no public half).
+    pub key: Option<Result<Vec<u8>, Reason>>,
+    /// The certificate: `None` if absent.
+    pub certificate: Option<Result<crate::certificate::Facts, String>>,
+}
+
+/// The rule: nothing while **more than** ten days remain; a renewal otherwise, and at once when there
+/// is no key, no certificate, one that cannot be read or has no end, or one for another key.
+#[must_use]
+pub fn decide(found: &Found, now: i64) -> Due {
+    match (&found.key, &found.certificate) {
+        (None, _) => Due::Yes(Reason::NoKey),
+        (Some(Err(reason)), _) => Due::Yes(reason.clone()),
+        (Some(Ok(_)), None) => Due::Yes(Reason::NoCertificate),
+        (Some(Ok(_)), Some(Err(why))) => Due::Yes(Reason::Unreadable(why.clone())),
+        (Some(Ok(key)), Some(Ok(cert))) => {
+            if &cert.subject != key {
+                return Due::Yes(Reason::KeyChanged);
+            }
+            let Ok(end) = i64::try_from(cert.valid_before) else { return Due::Yes(Reason::NoEnd) };
+            if cert.valid_before == u64::MAX {
+                return Due::Yes(Reason::NoEnd);
+            }
+            let left = end - now;
+            if left > RENEW_WHEN_DAYS_LEFT * 86_400 { Due::No(left) } else { Due::Yes(Reason::Remaining(left)) }
+        }
+    }
+}
+
+/// Looks at the key and the certificate in `out`.
+#[must_use]
+pub fn inspect(out: &Path) -> Found {
+    let (key, public, cert) = (out.join("service-key"), out.join("service-key.pub"), out.join("service-key-cert.pub"));
+    let key_found = if !key.exists() {
+        None
+    } else {
+        Some(match std::fs::read_to_string(&public) {
+            Err(_) => Err(Reason::PublicKeyMissing),
+            Ok(text) => crate::certificate::ed25519_public(&text).map_err(Reason::Unreadable),
+        })
+    };
+    let certificate = cert.exists().then(|| {
+        std::fs::read_to_string(&cert)
+            .map_err(|e| e.to_string())
+            .and_then(|text| crate::certificate::facts(text.trim()))
+    });
+    Found { key: key_found, certificate }
+}
+
+/// What `run_if_due` did.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum IfDue {
+    /// Nothing: the whole days left.
+    NotDue(i64),
+    Did(Done, Reason),
+}
+
+/// The renewing form: `run` only when [`decide`] says it is due.
+///
+/// # Errors
+/// What `run` says; a failed renewal is an error and the old certificate stays.
+pub fn run_if_due(host_key: &Path, host: &str, out: &Path, now: i64) -> Result<IfDue, String> {
+    match decide(&inspect(out), now) {
+        Due::No(left) => Ok(IfDue::NotDue(left.div_euclid(86_400))),
+        Due::Yes(reason) => run(host_key, host, out).map(|done| IfDue::Did(done, reason)),
+    }
 }
 
 /// Makes `<out>/service-key` if it is not there, and replaces
@@ -253,5 +355,151 @@ mod tests {
     fn what_the_person_is_told_differs_for_a_renewal() {
         assert!(note(Done::Made).contains("20 days"));
         assert!(note(Done::Renewed).contains("Kept the service's key"));
+    }
+
+    // ---- the due rule, branch by branch ----------------------------------------------------
+
+    fn cert_facts(subject: &[u8], ends_in: i64, now: i64) -> Found {
+        Found {
+            key: Some(Ok(b"key".to_vec())),
+            certificate: Some(Ok(crate::certificate::Facts {
+                valid_before: u64::try_from(now + ends_in).unwrap(),
+                subject: subject.to_vec(),
+            })),
+        }
+    }
+
+    #[test]
+    fn the_due_rule_does_nothing_while_more_than_ten_days_remain() {
+        const DAY: i64 = 86_400;
+        let now = 1_800_000_000;
+        assert_eq!(decide(&cert_facts(b"key", 30 * DAY, now), now), Due::No(30 * DAY));
+        assert_eq!(decide(&cert_facts(b"key", 20 * DAY, now), now), Due::No(20 * DAY));
+        assert_eq!(decide(&cert_facts(b"key", 10 * DAY + 1, now), now), Due::No(10 * DAY + 1), "more than ten days");
+        // Ten days or fewer: renew. Exactly ten is not "more than ten".
+        assert_eq!(decide(&cert_facts(b"key", 10 * DAY, now), now), Due::Yes(Reason::Remaining(10 * DAY)));
+        assert_eq!(decide(&cert_facts(b"key", 9 * DAY, now), now), Due::Yes(Reason::Remaining(9 * DAY)));
+        assert_eq!(decide(&cert_facts(b"key", 1, now), now), Due::Yes(Reason::Remaining(1)));
+        assert_eq!(decide(&cert_facts(b"key", 0, now), now), Due::Yes(Reason::Remaining(0)));
+        assert_eq!(decide(&cert_facts(b"key", -5 * DAY, now), now), Due::Yes(Reason::Remaining(-5 * DAY)), "ended");
+    }
+
+    #[test]
+    fn the_due_rule_renews_at_once_without_a_key_a_certificate_a_readable_one_or_for_the_key() {
+        let now = 1_800_000_000;
+        let good = cert_facts(b"key", 30 * 86_400, now);
+        assert_eq!(decide(&Found { key: None, certificate: good.certificate.clone() }, now), Due::Yes(Reason::NoKey));
+        assert_eq!(
+            decide(&Found { key: Some(Err(Reason::PublicKeyMissing)), certificate: good.certificate.clone() }, now),
+            Due::Yes(Reason::PublicKeyMissing)
+        );
+        assert_eq!(decide(&Found { key: good.key.clone(), certificate: None }, now), Due::Yes(Reason::NoCertificate));
+        assert_eq!(
+            decide(&Found { key: good.key.clone(), certificate: Some(Err("junk".into())) }, now),
+            Due::Yes(Reason::Unreadable("junk".into()))
+        );
+        assert_eq!(
+            decide(&cert_facts(b"another key", 30 * 86_400, now), now),
+            Due::Yes(Reason::KeyChanged),
+            "the key changed"
+        );
+        let mut endless = cert_facts(b"key", 0, now);
+        endless.certificate.as_mut().unwrap().as_mut().unwrap().valid_before = u64::MAX;
+        assert_eq!(decide(&endless, now), Due::Yes(Reason::NoEnd));
+    }
+
+    // ---- on files, with a real ssh-keygen ----------------------------------------------------
+
+    /// Replaces the certificate by one that ends in `validity` (`ssh-keygen -V`), for the same key.
+    fn certify(dir: &Path, host: &Path, out: &Path, validity: &str) {
+        let staged = dir.join("staged");
+        let _ = std::fs::remove_dir_all(&staged);
+        std::fs::create_dir(&staged).unwrap();
+        std::fs::copy(out.join("service-key.pub"), staged.join("service-key.pub")).unwrap();
+        keygen(&[
+            "-q",
+            "-s",
+            &path(host),
+            "-I",
+            "probe@a.example",
+            "-n",
+            "probe@a.example",
+            "-V",
+            validity,
+            "-O",
+            "clear",
+            &path(&staged.join("service-key.pub")),
+        ])
+        .unwrap();
+        std::fs::copy(staged.join("service-key-cert.pub"), out.join("service-key-cert.pub")).unwrap();
+    }
+
+    #[test]
+    fn if_due_on_files_does_nothing_when_not_due_and_renews_when_due() {
+        let dir = crate::testdir::new("setup");
+        let host = host_key(&dir);
+        let out = dir.join("probe");
+        // Nothing there: made.
+        assert!(matches!(run_if_due(&host, "a.example", &out, now()), Ok(IfDue::Did(Done::Made, Reason::NoKey))));
+        // A fresh certificate: nothing is touched.
+        let before =
+            (std::fs::read(out.join("service-key")).unwrap(), std::fs::read(out.join("service-key-cert.pub")).unwrap());
+        assert!(matches!(run_if_due(&host, "a.example", &out, now()), Ok(IfDue::NotDue(29 | 30))));
+        assert_eq!(
+            (std::fs::read(out.join("service-key")).unwrap(), std::fs::read(out.join("service-key-cert.pub")).unwrap()),
+            before
+        );
+        // 11 days left: not due. 9 days left: due, the key kept, the certificate new and good for 30 days.
+        certify(&dir, &host, &out, "+11d");
+        assert!(matches!(run_if_due(&host, "a.example", &out, now()), Ok(IfDue::NotDue(10 | 11))));
+        certify(&dir, &host, &out, "+9d");
+        let (key, old) =
+            (std::fs::read(out.join("service-key")).unwrap(), std::fs::read(out.join("service-key-cert.pub")).unwrap());
+        assert!(matches!(
+            run_if_due(&host, "a.example", &out, now()),
+            Ok(IfDue::Did(Done::Renewed, Reason::Remaining(_)))
+        ));
+        assert_eq!(std::fs::read(out.join("service-key")).unwrap(), key);
+        assert_ne!(std::fs::read(out.join("service-key-cert.pub")).unwrap(), old);
+        assert!(matches!(crate::certificate::days_left(&out.join("service-key-cert.pub"), now()), Ok(Some(29 | 30))));
+        // An ended certificate, a certificate that is junk, none: due.
+        certify(&dir, &host, &out, "20200101Z:20200102Z");
+        assert!(
+            matches!(run_if_due(&host, "a.example", &out, now()), Ok(IfDue::Did(Done::Renewed, Reason::Remaining(left))) if left < 0)
+        );
+        std::fs::write(out.join("service-key-cert.pub"), "junk").unwrap();
+        assert!(matches!(
+            run_if_due(&host, "a.example", &out, now()),
+            Ok(IfDue::Did(Done::Renewed, Reason::Unreadable(_)))
+        ));
+        std::fs::remove_file(out.join("service-key-cert.pub")).unwrap();
+        assert!(matches!(
+            run_if_due(&host, "a.example", &out, now()),
+            Ok(IfDue::Did(Done::Renewed, Reason::NoCertificate))
+        ));
+    }
+
+    #[test]
+    fn if_due_renews_at_once_when_the_key_changed_and_a_failed_renewal_is_an_error_that_keeps_the_old_certificate() {
+        let dir = crate::testdir::new("setup");
+        let host = host_key(&dir);
+        let out = dir.join("probe");
+        run(&host, "a.example", &out).unwrap();
+        // The service's key is replaced (and its public half): the certificate is for the old one.
+        let other = dir.join("other");
+        keygen(&["-q", "-t", "ed25519", "-N", "", "-C", "", "-f", &path(&other)]).unwrap();
+        std::fs::copy(&other, out.join("service-key")).unwrap();
+        std::fs::copy(dir.join("other.pub"), out.join("service-key.pub")).unwrap();
+        assert!(matches!(
+            run_if_due(&host, "a.example", &out, now()),
+            Ok(IfDue::Did(Done::Renewed, Reason::KeyChanged))
+        ));
+        assert!(matches!(decide(&inspect(&out), now()), Due::No(_)), "the new certificate is for the new key");
+        // Due, and the host key cannot be read: an error, the old certificate stays.
+        certify(&dir, &host, &out, "+3d");
+        let old = std::fs::read(out.join("service-key-cert.pub")).unwrap();
+        let error = run_if_due(&dir.join("no-such-host-key"), "a.example", &out, now()).unwrap_err();
+        assert!(error.contains("ssh-keygen"), "{error}");
+        assert_eq!(std::fs::read(out.join("service-key-cert.pub")).unwrap(), old);
     }
 }

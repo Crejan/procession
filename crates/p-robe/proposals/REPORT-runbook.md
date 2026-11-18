@@ -130,3 +130,31 @@ Done on `agent/p-robe` (`integration` was already merged):
    command, the root timer with its undo, `sys kit` reporting the days left.
 
 I did not add the hyper lines.
+
+## Update: the daily timer and `probe setup --if-due`
+
+The designer's reason: with `OnUnitActiveSec=20d` a failed run is not tried again for 20 days
+and the certificate lapses. Now:
+
+- **The timer** `stage1/probe-setup.timer`: `OnCalendar=daily`, `Persistent=true`,
+  `RandomizedDelaySec=1h`; its unit runs `probe setup --if-due`.
+- **`--if-due`**: does nothing and exits 0 while **more than** 10 days remain (exactly 10
+  is not more); renews at 10 or fewer, including ended ones; renews at once when there is
+  no key, no public half, no certificate, a certificate that cannot be read or has no end, or
+  one that certifies another key than the service's (compared by key bytes). A failed renewal
+  exits 1, so the unit shows failed and the next day tries again. `probe setup` by hand
+  still renews always. `sys kit`'s warning under 5 days is unchanged.
+- **Tests, each branch of the rule:** the pure rule (30, 20, 10 days + 1 s, exactly 10, 9, 1 s,
+  0, ended; no key; no public half; no certificate; junk; another key; no end); on files with
+  a real `ssh-keygen`: nothing there is made, a fresh one is not touched (bytes compared),
+  11 days left is not due, 9 renews with the key kept, an ended one, a junk one and a
+  missing one each renew; a changed key renews at once; a failed renewal is an error that
+  keeps the old certificate; the CLI: `--if-due` twice (made, then `Not due`), by hand
+  renewing always, a missing host key exits 1, a bad flag exits 64. 141 unit with
+  `test-verbs`, 134 without; clippy and fmt clean.
+- **Runbook:** step B2 describes the rule, the unit and timer, how to see a renewal happen
+  (a certificate that ends in 9 days), pass and fail, and the undo of the timer. Not run:
+  the timer and the unit (no systemd here), anything as root.
+- A limit: "the key changed" is seen as a certificate for another key than the public half
+  beside the private key; a private key replaced without its `.pub` is not noticed until the
+  next unconditional run.

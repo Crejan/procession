@@ -22,7 +22,7 @@ service over HTTP. Nothing in it has been run on Linux. Terms are those of
 | `pledge serve`, `pledge keys`, `pledge agents start/withdraw`, `pledge history` | built (p-ledge), tested on macOS |
 | `probe` dispatcher, `sudo -n probe --within <rating> --call <uuid> <noun> <verb> ...` | built, tested on macOS with a simulated root; **never run through sudo** |
 | `probe setup` (the service's key and its 30-day certificate from the host key; **the same command renews**: it keeps the key, replaces the certificate by a rename; with no arguments it takes `/etc/probe.toml` or the defaults) | built, run on macOS with a throwaway host key |
-| the renewal timer (`stage1/probe-setup.service` and `.timer`) | written, **never run** (no systemd here); `systemd-analyze verify` is the first check |
+| the daily renewal timer and its unit (`stage1/probe-setup.service` and `.timer`, running `probe setup --if-due`) | written, **never run** (no systemd here); `systemd-analyze verify` is the first check |
 | `sys kit` reports the certificate's days left (a warning under 5) | built and tested on macOS with certificates made by `ssh-keygen -V` |
 | `probe serve`: the service core (checks, request, wait, approval, run), the MCP layer | built; run in-process against the real pledge (`tests/stage1.rs`) |
 | `probe serve` **over HTTP** | **not built.** It needs an HTTP server crate that cannot be fetched in the sandbox (section 6) |
@@ -274,7 +274,7 @@ pass: it prints `probe setup: ssh-keygen: ...` (a host key it cannot read, a nam
 that is not a key) and **leaves no key behind**. Undo: `rm -rf /etc/probe`.
 
 **It is also the renewing command, and idempotent.** Run again (as root, with
-the same arguments or none once B3 is in place) it keeps the key, makes a new
+the same arguments or none once B3 is in place; with `--if-due` only when due) it keeps the key, makes a new
 certificate in a directory of its own and renames it over the old one, owned by
 the key's owner (so after the `chown` above it stays the service's). The running
 service reads the certificate on every signature, so it needs no restart: the
@@ -285,8 +285,17 @@ Passed: it prints `Kept the service's key and replaced its certificate`; `cmp
 it first), and the certificate's `Valid:` end moved. Did not pass: as above, and the
 old certificate is still there.
 
-**The timer.** Put `stage1/probe-setup.service` and `stage1/probe-setup.timer` in
-`/etc/systemd/system/` and:
+**The timer.** `probe setup --if-due` is the form the timer runs: it does nothing
+and exits 0 while **more than 10 of the 30 days remain**, renews (key kept,
+certificate replaced) when 10 or fewer remain, and renews at once when there is
+no certificate, when the one there cannot be read or has no end, when it is for
+another key than the service's, or when there is no key at all. A renewal that
+fails ends non-zero. Run by hand without the flag, `probe setup` renews
+unconditionally. The timer runs the unit once a day (`OnCalendar=daily`, within an
+hour, `Persistent=true` so that a run missed while the host was off happens at the
+next boot): a failed run shows the unit as failed and is tried again the next day,
+instead of waiting weeks. Put `stage1/probe-setup.service` and
+`stage1/probe-setup.timer` in `/etc/systemd/system/` and:
 
 ```
 systemd-analyze verify /etc/systemd/system/probe-setup.service /etc/systemd/system/probe-setup.timer
@@ -297,16 +306,23 @@ systemctl status probe-setup.service
 systemctl list-timers probe-setup.timer
 ```
 
-The unit runs `probe setup` with no arguments, as root, 10 minutes after boot
-and then 20 days after each run, with a random delay of up to an hour; it needs
-nothing off the host and does not wait for anything else. Passed: `verify`
-prints nothing; `status` shows `Active: inactive (dead)` with `status=0/SUCCESS`
-and the line `Kept the service's key and replaced its certificate` in its journal;
-`list-timers` shows NEXT about 20 days ahead. Did not pass: `status` shows
-`failed` and the journal says why (`probe setup: ...`); the old certificate is
-untouched. `probe setup` with no arguments reads `/etc/probe.toml`: if that file
-exists and does not parse, it refuses (exit 64) rather than guess, which shows as
-a failed unit.
+It needs nothing off the host and waits for nothing else. Passed: `verify` prints
+nothing; right after B2 the manual `start` prints in the journal `Not due: 30 days
+left of the service's certificate (renewed when 10 or fewer remain).` and
+`status` shows `status=0/SUCCESS`; `list-timers` shows NEXT within a day. Did
+not pass: `status` shows `failed` and the journal says why (`probe setup
+--if-due: ...`: a host key it cannot read, ...); the old certificate is
+untouched and the next day's run tries again. A settings file that exists and does
+not parse makes it refuse (exit 64), which also shows as a failed unit.
+
+To see a renewal happen, as root: make a certificate that ends in 9 days (`ssh-keygen -s
+/etc/ssh/ssh_host_ed25519_key -I probe@HOSTNAME -n probe@HOSTNAME -V +9d -O clear
+/etc/probe/service-key.pub`, which writes `service-key-cert.pub` beside the
+key file; then `chown probe-svc:probe-svc /etc/probe/service-key-cert.pub`), run
+`systemctl start probe-setup.service`, and read the journal: `Due (Remaining(...))`
+and the note that the key was kept; `ssh-keygen -L -f
+/etc/probe/service-key-cert.pub` then shows 30 days again. Remove the file instead of
+replacing it and the journal says `Due (NoCertificate)`.
 
 **What `sys kit` says.** `probe` reports the certificate's days left. Run it as a login that has
 sudo (the dispatcher takes only a call that came through sudo): `sudo
@@ -321,9 +337,10 @@ copy the certificate aside, make one that ends soon (`ssh-keygen -s
 /etc/probe/service-key.pub` writes `service-key-cert.pub` beside the key file),
 run `sudo /usr/local/bin/probe sys kit`, then run `probe setup` and `sudo
 /usr/local/bin/probe sys kit` again: the
-warning is gone and the days are 30. Undo of the timer: `systemctl disable --now
-probe-setup.timer; rm /etc/systemd/system/probe-setup.service
-/etc/systemd/system/probe-setup.timer; systemctl daemon-reload`.
+warning is gone and the days are 30. **Undo of the timer:** `systemctl disable --now probe-setup.timer; rm
+/etc/systemd/system/probe-setup.service /etc/systemd/system/probe-setup.timer;
+systemctl daemon-reload`. (Without the timer the certificate ends in 30 days and
+`sys kit` warns from 5 days before.)
 
 ### B3. `/etc/probe.toml`
 
