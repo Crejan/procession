@@ -48,6 +48,9 @@ pub struct Snapshot {
     pub v: u32,
     pub delegations: Vec<SnapshotEntry>,
     pub blocked: Vec<String>,
+    /// Keys an administrator blocked, as `SHA256:...` fingerprints. A file without the member has none.
+    #[serde(default)]
+    pub blocked_keys: Vec<String>,
 }
 
 /// Registered delegations, by the SHA-256 fingerprint of the agent's public key.
@@ -55,6 +58,7 @@ pub struct Snapshot {
 pub struct Register {
     delegations: BTreeMap<String, Entry>,
     blocked: BTreeSet<String>,
+    blocked_keys: BTreeSet<String>,
 }
 
 impl Register {
@@ -101,6 +105,51 @@ impl Register {
         self.blocked.remove(person);
     }
 
+    /// Block one key (a fingerprint): a connection key, an approval key, a delegation key or an agent's key.
+    pub fn block_key(&mut self, fingerprint: impl Into<String>) {
+        self.blocked_keys.insert(fingerprint.into());
+    }
+
+    pub fn unblock_key(&mut self, fingerprint: &str) {
+        self.blocked_keys.remove(fingerprint);
+    }
+
+    /// Whether the key is blocked.
+    #[must_use]
+    pub fn is_key_blocked(&self, fingerprint: &str) -> bool {
+        self.blocked_keys.contains(fingerprint)
+    }
+
+    /// Whether a delegation is registered (in any state).
+    #[must_use]
+    pub fn knows_delegation(&self, fingerprint: &str) -> bool {
+        self.delegations.contains_key(fingerprint)
+    }
+
+    /// Whether any delegation of this person is registered.
+    #[must_use]
+    pub fn knows_person(&self, person: &str) -> bool {
+        self.delegations.values().any(|e| e.person == person)
+    }
+
+    /// The blocked persons, sorted.
+    #[must_use]
+    pub fn blocked_persons(&self) -> Vec<String> {
+        self.blocked.iter().cloned().collect()
+    }
+
+    /// The blocked keys, sorted.
+    #[must_use]
+    pub fn blocked_keys(&self) -> Vec<String> {
+        self.blocked_keys.iter().cloned().collect()
+    }
+
+    /// How many delegations are registered, and how many of them are withdrawn.
+    #[must_use]
+    pub fn counts(&self) -> (usize, usize) {
+        (self.delegations.len(), self.delegations.values().filter(|e| e.withdrawn).count())
+    }
+
     /// Whether the person is blocked.
     #[must_use]
     pub fn is_blocked(&self, person: &str) -> bool {
@@ -140,6 +189,7 @@ impl Register {
                 })
                 .collect(),
             blocked: self.blocked.iter().cloned().collect(),
+            blocked_keys: self.blocked_keys.iter().cloned().collect(),
         }
     }
 
@@ -156,6 +206,7 @@ impl Register {
                 })
                 .collect(),
             blocked: snapshot.blocked.into_iter().collect(),
+            blocked_keys: snapshot.blocked_keys.into_iter().collect(),
         }
     }
 

@@ -27,13 +27,24 @@ use tokio::io::{AsyncWriteExt, DuplexStream, ReadHalf, WriteHalf, duplex};
 
 pub const VALID: &str = "20200101Z:20990101Z";
 
+/// Where the tests make their directories. A Unix socket is bound in one of them (the administrator's), and some
+/// sandboxes allow that only under one directory: `PAGE_TEST_DIR` if set, else `/tmp/claude` if it is there, else
+/// the system's temporary directory.
+pub fn socket_base() -> PathBuf {
+    if let Some(dir) = std::env::var_os("PAGE_TEST_DIR") {
+        return PathBuf::from(dir);
+    }
+    let sandbox = PathBuf::from("/tmp/claude");
+    if sandbox.is_dir() { sandbox } else { std::env::temp_dir() }
+}
+
 pub struct Keys {
     pub dir: TempDir,
 }
 
 impl Keys {
     pub fn new() -> Keys {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = tempfile::Builder::new().tempdir_in(socket_base()).unwrap();
         std::fs::set_permissions(dir.path(), std::os::unix::fs::PermissionsExt::from_mode(0o700)).unwrap();
         Keys { dir }
     }
@@ -134,17 +145,18 @@ impl World {
         let (jan_delegation, eva_delegation) = (keys.key("jan-delegation"), keys.key("eva-delegation"));
         let jan_confirmed = keys.certified("jan-confirmed", &site_ca, "jan:confirmed", VALID, &[]);
         let agent = keys.certified("agent", &jan_delegation, "jan", "-5m:+8h", &["extension:groups@procession=ops"]);
-        let person = |name: &str, conn: &Path, deleg: &Path| {
+        let person = |name: &str, conn: &Path, deleg: &Path, approval: Option<&Path>| {
+            let confirmed = approval.map_or(String::new(), |k| format!(r#","confirmed_key":"{}""#, keys.public(k)));
             format!(
-                r#"{{"name":"{name}","enabled":true,"connection_key":"{}","delegation_key":"{}","groups":["ops"]}}"#,
+                r#"{{"name":"{name}","enabled":true,"connection_key":"{}","delegation_key":"{}","groups":["ops"]{confirmed}}}"#,
                 keys.public(conn),
                 keys.public(deleg)
             )
         };
         let json = format!(
             r#"{{"persons":[{},{}],"hosts":[{{"name":"a.example","key":"{}"}}]}}"#,
-            person("jan", &jan_connection, &jan_delegation),
-            person("eva", &eva_connection, &eva_delegation),
+            person("jan", &jan_connection, &jan_delegation, Some(&jan_confirmed)),
+            person("eva", &eva_connection, &eva_delegation, None),
             keys.public(&host_key)
         );
         let site = Arc::new(Site::from_json(&json).unwrap());
@@ -375,4 +387,56 @@ pub fn raw_sign(key: &Path, namespace: Namespace, data: &[u8]) -> String {
         .unwrap();
     std::io::Write::write_all(&mut child.stdin.take().unwrap(), data).unwrap();
     String::from_utf8(child.wait_with_output().unwrap().stdout).unwrap()
+}
+
+/// The fingerprint of a key file's public key, as `ssh-keygen -l` prints it.
+pub fn fingerprint(w: &World, key: &Path) -> String {
+    w.keys.public(key).fingerprint().to_string()
+}
+
+/// The identifier of the agent's delegation.
+pub fn agent_fingerprint(w: &World) -> String {
+    p_act::sign::agent_certificate(&w.keys.cert_line(&w.agent)).unwrap().delegation.to_string()
+}
+
+/// A configuration file that names the world's state directory, for the verbs (which find the socket by it).
+pub fn config_file(w: &World) -> PathBuf {
+    let dir = w.keys.dir.path().display();
+    let text = format!(
+        r#"{{"site":"{dir}/site.json","listen":["127.0.0.1:0"],"tls_cert":"{dir}/c.pem","tls_key":"{dir}/k.pem","broker_key":"{dir}/broker","state_dir":"{dir}","log":"{dir}/log.jsonl"}}"#
+    );
+    let path =
+        std::env::temp_dir().join(format!("page-config-{}.json", std::process::id() as u64 * 1000 + rand_suffix()));
+    std::fs::write(&path, text).unwrap();
+    std::fs::set_permissions(&path, std::os::unix::fs::PermissionsExt::from_mode(0o644)).unwrap();
+    path
+}
+
+fn rand_suffix() -> u64 {
+    use std::sync::atomic::AtomicU64;
+    static N: AtomicU64 = AtomicU64::new(0);
+    N.fetch_add(1, Ordering::SeqCst)
+}
+
+/// Bind the administrator's socket in the world's state directory and serve it; the socket's path.
+pub fn serve_admin(w: &World) -> PathBuf {
+    let (listener, uid) = p_age::admin::bind(w.keys.dir.path()).unwrap();
+    tokio::spawn(p_age::admin::serve(listener, Arc::clone(&w.broker), uid));
+    p_age::admin::socket_path(w.keys.dir.path())
+}
+
+/// Run `page <args> --config <config>` as the verbs run: its exit code, what it printed and what it said.
+pub async fn page(config: &Path, args: &[&str]) -> (i32, String, String) {
+    let mut all: Vec<String> = args.iter().map(|s| (*s).to_owned()).collect();
+    all.extend(["--config".to_owned(), config.display().to_string()]);
+    tokio::task::spawn_blocking(move || {
+        let out = Command::new(env!("CARGO_BIN_EXE_page")).args(&all).output().unwrap();
+        (
+            out.status.code().unwrap_or(-1),
+            String::from_utf8_lossy(&out.stdout).trim_end().to_owned(),
+            String::from_utf8_lossy(&out.stderr).trim_end().to_owned(),
+        )
+    })
+    .await
+    .unwrap()
 }

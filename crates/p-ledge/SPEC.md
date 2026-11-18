@@ -362,8 +362,12 @@ involved.
 
 - **The name.** `pledge` unless a better one turns up.
 - **Whether the Secure Enclave can hold keys with and without a presence
-  check side by side**, each usable only by pledge's key holder. Assumed;
-  *proposal:* check it before step 4, with a ten-line program.
+  check side by side**, each usable only by pledge's key holder. Assumed,
+  and not to be claimed for the Mac form until it is checked: whether a key
+  kept as a blob in a file can be used by another program of the same
+  person is check 3 of `proposals/stage2-mac.md`, and decides between a blob
+  and the keychain with an access group. Nothing of step 4 is built before
+  the owner has run that proposal's checks 1 to 5.
 - **One desktop app for p-reserve and p-ledge, or one each.** *Proposal:*
   one each; they are two programs with two purposes, and p-ledge's is small.
 - **The interfaces**: the three sockets, the record's format. After the
