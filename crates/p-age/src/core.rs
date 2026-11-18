@@ -157,12 +157,12 @@ pub struct Status {
 #[derive(Debug, Clone)]
 pub struct Settings {
     /// How many requests of one agent may wait; further ones are refused (five by default).
-    pub max_waiting_per_agent: usize,
+    pub waiting_per_agent: usize,
 }
 
 impl Default for Settings {
     fn default() -> Self {
-        Settings { max_waiting_per_agent: 5 }
+        Settings { waiting_per_agent: 5 }
     }
 }
 
@@ -500,7 +500,7 @@ impl Core {
         if !self.site.person(&person).is_some_and(|p| p.enabled) {
             return deny(self, Some(person), BrokerReason::Person);
         }
-        if self.waiting_of(&fingerprint) >= self.settings.max_waiting_per_agent {
+        if self.waiting_of(&fingerprint) >= self.settings.waiting_per_agent {
             return deny(self, Some(person), BrokerReason::TooManyWaiting);
         }
         self.seq += 1;
@@ -1066,7 +1066,7 @@ mod tests {
         register.register("SHA256:DDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDD", "eva", until);
         let core = Core::new(
             site(),
-            Settings { max_waiting_per_agent: max_waiting },
+            Settings { waiting_per_agent: max_waiting },
             register,
             None,
             Arc::new(Fake),
@@ -1228,7 +1228,7 @@ mod tests {
 
     #[test]
     fn the_default_limit_is_five() {
-        assert_eq!(Settings::default().max_waiting_per_agent, 5);
+        assert_eq!(Settings::default().waiting_per_agent, 5);
     }
 
     #[test]

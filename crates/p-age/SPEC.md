@@ -253,7 +253,7 @@ file differ"):
    `members`, which R10 (check 4, not built) needs.
 4. There is no `services`; check 4 is stage 3.
 5. There is no `ca` and no `settings`; the one setting,
-   `max_waiting_per_agent`, is in the configuration file.
+   `waiting_per_agent`, is in the configuration file.
 6. It has `certificates` per person, which the form above does not: see
    the paragraph on certificates.
 7. A person who is not enabled: the same in both. The row stays, without
