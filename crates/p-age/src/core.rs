@@ -467,11 +467,11 @@ impl Core {
         // The same bytes again: attach, do not check or count again.
         if let Some(h) = self.held.get_mut(&hash) {
             let mut fx = Vec::new();
-            if let Some(old) = h.conn.replace(conn) {
-                if old != conn {
-                    fx.push(Effect::Service(old, ServiceOut::Error(ErrorCode::Superseded)));
-                    fx.push(Effect::Service(old, ServiceOut::Close));
-                }
+            if let Some(old) = h.conn.replace(conn)
+                && old != conn
+            {
+                fx.push(Effect::Service(old, ServiceOut::Error(ErrorCode::Superseded)));
+                fx.push(Effect::Service(old, ServiceOut::Close));
             }
             if let Some(answer) = h.answer.clone() {
                 fx.push(Effect::Service(conn, ServiceOut::Answer(answer)));
