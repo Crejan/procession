@@ -416,6 +416,8 @@ mod tests {
             args: Args::Params { floor: OPEN, params },
             summary: "test",
             availability: Availability::NotBuilt("test"),
+            host_text: false,
+            content: &[],
         })
     }
 
@@ -636,6 +638,8 @@ mod tests {
             args: Args::Params { floor: OPEN, params },
             summary: "test",
             availability: Availability::NotBuilt("test"),
+            host_text: false,
+            content: &[],
         })
     }
 

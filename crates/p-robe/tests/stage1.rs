@@ -214,7 +214,7 @@ fn the_real_parts_against_each_other() {
     let meta = &sent["params"]["_meta"];
     let call_bytes = STANDARD.decode(meta["procession/call"].as_str().unwrap()).unwrap();
     let call_sig = signature_from_base64(meta["procession/call_sig"].as_str().unwrap()).unwrap();
-    let request = Request::compose(&Call::parse(call_bytes).unwrap(), &call_sig, Rating::HARMLESS).unwrap();
+    let request = Request::compose(&Call::parse(call_bytes).unwrap(), &call_sig, Rating::HARMLESS, false).unwrap();
     let service_signer = Signer::certified(dir.join("probe/service-key")).unwrap();
     let submit_twice = |_: ()| {
         let mut stream = UnixStream::connect(pledge.sockets.join("service.sock")).unwrap();

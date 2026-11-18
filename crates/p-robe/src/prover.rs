@@ -19,7 +19,7 @@ use std::time::{Duration, Instant};
 
 use serde_json::value::RawValue;
 
-use crate::answer::{Answer, Full, header};
+use crate::answer::{Answer, Closing, Full, header};
 use crate::json::Record;
 use crate::table::Env;
 use crate::{clock, kit};
@@ -291,6 +291,9 @@ struct Lines {
     records: u64,
     findings: u64,
     unreadable: u64,
+    /// The tool's own counts of the records it escaped and cut (`escaped_records`, `clipped_records`), if it gave them.
+    tool_escaped: Option<u64>,
+    tool_clipped: Option<u64>,
 }
 
 fn read_object(row: &Row, bytes: &[u8]) -> Result<Lines, Failure> {
@@ -356,6 +359,8 @@ fn read_object(row: &Row, bytes: &[u8]) -> Result<Lines, Failure> {
         records: records.len() as u64,
         findings: findings.len() as u64,
         unreadable: unreadable.len() as u64,
+        tool_escaped: number("escaped_records"),
+        tool_clipped: number("clipped_records"),
     })
 }
 
@@ -370,14 +375,26 @@ fn result_word(code: i32) -> Option<&'static str> {
     }
 }
 
-fn trailer(rc: Option<i32>, result: &str, lines: &Lines, truncated: bool) -> Record {
-    Record::new("trailer")
+fn trailer(rc: Option<i32>, result: &str, lines: &Lines, closing: &Closing) -> Record {
+    let mut record = Record::new("trailer")
         .opt_int("rc", rc.map(i64::from))
         .str("result", result)
         .num("records", lines.records)
         .num("findings", lines.findings)
         .num("unreadable", lines.unreadable)
-        .bool("truncated", truncated)
+        .bool("truncated", closing.truncated)
+        // What the dispatcher itself escaped or cut, counted by it and not taken from the tool.
+        .num("escaped_records", closing.escaped_records)
+        .num("clipped_records", closing.clipped_records);
+    // What the tool says of its own: beside ours, so that a difference shows. A record the dispatcher had to
+    // escape or cut is one the tool did not (`tool_missed`).
+    if lines.tool_escaped.is_some() || lines.tool_clipped.is_some() {
+        record = record
+            .opt_int("tool_escaped_records", lines.tool_escaped.and_then(|n| i64::try_from(n).ok()))
+            .opt_int("tool_clipped_records", lines.tool_clipped.and_then(|n| i64::try_from(n).ok()))
+            .bool("tool_missed", closing.escaped_records > 0 || closing.clipped_records > 0);
+    }
+    record
 }
 
 /// Judges what the tool did: the lines of the output and the trailer's code, or why it is not a result.
@@ -393,6 +410,8 @@ fn judge(row: &Row, ran: Result<Ran, Failure>) -> Result<(Lines, i32), Failure> 
                 records: 0,
                 findings: 0,
                 unreadable: 0,
+                tool_escaped: None,
+                tool_clipped: None,
             }),
             3,
         )),
@@ -425,7 +444,7 @@ pub fn run_with(row: &Row, tool: &dyn Tool, args: &[String], answer: &mut Answer
                 answer.record_line(line)?;
             }
             let result = result_word(code).unwrap_or("failed");
-            answer.close(|cut| trailer(Some(code), result, &lines, cut))?;
+            answer.close(|closing| trailer(Some(code), result, &lines, closing))?;
             Ok(0)
         }
         Err(failure) => fail(answer, head, &failure, None),
@@ -435,8 +454,16 @@ pub fn run_with(row: &Row, tool: &dyn Tool, args: &[String], answer: &mut Answer
 fn fail(answer: &mut Answer<'_>, head: Record, failure: &Failure, detail: Option<&str>) -> Result<u8, Full> {
     answer.record(&head)?;
     answer.record(&Record::new("error").str("code", failure.record_code()).opt_str("detail", detail))?;
-    let empty = Lines { header_extra: Vec::new(), lines: Vec::new(), records: 0, findings: 0, unreadable: 0 };
-    answer.close(|cut| trailer(None, "failed", &empty, cut))?;
+    let empty = Lines {
+        header_extra: Vec::new(),
+        lines: Vec::new(),
+        records: 0,
+        findings: 0,
+        unreadable: 0,
+        tool_escaped: None,
+        tool_clipped: None,
+    };
+    answer.close(|closing| trailer(None, "failed", &empty, closing))?;
     answer.fail(&failure.code());
     Ok(0)
 }
@@ -720,6 +747,37 @@ mod tests {
             cut["dropped"]["thread"].as_u64().unwrap() > 0 && cut["dropped"]["finding"].as_u64().unwrap() > 0,
             "{cut}"
         );
+    }
+
+    #[test]
+    fn what_a_tool_passes_through_unchecked_is_made_visible_by_the_dispatcher_and_counted_as_its_own_work() {
+        // A thread's name chosen by a local user, at depth, in a record the tool did not escape; and a finding's
+        // evidence. The tool says it escaped nothing (its counts are 0) and claims `escaped` on a record.
+        let object = golden("procs").replacen("\"cyclic (app)\"", "\"cyc\\u0085lic\\u202e (app)\"", 1).replacen(
+            "\"findings\"",
+            "\"escaped_records\": 0, \"clipped_records\": 0, \"findings\"",
+            1,
+        );
+        assert!(object.contains("\\u202e"), "the object was changed");
+        let (lines, cause) = ran(&PROCS, &Fake::code(1, &object), &[]);
+        assert_eq!(cause, None, "{lines:?}");
+        let thread = lines.iter().find(|l| l.contains("cyc")).expect("the record");
+        let record: serde_json::Value = serde_json::from_str(thread).unwrap();
+        assert_eq!(record["comm"], "cyc\\u{85}lic\\u{202e} (app)", "{thread}");
+        assert_eq!(record["escaped"], true);
+        assert!(p_ermit::text::check(thread).is_ok());
+        let trailer: serde_json::Value = serde_json::from_str(lines.last().unwrap()).unwrap();
+        // The dispatcher's own count, the tool's beside it, and that the tool missed something.
+        assert_eq!(trailer["escaped_records"], 1);
+        assert_eq!(
+            (trailer["tool_escaped_records"].as_i64(), trailer["tool_clipped_records"].as_i64()),
+            (Some(0), Some(0))
+        );
+        assert_eq!(trailer["tool_missed"], true);
+        // A tool that says nothing of its own counts gets no such members; one that missed nothing says so.
+        let (clean, _) = ran(&PROCS, &Fake::code(1, &golden("procs")), &[]);
+        let trailer: serde_json::Value = serde_json::from_str(clean.last().unwrap()).unwrap();
+        assert_eq!((trailer["escaped_records"].as_u64(), trailer.get("tool_missed")), (Some(0), None));
     }
 
     #[test]

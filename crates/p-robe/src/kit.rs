@@ -156,13 +156,15 @@ pub fn run(env: &Env, _args: &[String], answer: &mut Answer<'_>) -> Result<u8, F
         ));
     }
     // The closing record: kept whatever the cap does to the lines before it.
-    answer.close(|_cut| {
+    answer.close(|closing| {
         Record::new("summary")
             .bool("usable", found.problems.is_empty())
             .num("verbs_ready", ready)
             .num("verbs_unavailable", unavailable)
             .strs("problems", &found.problems)
             .strs("warnings", &found.warnings)
+            .num("escaped_records", closing.escaped_records)
+            .num("clipped_records", closing.clipped_records)
     })?;
     Ok(0)
 }

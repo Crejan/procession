@@ -205,6 +205,13 @@ the **fourth token of `--within`**: `--within open,none,none,text|plain`. Four t
 (64) so that an old caller fails clearly, and the sudoers line, which has `--within *`, does not change. The dispatcher refuses (64) a call whose row is marked
 when the approved value is `plain`, as it refuses one above the approved rating.
 
+**Built (`src/text_rule.rs`, used by `Answer` for every record of every verb and for the closing record):** the record is rewritten
+token by token, so the members keep their order; keys and values, at any depth. The bound is in bytes of escaped text (`escape_bytes_clipped` counts characters; the bound is made one of bytes by asking
+for fewer characters until the text fits); `clipped` gives the length of the whole string in bytes and is keyed by the innermost member name. A member of a tool's record named `escaped` or `clipped` is the tool's claim: it
+is kept as `tool_escaped` / `tool_clipped` so that the two names are the dispatcher's alone. The closing record has the dispatcher's own `escaped_records` and `clipped_records` (records before it, counted for every record the verb wrote, also those the cap dropped);
+a `prover` trailer also has the tool's own numbers (`tool_escaped_records`, `tool_clipped_records`) when its object gave them, and `tool_missed: true` when the dispatcher had to escape or cut something the tool did not. A tool's text that the tool already
+escaped is escaped again at its backslashes (`\\u{202e}` shows as `\\\\u{202e}`): the rule does not trust a string to be escaped. `test read`'s `text` has the row's limit of 16384 bytes. An unreadable record is not passed on and fails the call (`unreadable-record`).
+
 **Every string the dispatcher passes on is escaped** (`p_ermit::text::escape`: a refused character becomes visible literal text,
 a backslash is escaped, never dropped), at any depth, for every verb, whatever the tool did. A record with an escaped string has
 `"escaped": true`; the trailer counts such records by the dispatcher's own count, and gives the tool's `escaped_records` too when they differ. Each string field is clipped at **1024 bytes of escaped

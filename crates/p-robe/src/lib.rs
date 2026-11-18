@@ -34,3 +34,4 @@ pub mod table;
 mod testdir;
 #[cfg(feature = "test-verbs")]
 pub mod testverbs;
+pub mod text_rule;

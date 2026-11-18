@@ -32,6 +32,8 @@ pub const VERBS: &[Verb] = &[
         args: Args::Params { floor: Rating::HARMLESS, params: READ_PARAMS },
         summary: "TEST BUILD: reads the first bytes of one file; rated by where the file is",
         availability: Availability::Ready(read),
+        host_text: true,
+        content: &[("text", 16_384)],
     },
     Verb {
         noun: "test",
@@ -41,6 +43,8 @@ pub const VERBS: &[Verb] = &[
         args: Args::Some,
         summary: "TEST BUILD: answers with its arguments; rated harmless",
         availability: Availability::Ready(echo),
+        host_text: false,
+        content: &[],
     },
     Verb {
         noun: "test",
@@ -50,6 +54,8 @@ pub const VERBS: &[Verb] = &[
         args: Args::Some,
         summary: "TEST BUILD: starts, writes its header and exits with the code of its first argument (2 if none); rated harmless",
         availability: Availability::Ready(fail),
+        host_text: false,
+        content: &[],
     },
     Verb {
         noun: "test",
@@ -61,6 +67,8 @@ pub const VERBS: &[Verb] = &[
         args: Args::Some,
         summary: "TEST BUILD: answers with its arguments; rated at the top of disruption, does nothing",
         availability: Availability::Ready(echo_of),
+        host_text: false,
+        content: &[],
     },
 ];
 

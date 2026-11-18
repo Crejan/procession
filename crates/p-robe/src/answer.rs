@@ -4,6 +4,7 @@ use std::collections::BTreeMap;
 use std::io::Write;
 
 use crate::json::{Record, SCHEMA_VERSION};
+use crate::text_rule::{self, Limits};
 
 /// Every answer is capped, so that no verb fills an agent's context or a
 /// terminal. 1 MiB is the figure `doc/approvals.md` section 7 gives a command's
@@ -47,6 +48,24 @@ pub struct Answer<'a> {
     dropped_lines: u64,
     dropped_bytes: u64,
     dropped: BTreeMap<String, u64>,
+    /// The fields a row declares as content, which have limits of their own.
+    content: &'a [(&'static str, usize)],
+    /// Records in which the dispatcher escaped something, and records in which it cut a field (every record the
+    /// verb wrote, also the ones the cap dropped).
+    escaped_records: u64,
+    clipped_records: u64,
+}
+
+/// What the closing record may say of the answer before it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Closing {
+    /// The cap dropped lines.
+    pub truncated: bool,
+    /// Records before the closing one in which the dispatcher itself escaped a string: what the verb or its tool
+    /// did not.
+    pub escaped_records: u64,
+    /// Records before the closing one in which the dispatcher cut a field.
+    pub clipped_records: u64,
 }
 
 impl<'a> Answer<'a> {
@@ -64,6 +83,33 @@ impl<'a> Answer<'a> {
             dropped_lines: 0,
             dropped_bytes: 0,
             dropped: BTreeMap::new(),
+            content: &[],
+            escaped_records: 0,
+            clipped_records: 0,
+        }
+    }
+
+    /// Names the fields of this verb's records that are content (a file's bytes), not names: they have their
+    /// own limit instead of the usual one.
+    pub fn set_content(&mut self, content: &'a [(&'static str, usize)]) {
+        self.content = content;
+    }
+
+    /// The rule for strings from outside, applied to one record; `None` if it cannot be read as one (it is then not
+    /// passed on, and the call has failed).
+    fn ruled(&mut self, line: &str) -> Option<String> {
+        let limits = Limits { field: text_rule::FIELD_MAX, content: self.content };
+        let done = text_rule::rewrite(line, &limits);
+        match done {
+            Some(done) => {
+                self.escaped_records += u64::from(done.escaped);
+                self.clipped_records += u64::from(!done.clipped.is_empty());
+                Some(done.line)
+            }
+            None => {
+                self.fail("unreadable-record");
+                None
+            }
         }
     }
 
@@ -83,6 +129,8 @@ impl<'a> Answer<'a> {
         if self.closed {
             return Ok(());
         }
+        let Some(line) = self.ruled(line) else { return Ok(()) };
+        let line = line.as_str();
         if !self.full && self.written + line.len() + 1 + TRUNCATED_MAX + CLOSING_MAX > self.cap {
             self.full = true;
         }
@@ -131,11 +179,19 @@ impl<'a> Answer<'a> {
     ///
     /// # Errors
     /// [`Full`] when the reader has gone.
-    pub fn close(&mut self, make: impl FnOnce(bool) -> Record) -> Result<(), Full> {
+    pub fn close(&mut self, make: impl FnOnce(&Closing) -> Record) -> Result<(), Full> {
         if self.closed {
             return Ok(());
         }
-        let result = self.finish().and_then(|()| self.put(&make(self.full).line()));
+        let closing = Closing {
+            truncated: self.full,
+            escaped_records: self.escaped_records,
+            clipped_records: self.clipped_records,
+        };
+        let line = make(&closing).line();
+        // The closing record's own strings are held to the rule too (`sys kit` reports strings from files).
+        let line = self.ruled(&line).unwrap_or(line);
+        let result = self.finish().and_then(|()| self.put(&line));
         self.closed = true;
         result
     }
@@ -219,8 +275,12 @@ mod tests {
 
     const ROOM: usize = TRUNCATED_MAX + CLOSING_MAX;
 
-    fn trailer(cut: bool) -> Record {
-        Record::new("trailer").num("rc", 1).str("result", "warnings").num("records", 20).bool("truncated", cut)
+    fn trailer(closing: &Closing) -> Record {
+        Record::new("trailer")
+            .num("rc", 1)
+            .str("result", "warnings")
+            .num("records", 20)
+            .bool("truncated", closing.truncated)
     }
 
     #[test]

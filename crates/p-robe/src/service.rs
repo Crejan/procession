@@ -239,8 +239,9 @@ impl Service {
         let rating = rate::rate(verb, call.params(), Mode::Name)
             .map_err(|e| early(invalid(format!("params-not-accepted:{}", e.0))))?
             .rating;
-        let request =
-            Request::compose(call, armoured, rating).map_err(|e| early(unavailable(format!("compose:{e}"))))?;
+        // The request says whether the verb's output can carry text that is not the service's, signed with the rating.
+        let request = Request::compose(call, armoured, rating, verb.host_text)
+            .map_err(|e| early(unavailable(format!("compose:{e}"))))?;
         let request_sig = sign_request(&self.signer, &request).map_err(|e| early(unavailable(format!("sign:{e}"))))?;
         let hash = request.hash().to_string();
         let ended = |(outcome, exact): Ended| Stop::Ended(outcome, exact, hash.clone());
