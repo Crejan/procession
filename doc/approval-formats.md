@@ -21,7 +21,9 @@ yet.
 - **One line of JSON.** A document is one JSON object, UTF-8, without a byte
   order mark and without a line break. That is this workspace's convention
   for machine output, and it is what a person's dialog is built from.
-- **A signature is an armoured SSHSIG**, as `ssh-keygen -Y sign` writes it. A
+- **A signature is an armoured SSHSIG**, in the form `ssh-keygen -Y sign`
+  writes. The form is that one; the writer need not be (`approvals.md`,
+  section 5). A
   signature made with a certified key contains the certificate, so
   certificates are never sent separately.
 - **One namespace per document type.** A signature for one type can never

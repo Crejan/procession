@@ -71,15 +71,15 @@ process that set the prompt's text: software, not hardware (sections 2 and
 
 | Key (`doc/approvals.md` section 5; `SPEC.md` section 2) | In the Secure Enclave | Presence in the key | Accessible | Type |
 |---|---|---|---|---|
-| confirmed approval | yes | yes, each signature | when unlocked | P-256 |
-| automatic approval | yes | **none** | question 4 | P-256 |
-| delegation | yes | yes, each signature | when unlocked | P-256 |
+| confirmed approval | yes | yes, each signature: Touch ID only (`.biometryAny`) | when unlocked | P-256 |
+| automatic approval | yes | **none** | after first unlock | P-256 |
+| delegation | yes | yes, each signature: Touch ID only (`.biometryAny`) | when unlocked | P-256 |
 | connection | yes | **none** | after first unlock | P-256 |
-| shared (logins, `git`/`file` signatures) | yes | yes, each signature | when unlocked | P-256 |
+| shared (logins, `git`/`file` signatures) | yes | yes, each signature: Touch ID or password (`.userPresence`) | when unlocked | P-256 |
 | bound (one program's login) | yes | **none** | after first unlock | P-256 |
 
-Which presence flag ("Touch ID only" or "Touch ID or password") is question
-1; it differs per key.
+The presence flags and the automatic key's "after first unlock" are the
+owner's decisions of 2026-11-18 (questions 1 and 4).
 
 All six can be Secure Enclave keys as far as the formats go:
 
@@ -261,7 +261,10 @@ What follows for pledge, whatever question 1 decides:
   pledge over `control.sock`; the touch happens at the Mac. That is right:
   whoever only has the person's SSH login cannot start an agent.
 
-**Password in place of Touch ID, per key** (question 1):
+**Password in place of Touch ID, per key** (question 1, decided by the
+owner on 2026-11-18: Touch ID only for confirmed approvals and delegations,
+so a Mac that cannot offer Touch ID makes no confirmed approval and starts
+no agent; Touch ID or password for the shared key). The reasons were:
 
 - *confirmed approval, delegation:* a password is weaker in exactly the two
   threats the presence check is there for. A stolen machine: the thief may
@@ -281,10 +284,11 @@ awake", so also with the screen locked: "after first unlock") and for a
 bound key (a backup at night; Atticus's reason for the same choice,
 **[A]** `SEPKey.swift`, lines 72 to 78).
 
-What it may require is an unlocked screen. `doc/approvals.md`, section 4,
-on a stolen machine: "if the thief has the unlocked session: automatic
-approvals for agents already running". Read strictly, a locked Mac makes no
-automatic approval. That is question 4.
+It does not require an unlocked screen either (question 4, decided by the
+owner on 2026-11-18): the automatic key is "after first unlock" and signs
+while the screen is locked. `doc/approvals.md`, section 4, the row on a
+stolen machine, says so now; what bounds it there is the delegation's end
+and the administrator's block.
 
 A consequence to state plainly: a key without presence in a blob file is as
 strong as the file. If check 3 shows that any program of the person can
@@ -595,7 +599,7 @@ All paths are under `/Users/jancre/dev/ws/atticus-develop`, tree `develop`.
 | 20 | A user certificate for the login key | `Sources/SSHCertificate.swift`, `Sources/Engine/SSHCertificateService.swift`, `Sources/CLI/SSHCertCLI.swift` | not now | `SPEC.md` section 2: not in the first version. How the certificate rides with the key (row 2, section 1.3) is the same as stage 3 needs |
 | 21 | The access history and the decision trace in the system log | `SSHAgentServer.signEventSink`, `Sources/AgentDecisionLog.swift`, `Sources/AgentPolicyTrace.swift` | not | The record is the one place |
 | 22 | SSH agent, parser, key and windows in one process | `Sources/Engine/SSHAgentServer.swift` and the app | not | `SPEC.md` section 7: reader and key holder are two processes |
-| 23 | Signing with Developer ID, hardened runtime, pinned entitlements, no sandbox | `Makefile` (`CODESIGN_FLAGS`), `Resources/Atticus.entitlements`, `tools/check-entitlements.sh` | with changes | pledge's Mac parts must be signed the same way, or `control.sock` and a bound key have nothing to check. Which team: question 8 |
+| 23 | Signing with Developer ID, hardened runtime, pinned entitlements, no sandbox | `Makefile` (`CODESIGN_FLAGS`), `Resources/Atticus.entitlements`, `tools/check-entitlements.sh` | with changes | pledge's Mac parts must be signed the same way, or `control.sock` and a bound key have nothing to check. The owner's Developer ID team, with identifiers of pledge's own (question 8, decided) |
 | 24 | A secret readable only by its own signed programs, through a keychain access group | `SECURITY.md`, "Defenses in place" (the restic password) | as an idea | Atticus does not do this for its key, only for a password. It is the known way to make a key "usable only by pledge's key holder" (question 2) |
 | 25 | The setup turns shared connections off; the server limits sessions | `SECURITY.md`, "A confirmation covers one login" | as is | `SPEC.md` section 3 says the same |
 | 26 | A manual checklist for what tests cannot reach (Touch ID, signed builds) | `tests/MANUAL_CHECKLIST.md`, items 26 to 29 | as is, as a form | Section 1.5 is the start of pledge's |
@@ -739,6 +743,40 @@ Each step leaves `cargo test` green on Linux and keys in files working.
 
 ## 7. Open questions for the designer
 
+**Where each stands, 2026-11-18.** The designer read this proposal and
+accepted it as a proposal. Nothing is built from it until the owner has run
+checks 1 to 5 (the program and the steps are in `stage2-mac-checks/`). The
+questions below are left as they were asked; this table says what became of
+them.
+
+| # | Question | Stands | What was said |
+|---|---|---|---|
+| 1 | Password in place of Touch ID | decided, by the owner | Touch ID only (`.biometryAny`) for confirmed approvals and delegations. A Mac that cannot offer Touch ID makes no confirmed approval. The shared key keeps Touch ID or password |
+| 2 | Blob in a file, or keychain with an access group | decided | After check 3, as recommended. `SPEC.md` section 11 is marked accordingly by the designer |
+| 3 | One key holder or two | decided | Two: one for keys with a presence check, one for keys without |
+| 4 | Does a locked screen stop automatic approvals | decided, by the owner | It does not. The automatic key is "after first unlock". The threat table of `doc/approvals.md` (the row on a stolen machine) says so, bounded by the delegation's end and the administrator's block |
+| 5 | Dialog and touch as one step | decided | One step: the Touch ID prompt is raised with the dialog and the touch is the yes. Keys in files keep today's two steps. The limits (one dialog at a time, the queue limit, muting after declines) apply unchanged |
+| 6 | "Admit generally" for which programs | decided | Only for Developer ID code with the hardened runtime; and, also accepted, an ad-hoc build may be admitted generally by its hash, which lasts until the binary changes |
+| 7 | Presence for what ends in no signature | decided | `LAContext.evaluatePolicy` in the key holder, said plainly to be software. Retiring a key with a presence check requires that key's signature first. No fifth key |
+| 8 | Who signs pledge's Mac programs, and as what | decided, by the owner | His Developer ID team (the one Atticus is signed with), with identifiers of pledge's own for the reader, the key holder and the dialog process |
+| 9 | A request while no presence check is possible | decided | It waits until its deadline and ends `expired`; the record says why it could not be asked (locked, sensor locked out) |
+| 10 | What the Touch ID prompt says | decided, subject to check 5 | As recommended: service, host and action; user and host for a login; person, groups and validity for a delegation; never a parameter or the agent's claim |
+| 11 | A first Mac stage with `Terminal` and real keys | decided | Accepted, for the owner only |
+| 12 | One Mac app or two | decided, by the owner | Two Mac apps, from one Swift code base. preserve's app is admitted on pledge's `control.sock` for exactly `keys.create` of a bound key and `keys.list`, by a rule per command and peer |
+| 13 | Take Atticus's SwiftUI front end at all | decided | Yes, with the condition as written: it becomes preserve's Mac front end only after the logic still in its views and view models has moved into the daemon and the socket protocol offers what section 8.5 lists. The three bypasses and the prune marker (section 8.2) are the list of what goes behind the protocol first. Nothing is copied yet |
+| 14 | "Cancel by closing" in p-reserve's protocol | decided | Closing a connection cancels only what was asked as bound to it: browsing, a preview or dump for display, subscriptions. A backup run, a prune, a check and a restore are the daemon's jobs with an identifier: they go on when the connection that started them closes, are cancelled only by an explicit message naming the identifier, and a later connection can list running jobs and attach to their events |
+| 15 | The licence of what is taken from Atticus | decided, by the owner | Atticus is his own, so its views may be taken into procession, and what results there is under `MIT OR Apache-2.0` like the rest; the shared Swift package states that licence. Atticus itself stays as it is and under its own licence: this covers taking code from it into procession, nothing else. **This is not a go for copying.** Copying views still waits on the condition of question 13 (the logic into the daemon first, the protocol meeting section 8.5) and, for anything that touches keys, on hand checks 1 to 5 |
+| 16 | Where the dialog for a request lives | decided | As recommended: a small program in pledge's bundle that `pledge serve` starts itself, holding no key and deciding nothing. The app's window may show the same question as a second place; the answer never depends on the app |
+
+Two of these decisions add to what the sections above say:
+
+- Question 6 widens section 3.4: the row for ad-hoc signed code may be
+  admitted generally, by its hash.
+- Question 9 adds a fact to the record: for a request that expired
+  unasked, why it could not be asked. Section 2.2's error codes (check 2)
+  and check 10 are where the key holder learns "locked" and "sensor locked
+  out" from.
+
 1. **Password in place of Touch ID, per key.**
    *Recommendation:* confirmed approval and delegation: Touch ID only
    (`.biometryAny`), and a Mac where that is not possible makes no
@@ -848,7 +886,406 @@ Each step leaves `cargo test` green on Linux and keys in files working.
     with the least new code, and the dialog process can then be built
     against something that works.
 
-## 8. What was read, what was not; nothing was run
+12. **One Mac app or two** (section 8.4).
+    *Recommendation:* two apps from one Swift code base; preserve's app
+    is admitted on `control.sock` for `keys.create` with purpose `bound`
+    and `keys.list` only, which needs a rule per command and peer there.
+    *Reason:* the program that shows requests should hold no updater and
+    no backup code, and one identity for everything is the wider key.
+
+13. **Take Atticus's SwiftUI front end at all**, against the web views
+    that `crates/p-reserve/SPEC.md` recommends.
+    *Recommendation:* yes for preserve's Mac app, on one condition: the
+    logic still in Atticus's views and view models moves into the daemon
+    first, and the socket protocols meet section 8.5. For pledge, take the
+    frame; its content is new either way.
+    *Reason:* about 4800 lines of working views and view models, most of
+    them already behind protocols; what is dropped is the layer under the
+    protocols, which the Rust programs replace anyway. The price is a
+    second front end for Linux later, which is why the condition is
+    strict. This overturns a recommendation in p-reserve's specification,
+    so it is its designer's call.
+
+14. **"Cancel by closing" in p-reserve's protocol.**
+    *Recommendation:* closing a connection cancels only requests that were
+    made as bound to it (browsing, a preview); a run, a prune or a restore
+    goes on and is cancelled by a message.
+    *Reason:* a backup must not stop because a window closed. This belongs
+    in p-reserve's proposal; it is raised here because the front end
+    depends on it.
+
+15. **The licence of what is taken from Atticus.** Its `LICENSE` is
+    proprietary, all rights reserved; p-ledge is `MIT OR Apache-2.0`.
+    *Recommendation:* the owner decides before any view is copied, and the
+    shared Swift package states the result.
+    *Reason:* it cannot be decided by whoever does the copying.
+
+16. **Where the dialog for a request lives** (section 8.6).
+    *Recommendation:* a separate small program in pledge's app bundle that
+    `pledge serve` starts itself, with one pipe and no connection to
+    `control.sock`; the front end shows only that a question is open.
+    *Reason:* a request can arrive with no app open, and the answer never
+    depends on the app: the touch is the yes.
+
+## 8. Atticus's SwiftUI front end as the Mac front end
+
+The owner's question: can Atticus's front end become the Mac front end of
+procession, with the Rust programs behind it. This part answers from the
+code, tree `develop` at `a1ada83`. What of it I read and what I only
+searched is in section 9; several panes I only searched, and the lists
+below can miss a call.
+
+### 8.1 What the front end is
+
+| Layer | Where | Size |
+|---|---|---|
+| Views | `Sources/Views/Redesign/`, 15 files | about 3450 lines |
+| View models | `Sources/ViewModels/`, 9 files | about 1400 lines |
+| Service protocols | `Sources/Core/Services/`, 13 files | about 390 lines |
+| Their implementations | `Sources/Core/Services/Live/`, 14 files | about 2000 lines |
+| Values the layers pass | `Sources/Core/Domain/`, 41 files, Foundation only | about 3300 lines |
+| Wiring | `Sources/App/ServiceContainer.swift`, `AtticusApp.swift` (one `Window`, one `MenuBarExtra`) | |
+
+A view builds its view model from the `ServiceContainer`; a view model
+holds protocols (`BackupService`, `ConfigStore`, `SnapshotService`,
+`SSHKeyService`, `HealthService`, `ScheduleStatusService`,
+`ConnectionTestService`, `ImportService`, `UpdateService`, `DaemonService`,
+`LoginItemService`, `SystemAccessService`, `ManagedConfigService`,
+`SnapshotBrowserService`) and three small seams for the system
+(`Pasteboard`, `AppActivator`, `SystemSettingsOpener`). A script,
+`tools/check-layering.sh`, holds one boundary: `Core/Domain` imports
+Foundation only and names nothing above it. It does **not** check that
+views stay behind the protocols. Only one protocol has a second
+implementation in the sources (`Mock/MockSnapshotBrowserService.swift`);
+whether the tests bring others I did not look.
+
+### 8.2 How clean the seam is
+
+**Clean, as far as I read or searched:** the menu bar popover
+(`MenuBarPopover.swift` with `MenuBarViewModel.swift`, both read: every
+call goes to `BackupService`, `ConfigStore`, `ScheduleStatusService`,
+`HealthService`, `UpdateService`, `AppActivator`), the overview, the
+schedule pane, the snapshot list of the restore pane, and the key part of
+the SSH pane (`SSHKeyViewModel.swift`: `SSHKeyService`, `ConfigStore`,
+`Pasteboard`).
+
+**Reaching past the protocols:**
+
+| View or view model | Reaches | What that is |
+|---|---|---|
+| `SnapshotBrowserSheet.swift` (`@ObservedObject var browser: SnapshotBrowser`; calls `navigate`, `goUp`, `open(directory:)`, `open(file:)`, `refresh`, `restore(_:into:)`, `close`) and `RestoreViewModel.swift` (`activeBrowser: SnapshotBrowser?`) | `Sources/Engine/SnapshotBrowser.swift` | The engine class itself. It runs restic through `ProcessRunner`, reads `SSHAgentServer.socketPath` and the bundle's path, and imports AppKit. The protocol `SnapshotBrowserService` is only a factory: `makeBrowser()` returns this class. The seam here is the class's published surface, not a protocol |
+| `SSHPane.swift` (`private let decisions: AgentDecisionLog`), `AccessHistorySheet.swift` (`AgentDecision`, `AgentPolicyTrace.Outcome`, `AgentDecisionLog.appName`) | `Sources/AgentDecisionLog.swift`, `Sources/AgentPolicyTrace.swift` | A concrete observable object, filled through two static hooks that `ServiceContainer.live()` sets (`AgentPolicy.traceSink`, `SSHAgentServer.signEventSink`). In memory only |
+| `BackupPane.swift` (`private let excludeStore: ExcludeStore`, `excludeStore.reload()`), `OverviewViewModel.swift` (`let excludeStore: ExcludeStore`), `ExcludesEditorRedesign.swift` (`ExcludeRules`, eight uses; `FileManager.default.fileExists` to test a rule against the disk) | `Sources/ExcludeStore.swift`, `Sources/ExcludeRules.swift` | A concrete object that reads and writes the exclude file itself, and the rules for it |
+| `RetentionRunner.swift` | `PruneRequest.write()`, `PruneRequest.clear()` (`Sources/Engine/PruneRequest.swift`) | A marker file for the daemon, written from the view-model layer |
+| `BackupViewModel.swift` | `ExcludeRules.systemExcludes()`, `BackupConfig.defaultPruneIntervalHours` | Rules and a default, read directly |
+| `GeneralViewModel.swift` | `catch let error as DaemonError` | An engine error type |
+| `GeneralPane.swift` | the global `logPath`, `FileManager.default.fileExists`, `NSWorkspace.shared.open` | The log file's place, known to the view |
+| `BackupPane.swift`, `GeneralPane.swift`, `MainWindow.swift`, `OverviewPane.swift` | `NotificationCenter.default.publisher(...)` | Which notifications, I did not read |
+
+Using `NSOpenPanel` in a view (`SnapshotBrowserSheet.swift`,
+`ExcludesEditorRedesign.swift`) is not counted: that is the view's own
+business.
+
+**The protocols themselves carry Atticus.** `ConfigStore` has the
+repository password in the Keychain (`saveRepoPassword`,
+`probeRepoPassword`, `rotateRepoPassword`), three switches of the SSH agent
+that do not carry over (section 5, rows 12, 18, 19) and the locks of an
+`.attic` profile. `SnapshotService.mount` is a FUSE mount, which
+`crates/p-reserve/SPEC.md` leaves out of scope. `BackupService` hands out a
+concrete observable object (`BackupMonitor`). Most getters are synchronous
+and on the main actor (`info()`, `status()`, `current()`, `load()`): an
+answer is expected at once, from memory or a file.
+
+**The larger point.** What is behind the protocols is not a back end that
+could be swapped. It is the program. The app's process *is* the SSH agent
+(`LiveSSHKeyService.activate()` starts `SSHAgentServer` and sets the key);
+it is the scheduler (`ScheduleRunner`, wired in `ServiceContainer.live()`);
+it learns what a backup does by tailing a log file and polling every ten
+seconds (`LiveBackupService`: `LogTailer`, a poll timer,
+`BackupRunReducer`); it starts a run through `DaemonController`. So the
+owner's memory is right for the direction that matters (most views know
+only protocols) and the consequence is: the layer under the protocols is
+not ported, it is dropped, about 2000 lines, and with it the parts of
+`Core/Domain` that exist to read logs (`BackupRunReducer`,
+`SchedulerLogScan`, `SchedulerTick`, `Gates`).
+
+### 8.3 What it takes to put socket clients behind the protocols
+
+Common to both programs:
+
+- A Swift client for a Unix socket with one JSON object per line: requests
+  with an identifier, answers and events matched by it, events as
+  `AsyncStream`. One client type serves both sockets if both protocols
+  keep the same envelope (`schema_version`, `type`, an identifier). Today
+  `control.sock` calls it `ref` (`proposals/control-sock.md`, section 3);
+  whatever p-reserve's proposal calls it, one word for both is worth
+  agreeing now.
+- The synchronous getters. Either the protocols become `async`, which
+  touches every view model, or each client keeps the last state it was
+  told and the getters read that. The second needs the daemon to push
+  state: a `status` answer and events that keep it current. That is what
+  section 8.5 asks of the protocols anyway.
+- The three objects of section 8.2 that are not protocols
+  (`SnapshotBrowser`, `ExcludeStore`, `AgentDecisionLog`) get one each,
+  with the surface the views use today.
+
+**`preserve`** (the daemon protocol is being proposed elsewhere; I have not
+seen it, only its outline: requests with an identifier, answers and events
+carrying it, progress as events, cancel by closing or by a message):
+
+| Atticus protocol or object | Becomes |
+|---|---|
+| `BackupService.trigger`, `BackupMonitor` | a request to run; progress and the end as events into the monitor. `BackupRunReducer` and the log tailing go |
+| `HealthService.current`, `.changes`; `ScheduleStatusService.status` | `status`, and events |
+| `SnapshotService.list`, `.delete`, `.setPinned`, `.repositoryStatus`, `.initializeRepository` | requests. `.mount`, `.unmount` have no counterpart |
+| `SnapshotBrowser` (list a level, preview a file, restore an item, cancel what the person left) | requests to list, dump and restore, each cancellable. The class's published surface (`currentPath`, `entries`, `listing`, `error`, `opening`, `restoring`, `restoreResult`) maps one to one. Read-ahead and "one restic at a time" (commit `f18f7f6`) are the daemon's concern then, or go: the daemon holds the repository open |
+| `ConnectionTestService.test()` (a stream of stages) | one request whose events are the stages |
+| `ConfigStore.load`, `.save…`; the repository password | reading and setting the daemon's configuration; the password through the daemon's own secret store (`crates/p-reserve/SPEC.md`, "Platforms") |
+| `ExcludeStore`, `ExcludeRules`, `RetentionRunner` with `PruneRequest` | requests; the rules live in the daemon, once |
+| `DaemonService`, `LoginItemService`, `SystemAccessService`, `UpdateService` | stay in the app: installing a job of launchd, the login item, Full Disk Access and the updater are the Mac app's own |
+| `ImportService`, `ManagedConfigService` (`.attic` profiles) | a decision of p-reserve; not looked at |
+
+**`pledge`** (`control.sock`, `proposals/control-sock.md`, section 4):
+
+| Atticus protocol or object | Becomes |
+|---|---|
+| `SSHKeyService.info` | `keys.list` |
+| `SSHKeyService.generate` (and "regenerate" behind a warning) | `keys.create`, `keys.retire`; the presence check is pledge's |
+| `SSHKeyService.sshConfigSnippet` | the app's own text, with the socket path from `status` |
+| `SSHKeyService.activate` | nothing: `pledge serve` is the SSH agent |
+| `AgentDecisionLog`, the access history sheet | the record. `control.sock` has no command for it today (`pledge history` reads the file) and no events yet (`control-sock.md`, section 6, "later"). Both are needed (section 8.5) |
+| the three SSH switches in `ConfigStore` | nothing |
+
+For pledge that is one pane and one sheet. Everything else pledge needs to
+show has no view in Atticus: programs (admit, block, forget), delegations
+(start with groups and two ceilings, list, withdraw), the keys' block for
+an administrator, requests that wait, and the dialog for a request. Atticus
+gives pledge the frame (a window, a menu bar item, the router, the shared
+components in `Components.swift`, the error alert) and little content.
+
+Two more things that are not code:
+
+- The licence (question 15, decided by the owner on 2026-11-18).
+  Atticus's `LICENSE` begins "Copyright (c) 2026 C-IT-WORK GmbH. All rights
+  reserved … proprietary"; `crates/p-ledge/Cargo.toml` says `MIT OR
+  Apache-2.0`. Atticus is the owner's own, so its views may be taken into
+  procession, and what results there is under `MIT OR Apache-2.0`; the
+  shared Swift package states that licence. Atticus itself stays under its
+  own. This settles the terms and is not a go: copying waits on the
+  condition of question 13 and, for anything that touches keys, on hand
+  checks 1 to 5.
+- The views' texts are English keys with a German table
+  (`Resources/de.lproj`), and some German is written into the views
+  directly (`"Letztes Backup: …"` in `MenuBarPopover.swift`, `"Protokoll"`
+  in `GeneralPane.swift`).
+
+### 8.4 One Mac app or two
+
+`crates/p-ledge/SPEC.md`, section 11, proposes one each;
+`crates/p-reserve/SPEC.md` lists it as open and says that setup "stays one
+flow in the desktop app although two programs are behind it".
+
+**Decided by the owner on 2026-11-18: two apps from one code base.** A Swift package with
+what both need (the socket client, the components, the window and menu bar
+frame), and two targets:
+
+- **pledge's app**: small. Keys, programs, delegations, the record, and the
+  dialogs (section 8.6).
+- **preserve's app**: Atticus's panes. For the one setup flow it is also a
+  client of `control.sock`, for `keys.create` with purpose `bound`,
+  `keys.list`, and nothing else.
+
+Why not one:
+
+- pledge's app is what shows a person what they are about to approve. It
+  should hold as little else as possible. Atticus's app links an updater
+  that fetches and installs code (`Sources/App/Updater.swift`, Sparkle);
+  that belongs in a backup app and not in the process that shows requests.
+- `control.sock` admits a peer by its code signature
+  (`control-sock.md`, section 2). One identity that may do everything, from
+  starting agents to pruning backups, is the wider key. With two apps the
+  socket can admit preserve's app for two commands only. That needs a rule
+  per command and peer in `control.sock`, which is not there today and
+  is part of this decision.
+- A person who approves requests and keeps no backup on that Mac needs
+  pledge alone; p-reserve works with a key file where there is no pledge.
+
+Why one would be tempting: one menu bar item, one thing to install. The
+second target can still present itself inside the first later; the reverse
+split is harder.
+
+### 8.5 Linux: what the socket protocols must offer
+
+SwiftUI ends at the Mac. Whatever is drawn on Linux later can only reuse
+what crosses the sockets. So that a Linux desktop is not cornered:
+
+1. **Everything a front end shows comes over the socket.** No front end
+   reads a file of the daemon's: not the record, not a log, not the
+   configuration, not an exclude file, not a marker file. Atticus's app
+   does all of these. For pledge this means a command for the record
+   beside `pledge history` reading the file.
+2. **State, then events.** A `status` (and a list per noun) that gives the
+   whole present state, and a subscription whose events are enough to keep
+   it current. A client that connects late, or again, asks for the state
+   and is right. No event is the only carrier of a fact.
+3. **Codes and values, not sentences.** A front end words what it shows,
+   in its language. The exceptions are the fields of a request and of a
+   signing request, which are shown as they were signed.
+4. **No nouns of one platform in the messages.** Not "Touch ID",
+   "Keychain", "Full Disk Access", "launchd". Instead what they mean: "this
+   key enforces presence itself", "a permission is missing: <code>", "the
+   service is not installed". `status` already has `form` (`files` or
+   `hardware`); it should say per key who performs the presence check.
+5. **A dialog is a message, and the protocol says what an answer is
+   worth.** An event "a question is open" with an identifier, a title as a
+   code, the labelled fields whole, and the deadline; "closed" with the
+   reason. Where the key enforces presence, whatever shows the dialog can
+   say `decline` and never `approve` (section 8.6). Where it does not, the
+   protocol says so, and an answer is then all there is. A FIDO2 token on Linux
+   (`doc/approvals.md`, section 9) fits the first case unchanged: the touch
+   is at the token.
+6. **Long work has an identifier, progress as events, and a cancel; and
+   closing a connection cancels only what was asked for that way.** A
+   listing in the browser may end with its connection. A backup run or a
+   prune must not stop because a window closed. "Cancel by closing", as
+   the outline of p-reserve's protocol has it, needs this distinction
+   (question 14).
+7. **Several front ends at once.** The command line, a window and a tray
+   item may be three processes on Linux. Events go to all; a question is
+   answered once and the others are told it closed.
+8. **Nothing rests on the peer's code signature alone.** Linux has none:
+   there a peer is a user and a path. What the Mac guards by code
+   signature, Linux must guard by a presence check or state as unguarded.
+   The commands that widen something already have a check of their own
+   (`control-sock.md`, section 4); keep that rule for every new command.
+9. **A front end older or newer than its daemon.** `schema_version` and
+   refusing unknown members are there. Add to `status` what this daemon
+   can do, so that a front end hides what is missing instead of failing.
+10. **Paths are the daemon's.** A restore target or an exclude rule is a
+    path on the daemon's machine; a front end must not assume it can see
+    it. This also keeps the view for a headless host, which
+    `crates/p-reserve/SPEC.md` wants, possible.
+
+Taking the SwiftUI front end is the third candidate of
+`crates/p-reserve/SPEC.md` ("native per platform"), which that document
+calls "tolerable only because the app holds no logic" and does not
+recommend. The condition is therefore strict: the logic that Atticus's
+views and view models still hold (section 8.2: exclude rules, the prune
+marker, the reducer over the log) moves into the daemons before or with
+the views, not after.
+
+### 8.6 The dialog for a confirmed approval, in that app
+
+Section 4.2 proposed a dialog process of pledge's own until the desktop app
+exists. With an app, the question is whether the dialog can live there.
+
+**It can live in that app's bundle, not in that app's process.** What ties
+the answer to the signature does not move: it is the key. The confirmed
+approval key enforces presence in the Secure Enclave; the Touch ID prompt
+is raised by the key holder, with words that come from the reader (section
+4.3). Whatever shows the request can say "decline" and has no way to say
+"yes". A touch is the only yes.
+
+**Which process: the dialog process of section 4.2 is a separate small
+process, not the front end.** The front end (window, menu bar item, panes)
+is one program; the dialog process is another, shipped in the same app
+bundle and written with the same components. The reasons are those of
+section 4.4, which wants the thing that shows requests to hold no key and
+decide nothing:
+
+- *It holds no key* either way: neither program has a key, and neither is
+  the key holder.
+- *It decides nothing* only if it also **does nothing else**. The front end
+  is a client of `control.sock` that can start agents, set ceilings, admit
+  programs and retire keys. A program that can ask for those things and
+  also shows the request is two powers in one process: taken over, it
+  could raise a ceiling and show the dialog that hides it. The dialog
+  process has no connection to `control.sock` at all. It has one pipe, to
+  `pledge serve`, over which it receives a `Description` and returns
+  "declined" or "closed". There is nothing else it can say.
+- *It is started by `pledge serve`*, not by the person and not by the
+  front end, so a request is shown whether or not a window is open, and
+  `pledge serve` knows which process it is talking to: its own child, not
+  a peer of a socket to be identified.
+- *It is small enough to read*: one window, no network, no updater, no
+  settings, no state.
+
+The front end may show the same question as a second place (decided,
+question 16): read only. It takes no answer, and the answer never depends
+on it. So section 4.2's proposal stands as it was, and this section adds
+where the dialog process ships and what it is drawn with.
+
+Conditions:
+
+1. **The dialog must not depend on the person having opened an app.**
+   `pledge serve` is a job of launchd; a request can arrive with no window
+   open. The dialog process is started by `pledge serve` itself, speaking
+   the `Dialogs` seam (section 6.3). If it cannot be shown, the request
+   waits and expires (question 9, decided).
+2. **It is pledge's app, not a shared one** (section 8.4), so that the
+   program that shows requests has no updater and no backup code in it.
+3. **`control.sock` sends a question's contents only to a peer it has
+   identified** by audit token and code signature (section 3), since the
+   app's window may show them. Until builds are signed (question 8) that
+   check is the user and nothing more, and the document must say so. The
+   narrower choice, events that say only that a question is open, would
+   keep parameters from a front end altogether; it was my first answer
+   and is not what was decided.
+4. **`control.sock` gains what `control-sock.md`, section 6, left for
+   later:** the subscription, with events that a question opened and
+   closed. No answer travels over `control.sock`: declining is the dialog
+   process's, over its pipe.
+
+What Atticus offers for the dialog itself: nothing to take over. Its
+confirmation of a signature is the system's Touch ID prompt with one
+sentence (`AgentPolicy.authorize(reason:)`); there is no view for it. The
+three SwiftUI confirmation dialogs in the app are the app asking about its
+own acts: delete a snapshot (`RestorePane.swift`), clean up now
+(`BackupPane.swift`), replace the key (`SSHPane.swift`). A dialog that
+shows a request field by field, whole, with the agent's claim apart, is new
+SwiftUI either way. The frame it sits in is Atticus's.
+
+What an app that is taken over could and could not do is section 4.4,
+unchanged: it can lie on the screen and decline; it cannot sign, cannot
+cause a signature without a touch, and the Touch ID prompt's line (service,
+host, action) does not pass through it.
+
+One thing to see with eyes, **[U]**: the Touch ID prompt carries the name
+of the program that uses the key, the key holder, and appears over the
+app's dialog. The person then sees two program names for one act. The key
+holder should be named so that it reads as pledge.
+
+## 9. What was read, what was not; nothing was run
+
+For section 8, in Atticus (`develop`, `a1ada83`). Read in full:
+`Sources/Views/Redesign/MenuBarPopover.swift`,
+`Sources/ViewModels/MenuBarViewModel.swift`,
+`Sources/App/ServiceContainer.swift`,
+`Sources/Core/Services/Live/LiveSSHKeyService.swift`, and the thirteen
+protocol files in `Sources/Core/Services/` (comments left out). In part:
+`SSHPane.swift` (lines 1 to 40, 160 to 183), `RestorePane.swift` (20 to
+37), `BackupPane.swift` (115 to 125), `SSHKeyViewModel.swift` (the first 90
+lines of code), `tools/check-layering.sh` (the first 80 lines), the first
+lines of `LICENSE`. **Only searched**, for names of types declared outside
+the views, for system calls and for how services are obtained: every other
+view and view model, among them `OverviewPane.swift`, `SchedulePane.swift`,
+`GeneralPane.swift`, `ImportSheet.swift`, `MainWindow.swift`,
+`Components.swift`, `SnapshotBrowserSheet.swift` (its calls on the
+browser), `ExcludesEditorRedesign.swift`; and of
+`Sources/Engine/SnapshotBrowser.swift`, `Sources/ExcludeStore.swift`,
+`Sources/AgentDecisionLog.swift` and `LiveBackupService.swift` the
+declarations. The search took type names by a pattern and matched whole
+words, comments included; a free function or a constant used by a view
+(like `logPath`, found by a second search) can have escaped it. "Clean" in
+section 8.2 means: that search found nothing. Not read: the other `Live`
+implementations, `Sources/App/` beyond the container and the scenes of
+`AtticusApp.swift`, the tests. The line counts are `wc -l`.
+
+In this worktree, for section 8: `crates/p-reserve/SPEC.md`, the section
+"The desktop app" and its neighbours read, the rest searched;
+`proposals/control-sock.md`, section 4, read. The proposal for p-reserve's
+daemon protocol I have not seen; what section 8 says of it is the outline
+I was given.
 
 Read in full, in this worktree: `doc/approvals.md`,
 `doc/approval-formats.md`, `crates/p-ledge/SPEC.md`,
@@ -896,11 +1333,19 @@ commands were `git branch -a`, `git log --all --oneline`, `git status
 --short`, `git show`, and reading files.
 
 No Apple documentation and no header was looked up. Every **[D]** is from
-memory, every **[U]** is a belief. In particular not checked: the names
-`LOCAL_PEERTOKEN`, `kSecGuestAttributeAudit`,
-`SecCodeCopySigningInformation`, `LAContext.invalidate()`,
-`touchIDAuthenticationAllowableReuseDuration`, and the CryptoKit
-initialisers that take an `authenticationContext`.
+memory, every **[U]** is a belief. Not checked at all: the names
+`LOCAL_PEERTOKEN`, `kSecGuestAttributeAudit` and
+`SecCodeCopySigningInformation`.
 
-Nothing was run: no build, no test, no `ssh-keygen`, no program that makes
-or uses a Secure Enclave key, no Touch ID prompt.
+Added on 2026-11-18 with the checks program
+(`stage2-mac-checks/sechecks.swift`): that file was type-checked against
+the SDK (`swiftc -typecheck`, Swift 6.3.3, SDK 26.5; no binary written,
+nothing run). So these names now exist as used, where before they were
+from memory: `SecureEnclave.P256.Signing.PrivateKey(accessControl:)` and
+`(dataRepresentation:authenticationContext:)`, the flags `.biometryAny`,
+`.biometryCurrentSet`, `.userPresence`, `LAContext.localizedReason`,
+`touchIDAuthenticationAllowableReuseDuration` and `invalidate()`. What they
+do is still for the hand checks to show.
+
+Nothing was run: no build of a binary, no test, no `ssh-keygen`, no
+program that makes or uses a Secure Enclave key, no Touch ID prompt.

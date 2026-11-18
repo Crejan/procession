@@ -1,17 +1,16 @@
-//! TLS around the connections: TLS 1.3 only, the `ring` provider, the broker's
+//! TLS around the connections: TLS 1.3 only, the `ring` provider (what both ends must agree on is in
+//! `p_act::broker`: the exporter's label, context and length, the protocol version and the provider), the broker's
 //! certificate from the site's TLS root (or a pinned one). Nothing signed
 //! depends on it (`approval-connections.md` section 1); it keeps strangers from
 //! standing in the broker's place and from reading requests.
 
 use std::sync::Arc;
 
+use p_act::broker::{TLS_EXPORTER_CONTEXT, TLS_EXPORTER_LABEL, TLS_EXPORTER_LENGTH};
 use rustls::{ClientConfig, RootCertStore, ServerConfig, ServerConnection};
 use rustls_pki_types::pem::PemObject;
 use rustls_pki_types::{CertificateDer, PrivateKeyDer};
 use thiserror::Error;
-
-/// The label that ties a sign-in to one TLS connection (RFC 5705).
-pub const EXPORTER_LABEL: &[u8] = b"EXPORTER-procession-connection-v1";
 
 /// Why the TLS set-up failed.
 #[derive(Debug, Error)]
@@ -57,8 +56,8 @@ pub fn client_config(root_pem: &[u8]) -> Result<Arc<ClientConfig>, TlsError> {
 }
 
 /// The 32 bytes both ends export from one TLS connection: what the sign-in's `tls` member carries.
-pub fn exporter(conn: &ServerConnection) -> Option<[u8; 32]> {
-    let mut out = [0u8; 32];
-    conn.export_keying_material(&mut out, EXPORTER_LABEL, None).ok()?;
+pub fn exporter(conn: &ServerConnection) -> Option<[u8; TLS_EXPORTER_LENGTH]> {
+    let mut out = [0u8; TLS_EXPORTER_LENGTH];
+    conn.export_keying_material(&mut out, TLS_EXPORTER_LABEL, TLS_EXPORTER_CONTEXT).ok()?;
     Some(out)
 }

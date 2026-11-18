@@ -284,7 +284,7 @@ request in front of a person that is not from that person's agent.
 | The sandbox leaks: the agent gets its person's account | G1 | Nothing in this design (trusted, above) | Everything the person can do on that host. R1 does not apply any more |
 | A person approves the wrong thing, or asks for more than they may | G3 | R10 at the broker. R9: the dialog shows the request as it is | An entitled person approving a wrong but permitted action. A second person's approval is later |
 | A stranger sends calls, requests or approvals | G4, G6 | An approval verifies only with a key the site CA certified for that person. R8 keeps requests away. A request verifies only with a service key that a known host certified. The broker is recognised by its certificate | Nothing known |
-| A person's machine is stolen | G4 | A confirmed approval and a new delegation need a presence check. An administrator blocks its keys at the broker; no clearance, no action | Until it is blocked, and if the thief has the unlocked session: automatic approvals for agents already running |
+| A person's machine is stolen | G4 | A confirmed approval and a new delegation need a presence check. An administrator blocks its keys at the broker; no clearance, no action | Until it is blocked: automatic approvals for agents already running. On a Mac the automatic key is usable after the first unlock since boot, so a locked screen does not stop them; what bounds them is the delegation's end and the administrator's block. The same is lost to a program that runs in the person's session: with keys kept as blobs in files (stage 2 on a Mac) it can use the automatic key itself, and can raise a Touch ID prompt for the confirmed key under its own name (`crates/p-ledge/SPEC.md`, section 11) |
 | A person signs as another | G5 | Each key is certified for one person by the site CA; a service checks that the approval is by the person the request names; an administrator, not the person, enters keys | An administrator entering a wrong key (trusted) |
 | Someone floods a person with dialogs | G6 | R8, checked by pledge itself; limits and muting (section 7), enforced by pledge; one dialog at a time | A person's own agent, up to those limits |
 | The broker is taken over | G3 | R1, R6, R8 are checked by pledge and by services without it | R10 is gone: a person can have carried out what the site would not let them. Withdrawals by an administrator and blocks are gone. It can refuse everything, and sees who asks for what |
@@ -297,9 +297,14 @@ request in front of a person that is not from that person's agent.
 
 **Signatures.** SSHSIG, one namespace per use (call, request, approval,
 clearance, connection), verified with `ssh-keygen -Y verify`. A service
-needs no library. An agent's call is the one signature not made by
-`ssh-keygen`: the signer in the sandbox writes it itself, so that the key is
-never a file there, and is tested against `ssh-keygen` byte for byte.
+needs no library. Every signature is verified with `ssh-keygen -Y verify`;
+not every one is made by `ssh-keygen`. An agent's call, and everything pledge
+signs, are produced without it: the signer in the sandbox must never have
+its key as a file, and a person's keys are in key hardware, where
+`ssh-keygen` cannot reach them. All of these are written by one writer of
+the form, in `p-act`, which is handed the signer; it is tested against
+`ssh-keygen` byte for byte where the algorithm allows and by verification
+where it does not.
 
 **A person's keys**, made in the machine's key hardware. pledge prints their
 public parts as one block; an administrator enters it in the site project.

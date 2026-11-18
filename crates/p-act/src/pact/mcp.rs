@@ -169,10 +169,10 @@ pub fn serve(ctx: &Arc<Context>, input: impl Read, output: impl Write + Send + '
                 }));
             }
             ("notifications/cancelled", None) => {
-                if let (Some(rid), Ok(m)) = (params.get("requestId"), inflight.lock()) {
-                    if let Some(t) = m.get(&rid.to_string()) {
-                        t.cancel();
-                    }
+                if let (Some(rid), Ok(m)) = (params.get("requestId"), inflight.lock())
+                    && let Some(t) = m.get(&rid.to_string())
+                {
+                    t.cancel();
                 }
             }
             (_, None) => {} // `notifications/initialized` and every other notification

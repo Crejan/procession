@@ -12,28 +12,53 @@
 //! - [`sign`]: signing and verifying with `ssh-keygen -Y`, one function per
 //!   document type and direction, and reading the person out of a signature.
 //! - [`DocumentHash`]: `sha256:<hex>` of a document's bytes.
+//! - [`peer`]: who is on the other end of a Unix socket (the only module without the feature `formats`).
 
+#[cfg(feature = "formats")]
 mod error;
+#[cfg(feature = "formats")]
 mod hash;
+#[cfg(feature = "formats")]
 mod object;
+#[cfg(feature = "formats")]
 mod request;
+#[cfg(feature = "formats")]
 mod text;
+#[cfg(feature = "formats")]
 mod time;
 
+#[cfg(feature = "formats")]
 pub mod broker;
+#[cfg(feature = "formats")]
 pub mod call;
+#[cfg(feature = "formats")]
 pub mod clearance;
+#[cfg(feature = "formats")]
 pub mod exchange;
+#[cfg(feature = "formats")]
 pub mod limits;
 #[cfg(feature = "pact")]
 pub mod pact;
+#[cfg(unix)]
+pub mod peer;
+#[cfg(feature = "formats")]
 pub mod rating;
+#[cfg(unix)]
 pub mod settings;
+#[cfg(feature = "formats")]
 pub mod sign;
+#[cfg(feature = "formats")]
+pub mod sshsig;
 
+#[cfg(feature = "formats")]
 pub use call::{Call, CallContent, CallId, NotShowable, ServiceId};
+#[cfg(feature = "formats")]
 pub use clearance::Clearance;
+#[cfg(feature = "formats")]
 pub use error::ParseError;
+#[cfg(feature = "formats")]
 pub use hash::{Document, DocumentHash};
+#[cfg(feature = "formats")]
 pub use request::Request;
+#[cfg(feature = "formats")]
 pub use time::Timestamp;

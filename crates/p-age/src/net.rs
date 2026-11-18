@@ -20,7 +20,7 @@ use tokio::net::TcpListener;
 use tokio::sync::{OwnedSemaphorePermit, Semaphore, mpsc};
 use tokio_rustls::TlsAcceptor;
 
-use crate::core::{ConnId, Core, Effect, PledgeOut, ServiceOut, Stored, vet};
+use crate::core::{ConnId, Core, Effect, PledgeOut, ServiceOut, StoreError, Stored, vet};
 use crate::crypto::Crypto;
 use crate::site::Site;
 use crate::tls;
@@ -101,6 +101,11 @@ pub struct Lines<R> {
 impl<R: AsyncRead + Unpin> Lines<R> {
     pub fn new(inner: R, line_timeout: Duration) -> Lines<R> {
         Lines { inner, buf: LineBuffer::new(), started: None, line_timeout }
+    }
+
+    /// As [`Lines::new`] with another limit on a line, for a connection that is not the exchange.
+    pub fn with_limit(inner: R, line_timeout: Duration, limit: usize) -> Lines<R> {
+        Lines { inner, buf: LineBuffer::with_limit(limit), started: None, line_timeout }
     }
 
     /// The next line without its `\n`; `None` at the end between lines. `wait` bounds the wait for a line to begin.
@@ -223,7 +228,7 @@ impl Broker {
     }
 
     /// Run `f` on the core off the async threads, then dispatch what it returns, in one critical section.
-    async fn with_core<T: Send + 'static>(
+    pub(crate) async fn with_core<T: Send + 'static>(
         self: &Arc<Self>,
         f: impl FnOnce(&mut Core, SystemTime) -> (T, Vec<Effect>) + Send + 'static,
     ) -> Option<T> {
@@ -268,24 +273,61 @@ impl Broker {
                 (stored, effects)
             })
             .await;
-        outcome.unwrap_or_else(|| Stored::No("the broker could not be reached".to_owned()))
+        outcome.unwrap_or_else(unreachable_store)
+    }
+
+    /// An administrator blocks one key: in force at once; whether it is stored is the answer.
+    pub async fn block_key(self: &Arc<Self>, fingerprint: String) -> Stored {
+        let outcome = self
+            .with_core(move |core, now| {
+                let (effects, stored) = core.block_key(&fingerprint, now);
+                (stored, effects)
+            })
+            .await;
+        outcome.unwrap_or_else(unreachable_store)
     }
 
     /// An administrator lifts a block: refused while the register cannot be written.
-    pub async fn unblock_person(self: &Arc<Self>, person: String) -> Result<(), String> {
+    pub async fn unblock_person(self: &Arc<Self>, person: String) -> Result<(), StoreError> {
         let outcome = self
             .with_core(move |core, now| match core.unblock_person(&person, now) {
                 Ok(effects) => (Ok(()), effects),
                 Err(why) => (Err(why), Vec::new()),
             })
             .await;
-        outcome.unwrap_or_else(|| Err("the broker could not be reached".to_owned()))
+        outcome.unwrap_or_else(|| Err(StoreError { code: "io", text: "the broker could not be reached".to_owned() }))
+    }
+
+    /// An administrator lifts a key's block: refused while the register cannot be written.
+    pub async fn unblock_key(self: &Arc<Self>, fingerprint: String) -> Result<(), StoreError> {
+        let outcome = self
+            .with_core(move |core, now| match core.unblock_key(&fingerprint, now) {
+                Ok(effects) => (Ok(()), effects),
+                Err(why) => (Err(why), Vec::new()),
+            })
+            .await;
+        outcome.unwrap_or_else(|| Err(StoreError { code: "io", text: "the broker could not be reached".to_owned() }))
+    }
+
+    /// An administrator withdraws a delegation: in force at once; whether it is stored is the answer.
+    pub async fn admin_withdraw(self: &Arc<Self>, delegation: p_act::sign::Fingerprint) -> Stored {
+        let outcome = self
+            .with_core(move |core, now| {
+                let (effects, stored) = core.admin_withdraw(&delegation, now);
+                (stored, effects)
+            })
+            .await;
+        outcome.unwrap_or_else(unreachable_store)
     }
 
     /// Why the register cannot be stored, if it cannot: the broker is degraded.
     pub fn degraded(&self) -> Option<String> {
         lock(&self.core).degraded().map(str::to_owned)
     }
+}
+
+fn unreachable_store() -> Stored {
+    Stored::No(StoreError { code: "io", text: "the broker could not be reached".to_owned() })
 }
 
 /// Send `error` and say so; the caller then ends the connection.
@@ -363,8 +405,10 @@ where
             out = rx.recv() => match out {
                 Some(Out::Service(ServiceOut::Close)) | None => break,
                 Some(Out::Service(o)) => {
-                    if let Some(line) = service_line(&o) {
-                        if !write_line(&mut wr, &line).await { break; }
+                    if let Some(line) = service_line(&o)
+                        && !write_line(&mut wr, &line).await
+                    {
+                        break;
                     }
                 }
                 Some(Out::Pledge(_)) => {}
@@ -498,8 +542,10 @@ where
             out = rx.recv() => match out {
                 Some(Out::Pledge(PledgeOut::Close)) | None => break,
                 Some(Out::Pledge(o)) => {
-                    if let Some(line) = pledge_line(&o) {
-                        if !write_line(&mut wr, &line).await { break; }
+                    if let Some(line) = pledge_line(&o)
+                        && !write_line(&mut wr, &line).await
+                    {
+                        break;
                     }
                 }
                 Some(Out::Service(_)) => {}
@@ -558,7 +604,9 @@ where
             return None;
         }
         let person = broker.site.person(doc.person()).filter(|p| p.enabled)?;
-        let (crypto, key, sig) = (Arc::clone(&broker.crypto), person.connection_key.clone(), signed.sig);
+        // A person without keys cannot sign in.
+        let key = person.connection_key()?.clone();
+        let (crypto, sig) = (Arc::clone(&broker.crypto), signed.sig);
         let name = doc.person().to_owned();
         let ok = broker.offload(move || crypto.verify_connection(&doc, &sig, &key).is_ok()).await?;
         ok.then_some(name)
@@ -569,7 +617,7 @@ where
         return None;
     };
     let p = person.clone();
-    if broker.with_core(move |c, _| (c.is_blocked(&p), Vec::new())).await.unwrap_or(true) {
+    if broker.with_core(move |c, _| (c.signin_blocked(&p), Vec::new())).await.unwrap_or(true) {
         send_pledge_error(wr, ErrorCode::Blocked).await;
         return None;
     }
