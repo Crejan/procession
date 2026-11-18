@@ -6,7 +6,7 @@ use std::process::ExitCode;
 use std::time::Duration;
 
 use clap::{Args, Parser, Subcommand, ValueEnum};
-use p_rover::observe::{cmdline, irq, procs, sched};
+use p_rover::observe::{cmdline, irq, nic, procs, sched};
 use p_rover::{Config, Env, Error, Report, render};
 use p_roc::{CpuSet, Root};
 
@@ -77,6 +77,17 @@ enum Cmd {
         #[arg(long, default_value_t = sched::DEFAULT_MAX)]
         max: usize,
     },
+    /// Link, driver, counters, rings, coalescing, queues and their IRQs of one interface (cost: light; heavy with --delta).
+    Nic {
+        /// The interface.
+        iface: String,
+        /// Report only the counters that moved over this window (1s to 300s).
+        #[arg(long, value_parser = humantime::parse_duration)]
+        delta: Option<Duration>,
+        /// List every counter, not only errors and drops.
+        #[arg(long)]
+        all_stats: bool,
+    },
     /// Live kernel command line against the declared one, kernel flavour, sysctls (cost: light).
     Cmdline,
     /// IRQ affinity, /proc/interrupts delta, timer ticks (cost: light).
@@ -109,6 +120,9 @@ fn run(cli: &Cli) -> Result<Report, Error> {
         Cmd::Procs { max } => procs::run(&env, &procs::Args { max: *max }),
         Cmd::Sched { cpus, duration, max } => {
             sched::run(&env, &sched::Args { cpus: cpus.clone(), duration: *duration, max: *max })
+        }
+        Cmd::Nic { iface, delta, all_stats } => {
+            nic::run(&env, &nic::Args { iface: iface.clone(), delta: *delta, all_stats: *all_stats })
         }
         Cmd::Cmdline => cmdline::run(&env),
         Cmd::Irq { duration, top } => irq::run(&env, &irq::Args { duration: *duration, top: *top }),

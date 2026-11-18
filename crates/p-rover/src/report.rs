@@ -152,7 +152,11 @@ impl Report {
 
     /// Appends the unreadable sources of a scan.
     pub fn unreadable(&mut self, more: impl IntoIterator<Item = Unreadable>) {
-        self.unreadable.extend(more);
+        for u in more {
+            if !self.unreadable.contains(&u) {
+                self.unreadable.push(u);
+            }
+        }
     }
 
     /// The process exit code the findings call for: 0 nothing above info, 1 warnings, 2 critical.
@@ -170,6 +174,12 @@ impl Report {
 #[must_use]
 pub fn round1(x: f64) -> f64 {
     (x * 10.0).round() / 10.0
+}
+
+/// Rounds to two decimals, for small rates.
+#[must_use]
+pub fn round2(x: f64) -> f64 {
+    (x * 100.0).round() / 100.0
 }
 
 /// `2026-11-18T09:30:00Z` from a system time (seconds, UTC).

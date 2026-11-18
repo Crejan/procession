@@ -8,7 +8,18 @@ use p_roc::CpuSet;
 use p_rover::observe::sched::{self, Args};
 
 /// Rewrites a thread's counters as `secs` of activity later: run, wait, slices, voluntary, involuntary, migrations added.
-fn bump(host: &std::path::Path, tid: i32, run_ns: u64, wait_ns: u64, slices: u64, vol: u64, invol: u64, migr: u64) {
+#[derive(Clone, Copy)]
+struct Add {
+    run_ns: u64,
+    wait_ns: u64,
+    slices: u64,
+    vol: u64,
+    invol: u64,
+    migr: u64,
+}
+
+fn bump(host: &std::path::Path, tid: i32, a: Add) {
+    let Add { run_ns, wait_ns, slices, vol, invol, migr } = a;
     let d = host.join(format!("proc/{tid}/task/{tid}"));
     fs::write(d.join("schedstat"), format!("{} {} {}\n", 1_000_000_000 + run_ns, 100_000_000 + wait_ns, 100 + slices)).unwrap();
     fs::write(
@@ -27,9 +38,9 @@ fn bump(host: &std::path::Path, tid: i32, run_ns: u64, wait_ns: u64, slices: u64
 fn run(host: &Host, args: &Args) -> p_rover::Report {
     let root = host.dir.path().to_path_buf();
     let env = host.env(move |_| {
-        bump(&root, 10, 4_500_000_000, 500_000_000, 5000, 100, 400, 0); // busy FIFO, preempted
-        bump(&root, 13, 1_000_000_000, 0, 100_000, 100_000, 0, 2); // micro-sleep poller
-        bump(&root, 11, 10_000_000, 0, 10, 10, 0, 0);
+        bump(&root, 10, Add { run_ns: 4_500_000_000, wait_ns: 500_000_000, slices: 5000, vol: 100, invol: 400, migr: 0 }); // busy FIFO, preempted
+        bump(&root, 13, Add { run_ns: 1_000_000_000, wait_ns: 0, slices: 100_000, vol: 100_000, invol: 0, migr: 2 }); // micro-sleep poller
+        bump(&root, 11, Add { run_ns: 10_000_000, wait_ns: 0, slices: 10, vol: 10, invol: 0, migr: 0 });
         // tid 14 "restarts": counters below the first sample, as a reused tid would show.
         fs::write(root.join("proc/14/task/14/schedstat"), "5 5 1\n").unwrap();
     });

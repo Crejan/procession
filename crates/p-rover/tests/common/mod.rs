@@ -18,7 +18,10 @@ fn copy_dir(from: &Path, to: &Path) {
     for e in fs::read_dir(from).unwrap() {
         let e = e.unwrap();
         let dest = to.join(e.file_name());
-        if e.file_type().unwrap().is_dir() {
+        let kind = e.file_type().unwrap();
+        if kind.is_symlink() {
+            std::os::unix::fs::symlink(fs::read_link(e.path()).unwrap(), dest).unwrap();
+        } else if kind.is_dir() {
             copy_dir(&e.path(), &dest);
         } else {
             fs::copy(e.path(), dest).unwrap();
@@ -53,6 +56,7 @@ impl Host {
             config,
             host: "testhost".into(),
             clock: Box::new(FakeClock::new(1_794_000_000, on_pause)),
+            ethtool: Box::new(p_rover::ethtool::Fixed::default()),
         }
     }
 }

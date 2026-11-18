@@ -1,0 +1,91 @@
+{
+  "schema_version": 1,
+  "subcommand": "nic",
+  "host": "testhost",
+  "started_at": "2026-11-06T21:20:00Z",
+  "mode": "observe",
+  "cost": "heavy",
+  "unreadable": [
+    {
+      "source": "ethtool lan0",
+      "reason": "no ethtool transport in this build: driver counters, rings, coalescing, channels, EEE and offloads are not reported"
+    }
+  ],
+  "records": [
+    {
+      "type": "counter",
+      "iface": "lan0",
+      "name": "rx_fifo_errors",
+      "delta": 120,
+      "per_s": 12.0,
+      "before": 0,
+      "after": 120,
+      "triage": true
+    },
+    {
+      "type": "counter",
+      "iface": "lan0",
+      "name": "rx_missed_errors",
+      "delta": 120,
+      "per_s": 12.0,
+      "before": 0,
+      "after": 120,
+      "triage": true
+    },
+    {
+      "type": "counter",
+      "iface": "lan0",
+      "name": "rx_packets",
+      "delta": 5000,
+      "per_s": 500.0,
+      "before": 1000,
+      "after": 6000,
+      "triage": false
+    },
+    {
+      "type": "counter",
+      "iface": "lan0",
+      "name": "tx_packets",
+      "delta": 5,
+      "per_s": 0.5,
+      "before": 900,
+      "after": 905,
+      "triage": false
+    },
+    {
+      "type": "summary",
+      "iface": "lan0",
+      "window_s": 10,
+      "counters_moved": 4,
+      "error_counters_moved": 2,
+      "clean": false
+    }
+  ],
+  "restored": [],
+  "findings": [
+    {
+      "id": "nic-drops",
+      "severity": "warn",
+      "subject": {
+        "kind": "interface",
+        "name": "lan0"
+      },
+      "evidence": [
+        {
+          "name": "rx_fifo_errors",
+          "value": 120
+        },
+        {
+          "name": "rx_missed_errors",
+          "value": 120
+        },
+        {
+          "name": "window_s",
+          "value": 10
+        }
+      ],
+      "recommendation": "error or drop counters moved during the window: a receive overflow or link problem in progress; check rings, interrupt coalescing and the IRQ's CPU",
+      "changes": []
+    }
+  ]
+}

@@ -11,6 +11,7 @@ pub mod cpuset;
 pub mod cpus;
 pub mod error;
 pub mod irq;
+pub mod net;
 pub mod root;
 pub mod sys;
 pub mod task;

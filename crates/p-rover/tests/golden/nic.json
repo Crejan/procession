@@ -1,0 +1,189 @@
+{
+  "schema_version": 1,
+  "subcommand": "nic",
+  "host": "testhost",
+  "started_at": "2026-11-06T21:20:00Z",
+  "mode": "observe",
+  "cost": "light",
+  "unreadable": [],
+  "records": [
+    {
+      "type": "link",
+      "name": "lan0",
+      "ifindex": 3,
+      "operstate": "up",
+      "carrier": true,
+      "speed_mbps": 1000,
+      "duplex": "full",
+      "mtu": 1500,
+      "address": "aa:bb:cc:00:11:22",
+      "carrier_changes": 2,
+      "admin_up": true,
+      "driver": "igb",
+      "pci": "0000:04:00.0",
+      "rx_queues": 2,
+      "tx_queues": 2,
+      "irqs": [
+        125,
+        126
+      ]
+    },
+    {
+      "type": "driver",
+      "iface": "lan0",
+      "driver": "igb",
+      "version": "6.8",
+      "firmware": "1.63",
+      "bus_info": "0000:04:00.0",
+      "kernel_driver": "igb",
+      "pci": "0000:04:00.0"
+    },
+    {
+      "type": "stats",
+      "iface": "lan0",
+      "counters": 12,
+      "triage": {
+        "collisions": 0,
+        "rx_crc_errors": 0,
+        "rx_dropped": 0,
+        "rx_errors": 0,
+        "rx_fifo_errors": 0,
+        "rx_missed_errors": 0,
+        "rx_no_buffer_count": 7,
+        "tx_errors": 0
+      },
+      "nonzero_triage": {
+        "rx_no_buffer_count": 7
+      },
+      "rx_packets": 1000,
+      "tx_packets": 900
+    },
+    {
+      "type": "ring",
+      "iface": "lan0",
+      "rx_max": 4096,
+      "rx": 256,
+      "tx_max": 4096,
+      "tx": 256
+    },
+    {
+      "type": "coalesce",
+      "iface": "lan0",
+      "adaptive_rx": false,
+      "adaptive_tx": null,
+      "rx_usecs": 3,
+      "rx_frames": 0,
+      "tx_usecs": null,
+      "tx_frames": null
+    },
+    {
+      "type": "channels",
+      "iface": "lan0",
+      "max_combined": 4,
+      "combined": 2,
+      "rx": null,
+      "tx": null
+    },
+    {
+      "type": "eee",
+      "iface": "lan0",
+      "enabled": true,
+      "active": false
+    },
+    {
+      "type": "features",
+      "iface": "lan0",
+      "features": {
+        "generic-receive-offload": true,
+        "large-receive-offload": false
+      }
+    },
+    {
+      "type": "irq",
+      "iface": "lan0",
+      "irq": 125,
+      "name": "lan0-TxRx-0",
+      "affinity": "2-3",
+      "effective": "2",
+      "touches_isolated": true,
+      "thread": null
+    },
+    {
+      "type": "irq",
+      "iface": "lan0",
+      "irq": 126,
+      "name": "lan0-TxRx-1",
+      "affinity": "0-1",
+      "effective": "1",
+      "touches_isolated": false,
+      "thread": {
+        "tid": 12,
+        "policy": "fifo",
+        "rtprio": 50
+      }
+    }
+  ],
+  "restored": [],
+  "findings": [
+    {
+      "id": "coalescing-on",
+      "severity": "warn",
+      "subject": {
+        "kind": "interface",
+        "name": "lan0"
+      },
+      "evidence": [
+        {
+          "name": "rx_usecs",
+          "value": 3
+        },
+        {
+          "name": "rx_frames",
+          "value": 0
+        }
+      ],
+      "recommendation": "receive interrupt coalescing delays every frame by up to rx-usecs; set rx-usecs 0 on a cyclic interface",
+      "changes": []
+    },
+    {
+      "id": "eee-on",
+      "severity": "warn",
+      "subject": {
+        "kind": "interface",
+        "name": "lan0"
+      },
+      "evidence": [
+        {
+          "name": "eee_enabled",
+          "value": true
+        },
+        {
+          "name": "eee_active",
+          "value": false
+        }
+      ],
+      "recommendation": "Energy-Efficient Ethernet puts the link to sleep between frames and adds wake latency; disable it on a cyclic interface",
+      "changes": []
+    },
+    {
+      "id": "multi-queue",
+      "severity": "warn",
+      "subject": {
+        "kind": "interface",
+        "name": "lan0"
+      },
+      "evidence": [
+        {
+          "name": "rx_queues",
+          "value": 2
+        },
+        {
+          "name": "tx_queues",
+          "value": 2
+        }
+      ],
+      "recommendation": "the interface has several queues, so a frame's IRQ may land on any CPU the hash picks; reduce channels to 1 for a cyclic flow",
+      "changes": []
+    }
+  ]
+}

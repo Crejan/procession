@@ -2,6 +2,7 @@
 
 pub mod cmdline;
 pub mod irq;
+pub mod nic;
 pub mod procs;
 pub mod sched;
 

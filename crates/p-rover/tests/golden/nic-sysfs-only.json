@@ -1,0 +1,111 @@
+{
+  "schema_version": 1,
+  "subcommand": "nic",
+  "host": "testhost",
+  "started_at": "2026-11-06T21:20:00Z",
+  "mode": "observe",
+  "cost": "light",
+  "unreadable": [
+    {
+      "source": "ethtool lan0",
+      "reason": "no ethtool transport in this build: driver counters, rings, coalescing, channels, EEE and offloads are not reported"
+    }
+  ],
+  "records": [
+    {
+      "type": "link",
+      "name": "lan0",
+      "ifindex": 3,
+      "operstate": "up",
+      "carrier": true,
+      "speed_mbps": 1000,
+      "duplex": "full",
+      "mtu": 1500,
+      "address": "aa:bb:cc:00:11:22",
+      "carrier_changes": 2,
+      "admin_up": true,
+      "driver": "igb",
+      "pci": "0000:04:00.0",
+      "rx_queues": 2,
+      "tx_queues": 2,
+      "irqs": [
+        125,
+        126
+      ]
+    },
+    {
+      "type": "driver",
+      "iface": "lan0",
+      "driver": null,
+      "version": null,
+      "firmware": null,
+      "bus_info": null,
+      "kernel_driver": "igb",
+      "pci": "0000:04:00.0"
+    },
+    {
+      "type": "stats",
+      "iface": "lan0",
+      "counters": 11,
+      "triage": {
+        "collisions": 0,
+        "rx_crc_errors": 0,
+        "rx_dropped": 0,
+        "rx_errors": 0,
+        "rx_fifo_errors": 0,
+        "rx_missed_errors": 0,
+        "tx_errors": 0
+      },
+      "nonzero_triage": {},
+      "rx_packets": 1000,
+      "tx_packets": 900
+    },
+    {
+      "type": "irq",
+      "iface": "lan0",
+      "irq": 125,
+      "name": "lan0-TxRx-0",
+      "affinity": "2-3",
+      "effective": "2",
+      "touches_isolated": true,
+      "thread": null
+    },
+    {
+      "type": "irq",
+      "iface": "lan0",
+      "irq": 126,
+      "name": "lan0-TxRx-1",
+      "affinity": "0-1",
+      "effective": "1",
+      "touches_isolated": false,
+      "thread": {
+        "tid": 12,
+        "policy": "fifo",
+        "rtprio": 50
+      }
+    }
+  ],
+  "restored": [],
+  "findings": [
+    {
+      "id": "multi-queue",
+      "severity": "warn",
+      "subject": {
+        "kind": "interface",
+        "name": "lan0"
+      },
+      "evidence": [
+        {
+          "name": "rx_queues",
+          "value": 2
+        },
+        {
+          "name": "tx_queues",
+          "value": 2
+        }
+      ],
+      "recommendation": "the interface has several queues, so a frame's IRQ may land on any CPU the hash picks; reduce channels to 1 for a cyclic flow",
+      "changes": []
+    }
+  ]
+}

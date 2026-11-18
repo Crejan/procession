@@ -1,3 +1,3 @@
-fieldbus_interfaces=["lab*"]
+fieldbus_interfaces=["lan*"]
 [irq]
 expected={"lan0-TxRx-*"="2-3"}
