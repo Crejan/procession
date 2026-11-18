@@ -185,6 +185,13 @@ fn a_bundle_from_agents_start_signs_calls_pledge_approves_and_the_record_holds()
     let (c, s) = call(&agent, 1, &["pid=1"], 120);
     let (request, answer) = service.ask(&c, &s, Rating::HARMLESS);
     assert_eq!(verify(&server, &request, &answer), ApprovalKind::Automatic);
+    // The record shows who connected to service.sock: the uid of this account, the process and its program,
+    // as read from the kernel (`SO_PEERCRED` on Linux, `LOCAL_PEERCRED`/`getpeereid` on macOS).
+    let first = server.history().into_iter().find(|e| e["type"] == "request").expect("an entry");
+    let uid = unsafe { libc::getuid() };
+    assert_eq!(first["peer"]["uid"], uid, "{first}");
+    assert!(first["peer"]["pid"].as_i64().is_some_and(|pid| pid > 0), "{first}");
+    assert!(first["peer"]["program"].as_str().is_some_and(|p| p.contains("real_approvals")), "{first}");
 
     // Above the automatic ceiling: asked, then the presence check; confirmed key.
     server.answer("y\ny\n");

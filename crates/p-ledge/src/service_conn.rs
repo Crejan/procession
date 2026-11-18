@@ -79,7 +79,7 @@ fn send_error(writer: &Mutex<UnixStream>, error: ErrorCode) {
 }
 
 /// Serves one connection until it ends.
-pub fn serve(shared: &Arc<Shared>, stream: UnixStream, peer: Option<(u32, Option<i32>)>) {
+pub fn serve(shared: &Arc<Shared>, stream: UnixStream, peer: Option<crate::peer::Seen>) {
     let Ok(write_half) = stream.try_clone() else { return };
     let writer = Arc::new(Mutex::new(write_half));
     let send_writer = Arc::clone(&writer);
