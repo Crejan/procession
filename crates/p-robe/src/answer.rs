@@ -23,12 +23,13 @@ pub struct Answer<'a> {
     written: usize,
     full: bool,
     lost: bool,
+    failure: Option<String>,
 }
 
 impl<'a> Answer<'a> {
     /// An answer of at most `cap` bytes.
     pub fn new(out: &'a mut dyn Write, cap: usize) -> Self {
-        Self { out, cap, written: 0, full: false, lost: false }
+        Self { out, cap, written: 0, full: false, lost: false, failure: None }
     }
 
     /// Writes one record. When it would not fit, writes a final `truncated`
@@ -37,10 +38,17 @@ impl<'a> Answer<'a> {
     /// # Errors
     /// [`Full`] when the cap is reached or the reader has gone.
     pub fn record(&mut self, record: &Record) -> Result<(), Full> {
+        self.record_line(&record.line())
+    }
+
+    /// As [`Answer::record`], for a line that is already one JSON object (a record the tool wrote).
+    ///
+    /// # Errors
+    /// [`Full`] when the cap is reached or the reader has gone.
+    pub fn record_line(&mut self, line: &str) -> Result<(), Full> {
         if self.full {
             return Err(Full);
         }
-        let line = record.line();
         if self.written + line.len() + 1 + TRUNCATED_ROOM > self.cap {
             let note = Record::new("truncated").num("limit_bytes", self.cap as u64).line();
             self.lost |= writeln!(self.out, "{note}").is_err();
@@ -60,6 +68,18 @@ impl<'a> Answer<'a> {
     #[must_use]
     pub fn truncated(&self) -> bool {
         self.full
+    }
+
+    /// Says that the verb was started and gave no usable result, and why: the dispatcher ends the call as
+    /// failed with this cause. The first cause stays.
+    pub fn fail(&mut self, cause: &str) {
+        self.failure.get_or_insert_with(|| cause.to_string());
+    }
+
+    /// The cause the verb gave with [`Answer::fail`], if it did.
+    #[must_use]
+    pub fn failure(&self) -> Option<&str> {
+        self.failure.as_deref()
     }
 
     /// Whether the reader went away: the answer did not get out, and not even as a clean cut.

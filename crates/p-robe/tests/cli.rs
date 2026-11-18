@@ -184,7 +184,7 @@ mod with_test_verbs {
     #[test]
     fn a_verb_that_cannot_run_here_exits_3() {
         let dir = sandbox("unavail");
-        let out = probe(&["rt", "irq"], Some(&dir));
+        let out = probe(&["rt", "jitter"], Some(&dir));
         assert_eq!(out.status.code(), Some(3));
         assert!(text(&out.stderr).contains("prover"));
     }
