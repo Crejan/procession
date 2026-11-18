@@ -12,7 +12,9 @@ publish = false
 
 [features]
 # The agent-side signer `pact` (proposals/pact.md): the library the binary is made of, and the binary.
-pact = ["dep:libc"]
+pact = ["dep:libc", "dep:ureq"]
+# TLS for `pact`'s HTTP client (stage 2). Without it `pact` speaks plain http only.
+pact-tls = ["pact", "ureq/rustls"]
 
 [[bin]]
 name = "pact"
@@ -21,6 +23,7 @@ required-features = ["pact"]
 
 [dependencies]
 libc = { version = "0.2", optional = true }
+ureq = { version = "3", default-features = false, optional = true }
 base64 = "0.23"
 serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["raw_value"] }
