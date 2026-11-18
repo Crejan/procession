@@ -758,11 +758,11 @@ them.
 | 9 | A request while no presence check is possible | decided | It waits until its deadline and ends `expired`; the record says why it could not be asked (locked, sensor locked out) |
 | 10 | What the Touch ID prompt says | decided, subject to check 5 | As recommended: service, host and action; user and host for a login; person, groups and validity for a delegation; never a parameter or the agent's claim |
 | 11 | A first Mac stage with `Terminal` and real keys | decided | Accepted, for the owner only |
-| 12 | One Mac app or two | open | Not yet answered |
-| 13 | Take Atticus's SwiftUI front end at all | open | Not yet answered |
-| 14 | "Cancel by closing" in p-reserve's protocol | open | Not yet answered |
-| 15 | The licence of what is taken from Atticus | open | Not yet answered; the owner's in any case |
-| 16 | Where the dialog for a request lives | open | Not yet answered; section 8.6 now says which process it is |
+| 12 | One Mac app or two | with the owner | The designer recommends two apps from one Swift code base; preserve's app then gets on `control.sock` exactly `keys.create` for a bound key and `keys.list`, by a rule per command and peer |
+| 13 | Take Atticus's SwiftUI front end at all | decided | Yes, with the condition as written: it becomes preserve's Mac front end only after the logic still in its views and view models has moved into the daemon and the socket protocol offers what section 8.5 lists. The three bypasses and the prune marker (section 8.2) are the list of what goes behind the protocol first. Nothing is copied yet |
+| 14 | "Cancel by closing" in p-reserve's protocol | decided | Closing a connection cancels only what was asked as bound to it: browsing, a preview or dump for display, subscriptions. A backup run, a prune, a check and a restore are the daemon's jobs with an identifier: they go on when the connection that started them closes, are cancelled only by an explicit message naming the identifier, and a later connection can list running jobs and attach to their events |
+| 15 | The licence of what is taken from Atticus | with the owner | No view is copied before the owner has said under which terms |
+| 16 | Where the dialog for a request lives | decided | As recommended: a small program in pledge's bundle that `pledge serve` starts itself, holding no key and deciding nothing. The app's window may show the same question as a second place; the answer never depends on the app |
 
 Two of these decisions add to what the sections above say:
 
@@ -1201,11 +1201,10 @@ decide nothing:
 - *It is small enough to read*: one window, no network, no updater, no
   settings, no state.
 
-The front end may show that a question is open (a badge on the menu bar
-item, a line in a list), from the events of `control.sock`. It does not
-show the request for approval and takes no answer. So section 4.2's
-proposal stands as it was, and this section adds only where the dialog
-process ships and what it is drawn with.
+The front end may show the same question as a second place (decided,
+question 16): read only. It takes no answer, and the answer never depends
+on it. So section 4.2's proposal stands as it was, and this section adds
+where the dialog process ships and what it is drawn with.
 
 Conditions:
 
@@ -1216,10 +1215,13 @@ Conditions:
    waits and expires (question 9, decided).
 2. **It is pledge's app, not a shared one** (section 8.4), so that the
    program that shows requests has no updater and no backup code in it.
-3. **A request's contents go to the dialog process only.** The events on
-   `control.sock` say that a question is open, for which agent and until
-   when, and not what it asks. A front end therefore learns no parameter,
-   whatever its code signature is worth (question 8).
+3. **`control.sock` sends a question's contents only to a peer it has
+   identified** by audit token and code signature (section 3), since the
+   app's window may show them. Until builds are signed (question 8) that
+   check is the user and nothing more, and the document must say so. The
+   narrower choice, events that say only that a question is open, would
+   keep parameters from a front end altogether; it was my first answer
+   and is not what was decided.
 4. **`control.sock` gains what `control-sock.md`, section 6, left for
    later:** the subscription, with events that a question opened and
    closed. No answer travels over `control.sock`: declining is the dialog
