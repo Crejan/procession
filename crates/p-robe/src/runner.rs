@@ -130,10 +130,19 @@ impl Runner for InProcess {
         words.extend(params.iter().map(OsString::from));
         let audit = crate::audit::FileAudit(self.audit_file.clone());
         let caller = crate::dispatch::Caller { euid: 0, sudo_user: Some(self.user.clone()), from: None };
-        let (mut out, mut err) = (Vec::new(), Vec::new());
-        let rc =
-            crate::dispatch::Dispatcher::new(&audit, self.lock_dir.clone()).run(&caller, &words, &mut out, &mut err);
-        Ok(RunOutput { rc, timed_out: false, stdout: String::from_utf8_lossy(&out).into_owned() })
+        // The dispatcher's lock is a `flock` that a process another thread forks at that moment holds a copy of
+        // until it has exec'd, so a call right after another can meet "busy" for a moment: in this process
+        // only (the real dispatcher is a process of its own). Asked again for up to 3 seconds.
+        let started = std::time::Instant::now();
+        loop {
+            let (mut out, mut err) = (Vec::new(), Vec::new());
+            let rc = crate::dispatch::Dispatcher::new(&audit, self.lock_dir.clone())
+                .run(&caller, &words, &mut out, &mut err);
+            if rc != crate::dispatch::RC_BUSY || started.elapsed() > std::time::Duration::from_secs(3) {
+                return Ok(RunOutput { rc, timed_out: false, stdout: String::from_utf8_lossy(&out).into_owned() });
+            }
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
     }
 }
 
