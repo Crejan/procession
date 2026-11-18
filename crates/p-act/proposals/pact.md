@@ -199,9 +199,13 @@ Behind it `pact serve` is the MCP server proper. It implements `initialize`
 sampling or roots, and answers any other method `method not found`. Its
 `instructions` say what the service's say: a call may wait for the person's
 approval until its deadline; `declined` and `refused` are decisions, do not
-repeat them unchanged; `expired` and `unavailable` mean nothing happened,
-**except `unknown`: the call was sent and whether it ran is not known; before
-repeating anything that changes something, find out by a query.**
+repeat them unchanged; `expired` and `unavailable` mean nothing happened (and
+for `unavailable` trying again is safe); **`failed`: the call was approved and
+the action was started, and it did not complete: no result, something may have
+happened on the host, and an action that changes something must not be repeated
+blindly, find out what happened first; `unknown`: the call was sent and whether
+it ran is not known; before repeating anything that changes something, find out
+by a query.**
 
 ## 5. Which services exist, and the tool list
 
@@ -360,14 +364,29 @@ object `{"type":"outcome","outcome":...,"id":...,"reason":...}`
 `done`. `pact`:
 
 - parses it, and passes it on only if `outcome` is one of `done`, `declined`,
-  `expired`, `refused` or `unavailable` and, for `refused`, `reason` is one of
+  `expired`, `refused`, `unavailable` or `failed` and, for `refused`, `reason` is one of
   `not-allowed`, `invalid`, `try-later`. **A `refused` with another reason
   becomes `refused`/`not-allowed`** ("do not repeat" is the safe reading). **A
   response that is not an outcome for this call at all (no outcome line, another
   identifier, an outcome outside the list, `done` without `rc`, an answer over
   the limit) is `unknown`**, because the call was sent and may have run. It never
   passes on a string it received and did not parse into the closed list: `done`,
-  `declined`, `expired`, `refused` with its class, `unavailable`, `unknown`;
+  `declined`, `expired`, `refused` with its class, `unavailable`, `failed`,
+  `unknown`;
+- **`failed`** (decided by the designer, `approvals.md` section 10; only a
+  service says it): the call was approved and the action was started, and it
+  did not complete. There is no result; something may have happened on the
+  host; the cause is in the service's log and the host's audit lines under the
+  call's identifier. It is not `unavailable` (nothing was done) and not
+  `unknown` (the call was sent and whether it ran is not known: only `pact`
+  makes that one). The line is `{"type":"outcome","outcome":"failed","id":...}`,
+  and the text content after it is fixed (`FAILED_TEXT`): the call did not
+  complete, there is no result, something may have happened, **do not repeat it
+  blindly if it changes anything, find out what happened first, by a query**,
+  and the cause is under the call's identifier in the logs. Whatever the service
+  adds to its outcome (a reason, a code, a detail, further texts) is not passed
+  on. `isError` is true. Until the service's wire form is merged, `pact` accepts
+  the outcome word `failed` with no other member;
 - passes the answer of a verb (`done`) on as the further text contents,
   unchanged, up to 1 MiB: that is the data the model asked for;
 - makes its own outcomes for what happens on its side, with the same shape:
