@@ -9,6 +9,6 @@ edition = "2024"
 publish = false
 
 [dependencies]
-rustic_backend = "=0.7.0"
-rustic_core = "=0.13.0"
+rustic_backend = "=0.8.0"
+rustic_core = "=0.14.0"
 simplelog = "0.12"

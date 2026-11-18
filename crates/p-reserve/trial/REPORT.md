@@ -147,3 +147,34 @@ The new script prints all of these at its start.
   `grep -c '\[127.0.0.1\]:22222' ~/.ssh/known_hosts` (expect 0), `pgrep -fl 'p-reserve-trial|ssh-connection'`
   (expect nothing), `lsof -nP -iTCP:22222 -sTCP:LISTEN` (expect nothing).
 - Not run by me: the script is still untested in the sandbox (it cannot bind a port). `/usr/bin/time -l` is the macOS form.
+
+---
+
+# Owner's run of part C, 2026-11-18: it did not compile (versions mismatched)
+
+Reported by the orchestrator from the owner's output; I did not see the machine. Versions printed: restic 0.19.0, OpenSSH_10.2p1,
+**rustic 0.12.0** (rustic-rs v0.12.0), cargo and rustc 1.97.0. Baseline listing fine. Part C's build: `Locking 501 packages`, `Adding rustic_backend
+v0.7.0 (available: v0.8.0)`, `Adding rustic_core v0.13.0 (available: v0.14.0)`, then `Compiling rustic_core v0.14.0` *and* `Compiling rustic_core v0.13.0`, and
+`error[E0308]: mismatched types --> src/main.rs:32:63` at `Repository::new(&RepositoryOptions::default(), &backends)`: expected `RepositoryBackends`, found
+`rustic_core::backend::RepositoryBackends`, "there are multiple different versions of crate `rustic_core` in the dependency graph".
+
+Cause: my manifest pinned `rustic_core =0.13.0` and `rustic_backend =0.7.0`; `rustic_backend` 0.7.0 as the resolver took it depends on `rustic_core` 0.14, so the
+pair did not belong together. **It also explains the earlier silent fifteen minutes** (it was this 501-package release build, cut off before the error). Part C has
+never run, so open time and memory through rustic_core's own API are still not shown.
+
+Which rustic_core the owner's installed binary carries (read from the `rustic-rs` v0.12.0 tag on GitHub, `Cargo.toml` and `Cargo.lock`): `rustic_core` **0.14.0**
+and `rustic_backend` **0.8.0**. So **parts A and B of his earlier run ran on rustic_core 0.14.0 / rustic_backend 0.8.0**, not on the 0.13.0 / 0.7.0 I had read
+the sources of. The OpenDAL line is 0.59.5 in both; my reading of the sftp service (five keys, `key` forcing `IdentitiesOnly`, no `UserKnownHostsFile`, no `-F`) was of
+0.59.5 and agrees with what his A1/A2/B showed.
+
+Fix: `Cargo.toml` now pins `rustic_core =0.14.0` and `rustic_backend =0.8.0` (the pair his `rustic` and the engine unit use), the script builds with `--locked`,
+`Cargo.lock` is committed (see below), and `target/` is in the trial's own `.gitignore`.
+**Built here, a build only:** `cargo build --release --offline` in `crates/p-reserve/trial/` from the unpacked registry: Finished in **18 min 50 s** (a loaded machine,
+load average about 150; about 500 crates). It **was not run**: the sandbox cannot start the server it needs. It compiles; whether it runs is for the owner.
+Do not take the compile as evidence that open or time work.
+
+`Cargo.lock` is committed, not ignored: the failure was a resolution, and a lock makes his build the one built here. (The orchestrator's local `.git/info/exclude`
+lists it; `git add -f` overrides that.) If the trial is deleted after the decision, the lock goes with it.
+
+The engine unit on this branch is on the matching pair: `cargo tree -d -p p-reserve --features engine-rustic --offline --target aarch64-apple-darwin` shows `rustic_core v0.14.0`
+and `rustic_backend v0.8.0` once each, no second `rustic_core`.
