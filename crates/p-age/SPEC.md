@@ -136,7 +136,11 @@ rule is made here.
   the broker is degraded: its status output and stderr say so, it tries the
   whole write again on every later change and at least once a minute, and
   it leaves that state when a write succeeds. Degraded, it goes on serving
-  with what it holds in memory.
+  with what it holds in memory. To a pledge the two cases look like this
+  (`doc/approval-connections.md`, section 5): its withdrawal is answered
+  `withdrawn` with `stored` false; its registration is answered
+  `not-registered` with the reason `unavailable`, and the connection stays
+  open.
 - Blocks, until lifted.
 - A log of every request: when, from which host, for which person, what
   became of it. Not the parameters of the action; those are in the person's
