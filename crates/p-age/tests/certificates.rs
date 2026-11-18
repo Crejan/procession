@@ -243,7 +243,7 @@ async fn page_status_exits_6_when_an_enabled_person_has_no_valid_certificate_and
     // and when the register cannot be written too, 5 (degraded) comes first: one code, one meaning
     std::fs::set_permissions(w.keys.dir.path(), std::fs::Permissions::from_mode(0o500)).unwrap();
     if std::fs::File::create(w.keys.path("probe")).is_err() {
-        w.broker.block_person("jan".into()).await;
+        w.broker.block_person("jan".into(), p_age::register::Actor::Administrator { uid: 0, account: None }).await;
         let (code, _, _) = page(&config, &["status"]).await;
         assert_eq!(code, 5);
     }

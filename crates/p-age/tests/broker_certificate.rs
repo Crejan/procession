@@ -150,7 +150,7 @@ async fn a_broker_that_is_not_ready_lets_a_pledge_in_without_a_standing_and_serv
     eva.send_json(serde_json::json!({"schema_version":1,"type":"ping"})).await;
     nothing_for(&mut eva).await;
     // an administrator's block is in force and nothing is sent that could not be vouched for
-    w.broker.block_person("eva".into()).await;
+    w.broker.block_person("eva".into(), p_age::register::Actor::Administrator { uid: 0, account: None }).await;
     nothing_for(&mut eva).await;
 
     // the certificate is valid again: both pledges get the standing, without signing in again
@@ -209,7 +209,7 @@ async fn page_status_exits_7_without_a_valid_certificate_before_5_and_6() {
     std::fs::set_permissions(w.keys.dir.path(), std::fs::Permissions::from_mode(0o500)).unwrap();
     let can_lock = std::fs::File::create(w.keys.path("probe")).is_err();
     if can_lock {
-        w.broker.block_person("jan".into()).await;
+        w.broker.block_person("jan".into(), p_age::register::Actor::Administrator { uid: 0, account: None }).await;
         assert_eq!(page(&config, &["status"]).await.0, 5);
     }
     // 7 before both: no certificate, nothing is cleared at all

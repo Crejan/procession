@@ -22,6 +22,7 @@ use tokio_rustls::TlsAcceptor;
 
 use crate::core::{ConnId, Core, Effect, PledgeOut, ServiceOut, StoreError, Stored, vet};
 use crate::crypto::Crypto;
+use crate::register::Actor;
 use crate::site::Site;
 use crate::tls;
 
@@ -266,10 +267,10 @@ impl Broker {
     }
 
     /// An administrator blocks a person: in force at once; whether it is stored is the answer.
-    pub async fn block_person(self: &Arc<Self>, person: String) -> Stored {
+    pub async fn block_person(self: &Arc<Self>, person: String, by: Actor) -> Stored {
         let outcome = self
             .with_core(move |core, now| {
-                let (effects, stored) = core.block_person(&person, now);
+                let (effects, stored) = core.block_person(&person, by, now);
                 (stored, effects)
             })
             .await;
@@ -277,10 +278,10 @@ impl Broker {
     }
 
     /// An administrator blocks one key: in force at once; whether it is stored is the answer.
-    pub async fn block_key(self: &Arc<Self>, fingerprint: String) -> Stored {
+    pub async fn block_key(self: &Arc<Self>, fingerprint: String, by: Actor) -> Stored {
         let outcome = self
             .with_core(move |core, now| {
-                let (effects, stored) = core.block_key(&fingerprint, now);
+                let (effects, stored) = core.block_key(&fingerprint, by, now);
                 (stored, effects)
             })
             .await;
@@ -310,14 +311,40 @@ impl Broker {
     }
 
     /// An administrator withdraws a delegation: in force at once; whether it is stored is the answer.
-    pub async fn admin_withdraw(self: &Arc<Self>, delegation: p_act::sign::Fingerprint) -> Stored {
+    pub async fn admin_withdraw(self: &Arc<Self>, delegation: p_act::sign::Fingerprint, by: Actor) -> Stored {
         let outcome = self
             .with_core(move |core, now| {
-                let (effects, stored) = core.admin_withdraw(&delegation, now);
+                let (effects, stored) = core.admin_withdraw(&delegation, by, now);
                 (stored, effects)
             })
             .await;
         outcome.unwrap_or_else(unreachable_store)
+    }
+
+    /// Look up the account's name for an administrator's uid and record it beside the uid, **off the path that
+    /// answered the verb**: the lookup goes through the name service, which can be slow or never answer, so it runs on
+    /// a thread of its own and the answer to the administrator never waits for it. An entry without a name is
+    /// complete; nothing is decided by the name.
+    pub fn name_administrator_later(self: &Arc<Self>, uid: u32) {
+        self.name_administrator_later_with(uid, p_ermit::peer::account_of);
+    }
+
+    /// As [`Broker::name_administrator_later`], with the lookup given (a test's that never returns).
+    pub fn name_administrator_later_with(
+        self: &Arc<Self>,
+        uid: u32,
+        lookup: impl FnOnce(u32) -> Option<String> + Send + 'static,
+    ) {
+        let broker = Arc::clone(self);
+        let spawned = std::thread::Builder::new().name("page-account-lookup".to_owned()).spawn(move || {
+            if let Some(name) = lookup(uid) {
+                let now = broker.clock.now();
+                lock(&broker.core).name_administrator(uid, &name, now);
+            }
+        });
+        if let Err(e) = spawned {
+            eprintln!("page: cannot start the account lookup: {e}");
+        }
     }
 
     /// Why the register cannot be stored, if it cannot: the broker is degraded.

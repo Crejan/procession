@@ -76,7 +76,9 @@ async fn a_request_goes_through_and_the_service_can_verify_approval_and_clearanc
         ApprovalKind::Confirmed
     );
     let clearance = approved.clearance.as_ref().expect("a clearance");
-    verify_clearance(&clearance.clearance, clearance.clearance_sig(), &ca).unwrap();
+    verify_clearance(&clearance.clearance, clearance.clearance_sig(), &ca, approved.approval()).unwrap();
+    // the clearance names the approval it cleared: this one, and no other
+    assert_eq!(clearance.clearance.approval(), p_act::clearance::approval_hash(approved.approval()));
     assert!(clearance.clearance.covers(submit.request()));
     assert_eq!(clearance.clearance.at().unix(), w.clock.unix());
 
@@ -107,10 +109,15 @@ async fn the_standing_is_signed_by_the_broker_in_its_own_namespace_and_only_ther
         (Some("jan"), Some(nonce.as_str()), Some(0))
     );
     assert_eq!((standing["blocked"].as_bool(), standing["groups"].clone()), (Some(false), serde_json::json!(["ops"])));
+    // the standing says when the broker made it: its clock, UTC to the second, signed with the rest
+    assert_eq!(standing["at"], p_act::Timestamp::from_unix(w.clock.unix()).unwrap().to_string());
     // and a clearance's signature does not verify as a standing
-    let clearance =
-        Clearance::compose(w.submit(1, 60).request().hash(), p_act::Timestamp::from_unix(w.clock.unix()).unwrap())
-            .unwrap();
+    let clearance = Clearance::compose(
+        w.submit(1, 60).request().hash(),
+        p_act::clearance::approval_hash("approval"),
+        p_act::Timestamp::from_unix(w.clock.unix()).unwrap(),
+    )
+    .unwrap();
     let csig = p_act::sign::sign_clearance(&Signer::certified(&w.broker_key).unwrap(), &clearance).unwrap();
     assert!(!verify_as_broker(&w, Namespace::Broker, clearance.as_bytes(), &p_act::sign::signature_to_base64(&csig)));
 }
@@ -227,7 +234,7 @@ async fn a_sign_in_that_does_not_verify_is_one_error_whatever_is_wrong() {
 #[tokio::test]
 async fn a_blocked_person_is_told_so_only_after_the_signature_verified() {
     let w = World::new();
-    w.broker.block_person("jan".into()).await;
+    w.broker.block_person("jan".into(), p_age::register::Actor::Administrator { uid: 0, account: None }).await;
     let mut c = open_pledge(&w).await;
     let nonce = c.recv().await["nonce"].as_str().unwrap().to_owned();
     c.send_json(signin_message("jan", &w.eva_connection, &nonce, BINDING)).await;
@@ -683,7 +690,7 @@ async fn an_unauthenticated_peer_learns_nothing_about_the_site_beyond_a_coarse_c
                 p_act::rating::Damage::None,
                 p_act::rating::Disruption::None,
             );
-            let request = p_act::Request::compose(&call, &call_sig, rating).unwrap();
+            let request = p_act::Request::compose(&call, &call_sig, rating, false).unwrap();
             let sig = raw_sign(service, Namespace::Request, request.as_bytes());
             p_act::exchange::Submit::new(request, &sig).unwrap()
         } else {
@@ -785,7 +792,8 @@ async fn restricting_goes_on_while_the_register_cannot_be_written_and_the_withdr
     assert!(tokio::time::timeout(Duration::from_millis(300), pledge.lines.read(None)).await.is_err(), "nothing else");
     assert!(w.broker.degraded().is_some());
     // an administrator's block: in force, and the answer says it is not stored
-    let stored = w.broker.block_person("jan".into()).await;
+    let stored =
+        w.broker.block_person("jan".into(), p_age::register::Actor::Administrator { uid: 0, account: None }).await;
     assert!(matches!(stored, p_age::core::Stored::No(_)), "{stored:?}");
     let mut s = open_service(&w);
     s.send(&submit_line(&w.submit(2, 120))).await;

@@ -243,7 +243,7 @@ impl World {
     pub fn submit_with(&self, n: u32, due: i64, agent: &Path, service: &Path) -> Submit {
         let (call, call_sig) = self.call(n, due, agent);
         let rating = Rating::new(Exposure::Internal, Damage::None, Disruption::None);
-        let request = Request::compose(&call, &call_sig, rating).unwrap();
+        let request = Request::compose(&call, &call_sig, rating, false).unwrap();
         let sig = sign_request(&Signer::certified(service).unwrap(), &request).unwrap();
         Submit::new(request, &sig).unwrap()
     }
