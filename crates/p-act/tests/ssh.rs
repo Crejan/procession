@@ -1022,7 +1022,8 @@ fn the_site_ca_lines_as_written_are_accepted_by_ssh_keygen_itself() {
             .stderr(Stdio::null())
             .spawn()
             .unwrap();
-        std::io::Write::write_all(&mut child.stdin.take().unwrap(), data).unwrap();
+        // `ssh-keygen` may refuse before it reads (`Broken pipe` here): its exit status is the verdict.
+        let _ = std::io::Write::write_all(&mut child.stdin.take().unwrap(), data);
         assert_eq!(child.wait().unwrap().success(), ok, "{key} {namespace} {id}");
     }
 }
@@ -2047,4 +2048,64 @@ fn a_certificate_the_site_ca_issued_with_an_extension_is_refused_everywhere_it_i
     assert!(verify_approval(&request, &request_sig, ApprovalTrust::SiteCa(&ca)).is_ok());
     assert!(verify_clearance(&clearance, &sign_clearance(&s.broker, &clearance).unwrap(), &ca).is_ok());
     assert!(verify_broker(&ca, &sign_broker(&s.broker, standing).unwrap(), standing).is_ok());
+}
+
+#[test]
+fn the_brokers_own_certificate_verifies_bare_for_the_name_broker_only() {
+    use p_act::sign::{check_broker_certificate, verify_broker_certificate};
+    let keys = Keys::new();
+    let now = at("2026-11-11T15:00:00Z");
+    for (label, ca) in [("ed25519 ca", keys.key("bca-e")), ("p256 ca", keys.ecdsa_key("bca-p"))] {
+        let ca_pub = keys.public(&ca);
+        let tag = label.replace(' ', "-");
+        let (line, key) = approval_cert(&keys, &ca, &format!("{tag}-broker"), false, "broker", VALID, &[]);
+        let cert = verify_broker_certificate(&line, &ca_pub, now).unwrap_or_else(|e| panic!("{label}: {e}"));
+        assert!(cert.certifies(&key) && !cert.certifies(&ca_pub), "{label}");
+        assert_eq!((cert.valid_after, cert.valid_before), (1_577_836_800, 4_070_908_800));
+        // A P-256 broker key too.
+        let (p256, key256) = approval_cert(&keys, &ca, &format!("{tag}-broker256"), true, "broker", VALID, &[]);
+        assert!(verify_broker_certificate(&p256, &ca_pub, now).unwrap().certifies(&key256), "{label}");
+        // The time is the caller's.
+        let (old, _) = approval_cert(&keys, &ca, &format!("{tag}-old"), false, "broker", "20200101Z:20200102Z", &[]);
+        assert!(matches!(verify_broker_certificate(&old, &ca_pub, now), Err(SignError::CertificateExpired)));
+        let ended = check_broker_certificate(&old, &ca_pub).unwrap();
+        assert!(ended.valid_at(at("2020-01-01T12:00:00Z")).is_ok(), "{label}");
+        assert!(matches!(ended.valid_at(at("2019-12-31T23:59:59Z")), Err(SignError::CertificateNotYetValid)));
+        // Another CA; another name (a person's, a host's, two principals); with an extension or a critical option.
+        let other = keys.public(&keys.key(&format!("other-{tag}")));
+        assert!(matches!(verify_broker_certificate(&line, &other, now), Err(SignError::WrongIssuer)), "{label}");
+        for (name, principals) in [
+            ("p", "alice:confirmed"),
+            ("q", "brokers"),
+            ("r", "alice"),
+            ("s", "hosts"),
+            ("t", "broker,alice"),
+            ("u", "Broker"),
+        ] {
+            let (bad, _) = approval_cert(&keys, &ca, &format!("{tag}-{name}"), false, principals, VALID, &[]);
+            let e = verify_broker_certificate(&bad, &ca_pub, now).unwrap_err();
+            assert!(
+                matches!(e, SignError::NotBrokerName(_) | SignError::PrincipalCount { .. }),
+                "{label} {principals}: {e}"
+            );
+        }
+        let (forced, _) =
+            approval_cert(&keys, &ca, &format!("{tag}-force"), false, "broker", VALID, &["force-command=/bin/true"]);
+        assert!(
+            matches!(verify_broker_certificate(&forced, &ca_pub, now), Err(SignError::CriticalOption(_))),
+            "{label}"
+        );
+        let (ext, _) = approval_cert(&keys, &ca, &format!("{tag}-ext"), false, "broker", VALID, &["permit-pty"]);
+        assert!(
+            matches!(verify_broker_certificate(&ext, &ca_pub, now), Err(SignError::SiteCertificateExtension(_))),
+            "{label}"
+        );
+        // A person's approval certificate is not the broker's, and the reverse.
+        let (person, _) = approval_cert(&keys, &ca, &format!("{tag}-person"), false, "alice:confirmed", VALID, &[]);
+        assert!(verify_broker_certificate(&person, &ca_pub, now).is_err());
+        assert!(matches!(verify_approval_certificate(&line, &ca_pub, now), Err(SignError::NotAnApprovalName(_))));
+        // Bytes after the signature, a host certificate, and garbage.
+        assert!(verify_broker_certificate("garbage", &ca_pub, now).is_err());
+        assert!(verify_broker_certificate(&format!("{line}\n"), &ca_pub, now).is_err());
+    }
 }

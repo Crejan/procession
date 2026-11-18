@@ -372,12 +372,14 @@ mod tests {
     }
 
     impl Client {
+        // A write to a session that has already ended (it closed its end first) fails with `Broken pipe`: what the
+        // test is about shows in what `recv` finds (`the server closed`) and in `finish`, not in this call.
         fn send(&mut self, v: &Value) {
-            self.w.write_all(format!("{v}\n").as_bytes()).unwrap();
+            let _ = self.w.write_all(format!("{v}\n").as_bytes());
         }
 
         fn raw(&mut self, s: &str) {
-            self.w.write_all(format!("{s}\n").as_bytes()).unwrap();
+            let _ = self.w.write_all(format!("{s}\n").as_bytes());
         }
 
         fn recv(&mut self) -> Value {
@@ -396,7 +398,8 @@ mod tests {
         }
 
         fn finish(mut self) {
-            self.w.shutdown(std::net::Shutdown::Write).unwrap();
+            // `NotConnected` if the server has already ended and closed its end; the server's result is the point.
+            let _ = self.w.shutdown(std::net::Shutdown::Write);
             self.server.take().unwrap().join().unwrap().unwrap();
         }
     }
@@ -745,9 +748,12 @@ mod tests {
     fn a_line_over_the_limit_ends_the_session_without_a_crash() {
         let e = env(|_, _, _| unreachable!());
         let mut c = connect(&e.ctx);
-        c.w.write_all(&vec![b'x'; MAX_MESSAGE + 10]).unwrap();
-        c.w.write_all(b"\n").unwrap();
-        c.w.shutdown(std::net::Shutdown::Write).unwrap();
+        // The server stops reading at the limit and ends the session, closing its end: a write after that fails with
+        // `Broken pipe` and the shutdown with `NotConnected`, depending on which side is first. What the test is about
+        // is the server's end, below.
+        let _ = c.w.write_all(&vec![b'x'; MAX_MESSAGE + 10]);
+        let _ = c.w.write_all(b"\n");
+        let _ = c.w.shutdown(std::net::Shutdown::Write);
         assert!(c.server.take().unwrap().join().unwrap().is_ok());
     }
 
