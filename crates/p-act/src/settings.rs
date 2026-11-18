@@ -30,6 +30,10 @@ pub const DEFAULT_MAX_BYTES: u64 = 1024 * 1024;
 /// Why a settings file was refused. Never holds the file's content.
 #[derive(Debug, Error)]
 pub enum SettingsError {
+    /// There is no such file (or a directory on the way is missing): for the caller to decide what that means
+    /// (an empty configuration, "none", or an error), without looking at an I/O error's kind.
+    #[error("{0} does not exist")]
+    NotFound(String),
     #[error("cannot read {path}: {source}")]
     Io { path: String, source: std::io::Error },
     #[error("{0} is not a regular file")]
@@ -71,7 +75,9 @@ fn effective_uid() -> u32 {
 pub fn read_limited<T: DeserializeOwned>(path: &Path, max_bytes: u64) -> Result<T, SettingsError> {
     let shown = path.display().to_string();
     let io = |source| SettingsError::Io { path: shown.clone(), source };
-    let file = File::open(path).map_err(io)?;
+    let file = File::open(path).map_err(|e| {
+        if e.kind() == std::io::ErrorKind::NotFound { SettingsError::NotFound(shown.clone()) } else { io(e) }
+    })?;
     let meta = file.metadata().map_err(io)?;
     if !meta.is_file() {
         return Err(SettingsError::NotARegularFile(shown));
@@ -83,6 +89,16 @@ pub fn read_limited<T: DeserializeOwned>(path: &Path, max_bytes: u64) -> Result<
         return Err(SettingsError::TooLarge(shown));
     }
     parse(&bytes)
+}
+
+/// As [`read`], but a file that does not exist is `Ok(None)`. Every other problem, a file that is there and
+/// refused included, is an error: only absence is not.
+pub fn read_optional<T: DeserializeOwned>(path: &Path) -> Result<Option<T>, SettingsError> {
+    match read(path) {
+        Ok(v) => Ok(Some(v)),
+        Err(SettingsError::NotFound(_)) => Ok(None),
+        Err(e) => Err(e),
+    }
 }
 
 /// [`read_limited`] with [`DEFAULT_MAX_BYTES`].
@@ -207,7 +223,7 @@ mod tests {
     fn what_is_not_a_regular_file_or_not_there_is_refused() {
         let dir = tempfile::tempdir().unwrap();
         assert!(matches!(read::<Strict>(dir.path()), Err(SettingsError::NotARegularFile(_))));
-        assert!(matches!(read::<Strict>(&dir.path().join("nothing")), Err(SettingsError::Io { .. })));
+        assert!(matches!(read::<Strict>(&dir.path().join("nothing")), Err(SettingsError::NotFound(_))));
         assert!(matches!(read::<Strict>(Path::new("/dev/null")), Err(SettingsError::NotARegularFile(_))));
     }
 
@@ -271,5 +287,37 @@ mod tests {
         assert!(unknown.contains("extra_member") && !unknown.contains("hunter2"), "{unknown}");
         let dup = parse::<Strict>(br#"{"listen":"hunter2-secret","listen":"x"}"#).unwrap_err().to_string();
         assert!(!dup.contains("hunter2"), "{dup}");
+    }
+
+    #[test]
+    fn a_missing_file_is_told_apart_and_only_a_missing_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let missing = dir.path().join("nothing.json");
+        assert!(matches!(read::<Strict>(&missing), Err(SettingsError::NotFound(p)) if p.ends_with("nothing.json")));
+        assert!(
+            matches!(read::<Strict>(&dir.path().join("no-dir").join("s.json")), Err(SettingsError::NotFound(_))),
+            "a missing directory on the way"
+        );
+        assert!(matches!(read_limited::<Strict>(&missing, 10), Err(SettingsError::NotFound(_))));
+        assert!(matches!(read_optional::<Strict>(&missing), Ok(None)));
+        // A file that is there is read, or refused, and is never "missing".
+        let good = write(dir.path(), "good.json", br#"{"listen":"x"}"#, 0o600);
+        assert_eq!(read_optional::<Strict>(&good).unwrap().unwrap().listen, "x");
+        let bad_mode = write(dir.path(), "open.json", br#"{"listen":"x"}"#, 0o666);
+        assert!(matches!(read_optional::<Strict>(&bad_mode), Err(SettingsError::WritableByOthers { .. })));
+        let bad_content = write(dir.path(), "bad.json", b"[]", 0o600);
+        assert!(matches!(read_optional::<Strict>(&bad_content), Err(SettingsError::NotAnObject(_))));
+        let wrong_type = write(dir.path(), "wrong.json", br#"{"listen":5}"#, 0o600);
+        assert!(matches!(read_optional::<Strict>(&wrong_type), Err(SettingsError::Invalid(_))));
+        assert!(matches!(read_optional::<Strict>(dir.path()), Err(SettingsError::NotARegularFile(_))));
+        // Not being allowed to look is not absence either: a directory without search permission.
+        let locked = dir.path().join("locked");
+        std::fs::create_dir(&locked).unwrap();
+        write(&locked, "s.json", br#"{"listen":"x"}"#, 0o600);
+        std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o000)).unwrap();
+        let r = read_optional::<Strict>(&locked.join("s.json"));
+        std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o700)).unwrap();
+        // (As root the directory is searchable anyway.)
+        assert!(matches!(r, Err(SettingsError::Io { .. })) || effective_uid() == 0, "{r:?}");
     }
 }
