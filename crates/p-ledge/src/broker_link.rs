@@ -211,7 +211,7 @@ pub struct BrokerLink {
 }
 
 impl BrokerLink {
-    fn new(out: Sender<Vec<u8>>) -> Arc<Self> {
+    pub(crate) fn new(out: Sender<Vec<u8>>) -> Arc<Self> {
         Arc::new(Self {
             out: Mutex::new(out),
             ready: AtomicBool::new(false),

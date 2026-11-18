@@ -46,4 +46,6 @@ pub mod sshsig;
 #[cfg(test)]
 mod approvals_tests;
 #[cfg(test)]
+mod broker_tests;
+#[cfg(test)]
 mod testing;
