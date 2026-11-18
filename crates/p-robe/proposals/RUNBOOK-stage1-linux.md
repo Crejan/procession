@@ -270,13 +270,17 @@ B2. The group `pledge-svc` lets the service's account reach `service.sock`:
 `groupadd pledge-svc; usermod -aG pledge-svc alice; usermod -aG pledge-svc
 probe-svc` (undo: `userdel`/`groupdel` the other way). Log out and in so that
 alice's membership counts; pledge makes the directory 0710 and the socket 0660
-with that group. Make the three keys, answering the dialogs it prints:
+with that group. **Only after the `pledge: serving.` line (see below)** make the three keys, answering the dialogs it prints:
 `pledge keys create delegation`, `... confirmed`, `... automatic`. Then
 `pledge keys list --format json` shows the public key lines; write the confirmed
 one to `/etc/probe/alice-confirmed.pub` and the automatic one to
 `/etc/probe/alice-automatic.pub` (root, 0644).
 
-Passed: `pledge serve` prints nothing alarming and `ls -l
+**Wait for `pledge: serving.`** on its output before anything else: it binds `agent.sock`, `control.sock`
+and `service.sock` one after another and prints that line only after all three. A `pledge keys create`
+or `pledge agents start` in the gap fails with `pledge serve is not running (no answer on its control socket)`
+though nothing is wrong: run it again once the line is there. Keep `pledge serve` in a terminal of its own (its
+dialogs are answered there). Passed: the line `pledge: serving. SSH agent socket: ...`, and `ls -l
 /run/user/1000/pledge` shows `service.sock` as `srw-rw----` with group
 `pledge-svc`. Did not pass: it refuses to start naming the directory or its
 mode.

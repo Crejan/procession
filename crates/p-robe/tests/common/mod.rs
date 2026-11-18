@@ -111,10 +111,18 @@ impl Pledge {
         std::thread::spawn(move || {
             BufReader::new(err).lines().map_while(Result::ok).for_each(|l| drop(tx2.send(format!("err: {l}"))))
         });
+        // `pledge serve` binds agent.sock, control.sock and service.sock one after another and prints
+        // "pledge: serving." only after all three: ready means all three answer (the CLI talks to control.sock,
+        // the service to service.sock), not the first one that does.
         let started = Instant::now();
-        while UnixStream::connect(sockets.join("service.sock")).is_err() {
-            assert!(started.elapsed() < Duration::from_secs(10), "pledge serve did not start");
-            std::thread::sleep(Duration::from_millis(50));
+        for socket in ["agent.sock", "control.sock", "service.sock"] {
+            while UnixStream::connect(sockets.join(socket)).is_err() {
+                assert!(
+                    started.elapsed() < Duration::from_secs(10),
+                    "pledge serve did not start: {socket} does not answer"
+                );
+                std::thread::sleep(Duration::from_millis(50));
+            }
         }
         (child, stdin, lines)
     }
