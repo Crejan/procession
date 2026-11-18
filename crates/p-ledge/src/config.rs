@@ -6,7 +6,6 @@
 //! Every member is optional; without `person` no delegation can be issued, and
 //! without the host a service's request is refused.
 
-use std::fs;
 use std::path::Path;
 
 use p_act::sign::PublicKey;
@@ -74,24 +73,6 @@ pub fn is_name(name: &str) -> bool {
     (1..=64).contains(&name.len()) && name.bytes().all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'-'))
 }
 
-/// A settings file is refused if anyone but its owner or root can write it
-/// (`doc/approvals.md`, section 10): no group or other write bit, and an owner that is
-/// this user or root.
-fn check_not_writable_by_others(path: &Path) -> Result<()> {
-    use std::os::unix::fs::MetadataExt;
-    let meta = fs::metadata(path).map_err(Error::io(format!("examining {}", path.display())))?;
-    let refuse = |problem: &str| Error::Corrupt { path: path.to_owned(), problem: problem.to_owned() };
-    if meta.mode() & 0o022 != 0 {
-        return Err(refuse("can be written by someone other than its owner: refused"));
-    }
-    // SAFETY: getuid has no preconditions.
-    let me = unsafe { libc::getuid() };
-    if meta.uid() != me && meta.uid() != 0 {
-        return Err(refuse("is owned by neither this user nor root: refused"));
-    }
-    Ok(())
-}
-
 impl Config {
     /// Reads `path`; a missing file is the empty configuration.
     ///
@@ -99,19 +80,16 @@ impl Config {
     ///
     /// [`Error::Corrupt`] if the file does not parse or a member is not valid.
     pub fn load(path: &Path) -> Result<Self> {
-        let bytes = match fs::read(path) {
-            Ok(bytes) => bytes,
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Self::default()),
-            Err(e) => return Err(Error::io(format!("reading {}", path.display()))(e)),
+        // One reader for the shared settings rules (`p_act::settings`): a regular file, owned by root or the
+        // running user, not writable by others, one JSON object, no member twice, no trailing text, no byte
+        // order mark, at most 1 MiB. Unknown members are refused by `deny_unknown_fields` on these types.
+        let config: Self = match p_act::settings::read(path) {
+            Ok(config) => config,
+            Err(p_act::settings::SettingsError::Io { source, .. }) if source.kind() == std::io::ErrorKind::NotFound => {
+                return Ok(Self::default());
+            }
+            Err(e) => return Err(Error::Corrupt { path: path.to_owned(), problem: e.to_string() }),
         };
-        check_not_writable_by_others(path)?;
-        let corrupt = |problem: String| Error::Corrupt { path: path.to_owned(), problem };
-        // One object: serde would also read a struct from an array, which a settings file may not be.
-        let value: serde_json::Value = serde_json::from_slice(&bytes).map_err(|e| corrupt(e.to_string()))?;
-        if !value.is_object() {
-            return Err(corrupt("a settings file is one JSON object".into()));
-        }
-        let config: Self = serde_json::from_value(value).map_err(|e| corrupt(e.to_string()))?;
         config.check().map_err(|problem| Error::Corrupt { path: path.to_owned(), problem })?;
         Ok(config)
     }
@@ -168,6 +146,8 @@ impl Config {
 
 #[cfg(test)]
 mod tests {
+    use std::fs;
+
     use super::*;
     use crate::testing::TestDir;
 
@@ -223,6 +203,31 @@ mod tests {
             fs::write(&path, text).expect("write");
             assert!(matches!(Config::load(&path), Err(Error::Corrupt { .. })), "{text}");
         }
+    }
+
+    #[test]
+    fn what_the_shared_reader_refuses_that_was_read_before() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = TestDir::new("config-shared");
+        let path = dir.path().join("config.json");
+        let big = format!(r#"{{"person":"jan","tls_root":"{}"}}"#, "x".repeat(1024 * 1024));
+        for (what, bytes) in [
+            ("a member twice", br#"{"person":"jan","person":"bob"}"#.to_vec()),
+            ("a byte order mark", b"\xEF\xBB\xBF{}".to_vec()),
+            ("more than 1 MiB", big.into_bytes()),
+        ] {
+            fs::write(&path, bytes).expect("write");
+            fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).expect("chmod");
+            assert!(matches!(Config::load(&path), Err(Error::Corrupt { .. })), "{what}");
+        }
+        // Not a regular file.
+        let directory = dir.path().join("dir.json");
+        fs::create_dir(&directory).expect("dir");
+        assert!(matches!(Config::load(&directory), Err(Error::Corrupt { .. })), "a directory");
+        // What it says never holds a value from the file.
+        fs::write(&path, r#"{"person":"top-secret-value","unknown":"also-secret"}"#).expect("write");
+        let Err(Error::Corrupt { problem, .. }) = Config::load(&path) else { panic!("refused") };
+        assert!(!problem.contains("also-secret") && !problem.contains("top-secret-value"), "{problem}");
     }
 
     #[test]

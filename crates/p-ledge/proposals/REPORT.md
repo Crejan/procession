@@ -631,3 +631,20 @@ accept loop runs, and "serving" is printed after all three are bound: no window 
 which a running `pledge serve` does not answer. Fix: ready now means all three sockets
 connect. Same load, 40 runs of each of the two real-binary test files: 0 failures.
 Added the missing unit test for `Message::Hello` on `service.sock`.
+
+## `config.json` read by `p_act::settings`
+
+My own copy of the checks is gone; `Config::load` calls `p_act::settings::read`. A
+missing file is still the empty configuration. Changes in behaviour:
+- Refused now, read before: a member twice at the top (the last used to win); a file
+  over 1 MiB; something that is not a regular file now says so (a directory was an
+  I/O error before, a FIFO could block); the check is on the open file, so no gap
+  between check and read.
+- Different, same outcome: the owner is judged by the effective user (was the real
+  user), the mode rule (no group or other write bit) is the same; array, string, two
+  objects, trailing text, comments, byte order mark were already refused by serde, now
+  by the helper with the same result; error texts no longer hold values from the file
+  (serde's did, for some errors): tested.
+- Accepted now that was refused before: nothing.
+Unknown members are still refused by `deny_unknown_fields` on `Config` and its structs.
+Nothing was missing in the helper. Unit and integration tests pass, clippy clean.
