@@ -99,7 +99,7 @@ pub fn outcome_line(outcome: Outcome, id: Option<&CallId>) -> String {
     if let Some(rc) = rc {
         o.insert("rc".into(), json!(rc));
     }
-    Value::Object(o).to_string()
+    super::canon::line(&Value::Object(o))
 }
 
 fn result(outcome: Outcome, id: Option<&CallId>, answer: Vec<String>) -> ModelResult {

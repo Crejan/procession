@@ -38,8 +38,17 @@ pub const TLS_EXPORTER_LABEL: &[u8] = crate::limits::TLS_EXPORTER_LABEL.as_bytes
 pub const TLS_EXPORTER_CONTEXT: Option<&[u8]> = None;
 /// The exporter's output length: 32 bytes, the length of `tls` and of the nonce.
 pub const TLS_EXPORTER_LENGTH: usize = CONNECTION_SECRET_BYTES;
-/// The only protocol version of both broker transports: TLS 1.3 (no 1.2, no fallback).
+/// The only protocol version of both broker transports: TLS 1.3 (no 1.2, no fallback). This is its name as RFC 8446
+/// and OpenSSL spell it. `p-act` has no TLS library, so it holds no typed value: each end passes its own library's
+/// (`rustls::version::TLS13`), and this name is for logs and tests; [`is_tls_1_3`] compares a name from a library
+/// (rustls's `Debug` spells it `TLSv1_3`) so that nobody normalises it by hand.
 pub const TLS_PROTOCOL_VERSION: &str = "TLSv1.3";
+
+/// Whether `name` is TLS 1.3 as a library spells it: `TLSv1.3` or `TLSv1_3`.
+#[must_use]
+pub fn is_tls_1_3(name: &str) -> bool {
+    matches!(name, "TLSv1.3" | "TLSv1_3")
+}
 /// The crypto provider of both ends: `ring` (not `aws-lc-rs`: the C and CMake toolchain it needs).
 pub const TLS_CRYPTO_PROVIDER: &str = "ring";
 
@@ -1372,6 +1381,10 @@ mod tests {
         assert_eq!(TLS_EXPORTER_LENGTH, 32);
         assert_eq!(TLS_EXPORTER_LENGTH, std::mem::size_of::<Secret32>());
         assert_eq!(TLS_PROTOCOL_VERSION, "TLSv1.3");
+        assert!(is_tls_1_3(TLS_PROTOCOL_VERSION) && is_tls_1_3("TLSv1_3"));
+        for other in ["TLSv1.2", "TLSv1_2", "tlsv1.3", "TLSv1.3 ", "", "TLS1.3", "SSLv3"] {
+            assert!(!is_tls_1_3(other), "{other:?}");
+        }
         assert_eq!(TLS_CRYPTO_PROVIDER, "ring");
         assert_eq!(TLS_EXPORTER_LABEL, crate::limits::TLS_EXPORTER_LABEL.as_bytes());
     }
