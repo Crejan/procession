@@ -1860,7 +1860,7 @@ fn an_approval_certificate_with_anything_else_is_refused() {
     assert!(
         matches!(verify_approval_certificate(&by_rsa, &ca_pub, now), Err(SignError::UnsupportedKeyType(t)) if t == "ssh-rsa")
     );
-    // Default extensions (no `-O clear`) are not judged: the documents say nothing of them for approval keys.
+    // Default extensions (no `-O clear`) are refused (approval-formats.md section 3.2).
     let key = keys.ecdsa_key("with-extensions");
     keys.keygen(&[
         "-q",
@@ -1875,7 +1875,10 @@ fn an_approval_certificate_with_anything_else_is_refused() {
         pub_file(&key).to_str().unwrap(),
     ]);
     let line = std::fs::read_to_string(format!("{}-cert.pub", key.display())).unwrap();
-    assert!(verify_approval_certificate(line.trim_end(), &ca_pub, now).is_ok());
+    assert!(matches!(
+        verify_approval_certificate(line.trim_end(), &ca_pub, now),
+        Err(SignError::SiteCertificateExtension(_))
+    ));
     // An agent's certificate is not an approval key's, and the reverse.
     let (agent, _) = cert_line_and_sig(&keys, &ca, "alice", &[]);
     assert!(matches!(verify_approval_certificate(&agent, &ca_pub, now), Err(SignError::NotAnApprovalName(_))));
@@ -1967,4 +1970,69 @@ fn bytes_after_a_certificates_signature_are_refused_because_the_signature_does_n
     assert!(matches!(certificate_issuer(&with_trailer), Err(SignError::CertificateTrailingData)));
     // And the same certificate without it is accepted.
     assert!(check_approval_certificate(&line, &ca_pub).is_ok());
+}
+
+/// `name`'s key certified by `ca` for `principals` as `ssh-keygen` does by default: **without `-O clear`**, so the
+/// login extensions (`permit-pty` and four more) are in it; or with `-O clear` and then one more extension.
+fn certified_loosely(keys: &Keys, name: &str, ca: &Path, principals: &str, extra: Option<&str>) -> (Signer, String) {
+    let key = keys.key(name);
+    let pub_file = format!("{}.pub", key.display());
+    let mut args = vec!["-q", "-s", ca.to_str().unwrap(), "-I", name, "-n", principals, "-V", VALID];
+    if let Some(extra) = extra {
+        args.extend(["-O", "clear", "-O", extra]);
+    }
+    args.push(&pub_file);
+    keys.keygen(&args);
+    let line = std::fs::read_to_string(format!("{}-cert.pub", key.display())).unwrap().trim_end().to_owned();
+    (Signer::certified(key).unwrap(), line)
+}
+
+#[test]
+fn a_certificate_the_site_ca_issued_with_an_extension_is_refused_everywhere_it_is_verified() {
+    let d = delegation("alice");
+    let s = site();
+    let keys = &s.keys;
+    let ca = keys.public(&s.ca);
+    let now = at("2026-11-11T15:00:00Z");
+    let request = request(&d, INTERNAL);
+    let clearance = Clearance::compose(request.hash(), Timestamp::from_unix(1_794_409_481).unwrap()).unwrap();
+    let standing = br#"{"v":1,"type":"standing","n":4}"#;
+    // With `-O clear` (s.confirmed, s.broker are made like that) everything is accepted; the loose ones are refused.
+    for (how, extra) in [("the defaults", None), ("one extension", Some("permit-pty"))] {
+        let tag = how.replace(' ', "-");
+        let (confirmed, line) = certified_loosely(keys, &format!("c-{tag}"), &s.ca, "alice:confirmed", extra);
+        let (broker, _) = certified_loosely(keys, &format!("b-{tag}"), &s.ca, "broker", extra);
+        let is_extension = |r: Result<(), SignError>| matches!(r, Err(SignError::SiteCertificateExtension(_)));
+        // The signature is good in every case: it is the extension alone that is refused.
+        let approval = sign_approval(&confirmed, &request).unwrap();
+        assert!(is_extension(verify_approval(&request, &approval, ApprovalTrust::SiteCa(&ca)).map(|_| ())), "{how}");
+        assert!(
+            is_extension(verify_clearance(&clearance, &sign_clearance(&broker, &clearance).unwrap(), &ca)),
+            "{how}"
+        );
+        assert!(is_extension(verify_broker(&ca, &sign_broker(&broker, standing).unwrap(), standing)), "{how}");
+        // The bare certificate, in all three forms.
+        let line = line.as_str();
+        assert!(
+            matches!(verify_approval_certificate(line, &ca, now), Err(SignError::SiteCertificateExtension(_))),
+            "{how}"
+        );
+        assert!(matches!(check_approval_certificate(line, &ca), Err(SignError::SiteCertificateExtension(_))), "{how}");
+        assert!(
+            matches!(
+                verify_approval_certificate_for(line, &ca, "alice", ApprovalKind::Confirmed, now),
+                Err(SignError::SiteCertificateExtension(_))
+            ),
+            "{how}"
+        );
+    }
+    // The name of the extension is in the message and nothing of its data.
+    let (e, _) = certified_loosely(keys, "c-named", &s.ca, "alice:confirmed", Some("permit-pty"));
+    let err = verify_approval(&request, &sign_approval(&e, &request).unwrap(), ApprovalTrust::SiteCa(&ca)).unwrap_err();
+    assert!(err.to_string().contains("`permit-pty`") && err.to_string().contains("-O clear"), "{err}");
+    // And the same certificates issued with `-O clear` are accepted by all of them.
+    let request_sig = sign_approval(&s.confirmed, &request).unwrap();
+    assert!(verify_approval(&request, &request_sig, ApprovalTrust::SiteCa(&ca)).is_ok());
+    assert!(verify_clearance(&clearance, &sign_clearance(&s.broker, &clearance).unwrap(), &ca).is_ok());
+    assert!(verify_broker(&ca, &sign_broker(&s.broker, standing).unwrap(), standing).is_ok());
 }
