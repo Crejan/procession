@@ -5,9 +5,9 @@ The four things that are signed in the approval system
 the request, the approval, the clearance. Who sends what to whom over which
 connection is not here; that is the next document.
 
-Status: a draft. Every signature and verification below was run with
-OpenSSH 10.2 and keys in files (section 7). Nothing implements these formats
-yet.
+Status: a draft until stage 1 is declared done (section 1, "the freeze").
+Every signature and verification below was run with OpenSSH 10.2 and keys in
+files (section 7). The crate `p-act` implements these formats.
 
 ## 1. Principles
 
@@ -46,8 +46,14 @@ what the broker says to a pledge in its own name. A service's
 allowed-signers lines never list either. `hosts-v1@procession` is section
 6.1.
 
-A change that an old reader would misread gets a new number in `v` and in
-the namespace. A reader refuses a `v` it does not know.
+**The freeze.** These formats are a draft until stage 1 is declared done:
+Stage A and Stage B passed on Linux, and recorded. Up to that point a change
+to a signed document changes the draft and keeps `v` at 1, because no reader
+exists outside one commit of this workspace. From the moment stage 1 is
+declared done the formats are frozen at `v` 1: from then a member added to a
+signed document, or any change an old reader would misread, is a new number
+in `v` and a new namespace, without exception. The broker's register and its
+site file freeze at the same point. A reader refuses a `v` it does not know.
 
 ## 2. Common rules
 
@@ -162,7 +168,7 @@ some other consumer of OpenSSH certificates might honour it. The names
 What a service states it will do. Signed by the service.
 
 ```json
-{"v":1,"type":"request","call":"eyJ2IjoxLCJ0eXBlIjoiY2FsbCIs...","call_sig":"LS0tLS1CRUdJTiBTU0ggU0lHTkFUVVJFLS0tLS0K...","rating":{"exposure":"internal","damage":"none","disruption":"none"}}
+{"v":1,"type":"request","call":"eyJ2IjoxLCJ0eXBlIjoiY2FsbCIs...","call_sig":"LS0tLS1CRUdJTiBTU0ggU0lHTkFUVVJFLS0tLS0K...","rating":{"exposure":"internal","damage":"none","disruption":"none"},"host_text":false}
 ```
 
 | Member | Type | Meaning |
@@ -174,13 +180,18 @@ What a service states it will do. Signed by the service.
 | `rating.exposure` | string | `open`, `internal` or `secret` |
 | `rating.damage` | string | `none`, `recoverable` or `lasting` |
 | `rating.disruption` | string | `none`, `brief` or `outage` |
+| `host_text` | boolean | whether the action's result can carry text that is not the service's: chosen by whoever runs processes on the host or wrote a file that is read (`approvals.md`, R2). Required, always written, `true` or `false`; there is no "absent means false". pledge shows one fixed line in the dialog when it is `true` |
 
 A request says nothing of its own about what will be done: the action, its
 parameters, the service and the deadline are the call's, and they are in the
 request as the bytes the agent signed. So a request cannot say something
 else than the call (approvals.md, R6); what pledge compares is that the
 service that signed the request is the service the call names. The service
-adds one thing, the rating.
+adds two things, the rating and `host_text`. Both bind it: what it carries
+out is checked against what was approved where the action runs, and a call
+whose action can return such text while the approved request said `false` is
+refused like a call above the approved rating. A service cannot obtain an
+approval for "no host text" and return some.
 
 There is no second identifier and no second time. The call's `id` and
 `deadline` are the request's.
