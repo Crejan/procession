@@ -249,3 +249,12 @@ clock (10 minutes plus the 60 seconds of tolerated clock difference, as the serv
 inclusive): exit 64, `event=refused ... --until is more than ten minutes ahead`, before any wait. Tests: the pure bound at
 -5, 0, 600, 660, 661, 3600; through the dispatcher at 700, 3600 and 86400 seconds; 600 runs. A2 has the check. SPEC and runbook say
 what the number is.
+
+## Update: when `pledge serve` is ready
+
+`pledge serve` binds `agent.sock`, `control.sock` and `service.sock` in that order and prints "pledge: serving." after
+all three. Found: the shared test module (`tests/common/mod.rs`, used by `stage1.rs`, `stage1_sudo.rs`, `stage1_http.rs`,
+also for a restart) waited only for `service.sock`, the last one bound, which was sufficient by that order but not by
+anything stated; it now waits for all three. `stage1_sudo.rs` and `stage1_http.rs` start pledge through it.
+`a3-run-cross.sh` does not start pledge (the test does). The runbook's Stage B (B1) now says what the owner waits for: the
+line `pledge: serving.`, and what the error in the gap looks like.
