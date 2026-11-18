@@ -36,3 +36,8 @@ p-act = { path = "../p-act", version = "0.0.0", features = ["pact"] }
 name = "stage1"
 path = "tests/stage1.rs"
 required-features = ["test-verbs"]
+
+[[test]]
+name = "stage1_sudo"
+path = "tests/stage1_sudo.rs"
+required-features = ["test-verbs"]
