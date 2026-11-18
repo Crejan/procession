@@ -123,6 +123,13 @@ itself. With an incomplete chain only the two "once" answers are offered.
   no setting for it, and the dialog and the record say why. Unbound is
   refused.
 - A forwarded SSH agent connection is refused.
+- **A login must fit to be shown.** The user is at most 64 characters, the host name (the names listed for the
+  host's key, as the dialog shows them) at most 170, user, `@` and host together at most 240. A login over a bound
+  is refused without a prompt or dialog, reason `not-showable` in the record, and pledge tells the person why,
+  with the advice to give the host a shorter alias in the ssh configuration (`ssh` itself only says the SSH
+  agent refused). Nothing is shortened, and the fingerprint is never shown instead of a name for lack of room:
+  that is a different rule, which stays (a host pledge cannot name is shown by its fingerprint). Changes
+  behaviour: a login that was shown before can now be refused.
 - A presence check covers one login. A shared connection (`ControlMaster`)
   carries later sessions that never reach the SSH agent; the setup
   instructions turn it off and the server limits sessions per connection.

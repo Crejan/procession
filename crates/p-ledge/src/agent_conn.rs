@@ -66,6 +66,38 @@ fn list_identities(shared: &Shared, program: Option<&str>) -> Vec<u8> {
     message::identities_reply(&identities)
 }
 
+/// The longest user of a login pledge shows, in characters.
+pub const MAX_LOGIN_USER_CHARS: usize = 64;
+/// The longest host name of a login pledge shows, in characters (the names listed for the host's key, joined as
+/// the dialog shows them).
+pub const MAX_LOGIN_HOST_CHARS: usize = 170;
+/// The user, the `@` and the host together.
+pub const MAX_LOGIN_CHARS: usize = 240;
+
+/// Why a login cannot be shown whole, if it cannot: the sentence for the person. Only what is shown counts: a host
+/// that is shown by fingerprint (it has no name pledge can vouch for) has the fingerprint's own fixed length.
+fn login_too_long(content: &SignContent, names: &HostName) -> Option<String> {
+    let SignContent::Userauth(login) = content else { return None };
+    let user = login.user.chars().count();
+    let host = match names {
+        HostName::Named(names) => names.join(", ").chars().count(),
+        _ => 0,
+    };
+    let (what, limit) = if user > MAX_LOGIN_USER_CHARS {
+        ("the user name", MAX_LOGIN_USER_CHARS)
+    } else if host > MAX_LOGIN_HOST_CHARS {
+        ("the host name", MAX_LOGIN_HOST_CHARS)
+    } else if user + 1 + host > MAX_LOGIN_CHARS {
+        ("the user and host name together", MAX_LOGIN_CHARS)
+    } else {
+        return None;
+    };
+    Some(format!(
+        "{what} is longer than the {limit} characters pledge shows whole, so it cannot be asked about; \
+         give the host a shorter alias in your ssh configuration (Host/HostName)"
+    ))
+}
+
 /// What a signing request is, for the record.
 enum Use {
     Login { user: String, host: Option<String>, host_fingerprint: Option<String> },
@@ -131,6 +163,12 @@ fn sign(shared: &Shared, program: Option<&str>, session: &Session, key_blob: &[u
             ));
         }
         return finish(shared, &attempt, &End::Refused(refusal.label()));
+    }
+    // A login whose user or host name is too long to be shown whole is refused, never shown shortened and never
+    // replaced by the host key's fingerprint (that is a rule of its own about what pledge can vouch for).
+    if let Some(why) = login_too_long(&content, &names) {
+        shared.dialogs.tell(&format!("{program}: {why}: refused"));
+        return finish(shared, &attempt, &End::Refused("not-showable"));
     }
     let now = u64::try_from(shared.now().unix()).unwrap_or(0);
     if shared.muter.lock().is_ok_and(|muter| muter.is_muted(program, now)) {
@@ -515,6 +553,40 @@ mod tests {
         let other = UserauthData::hostbound(&key, &ed25519_key(61).blob).build();
         assert_eq!(exchange(&mut conn, &sign_message(&key, &other)).0, message::FAILURE);
         assert_eq!(result_of(&rig.record().into_iter().last().expect("entry")), ("refused", Some("session-mismatch")));
+    }
+
+    #[test]
+    fn a_login_too_long_to_show_is_refused_not_shown_shortened_or_by_fingerprint() {
+        let long_host = "h".repeat(MAX_LOGIN_HOST_CHARS + 1);
+        let key_of = |rig: &Rig| rig.shared_key();
+        // A verified host whose listed name is one character too long: refused, told, no dialog, no fingerprint shown.
+        let rig = Rig::new([admit(Admission::AdmitOnce), yes()]);
+        let key = key_of(&rig);
+        let host = ed25519_key(70);
+        let login = UserauthData::hostbound(&key, &host.blob).build();
+        let mut conn = bound_connection(&rig, "/usr/bin/ssh", &host, &long_host);
+        assert_eq!(exchange(&mut conn, &sign_message(&key, &login)).0, message::FAILURE);
+        assert_eq!(result_of(&rig.record()[0]), ("refused", Some("not-showable")));
+        let shown = rig.shown();
+        assert!(shown.iter().all(|s| s.starts_with("tell ")), "no dialog: {shown:?}");
+        assert!(shown[0].contains("host name") && shown[0].contains("shorter alias"), "{shown:?}");
+        assert!(shown.iter().all(|s| !s.contains("SHA256:")), "never the fingerprint instead: {shown:?}");
+        // The same host at exactly the bound is shown, whole.
+        let fits = "h".repeat(MAX_LOGIN_HOST_CHARS);
+        let rig = Rig::new([admit(Admission::AdmitOnce), yes()]);
+        let key = key_of(&rig);
+        let login = UserauthData::hostbound(&key, &host.blob).build();
+        let mut conn = bound_connection(&rig, "/usr/bin/ssh", &host, &fits);
+        assert_eq!(exchange(&mut conn, &sign_message(&key, &login)).0, SIGN_RESPONSE);
+        // A user over its bound.
+        let rig = Rig::new([admit(Admission::AdmitOnce), yes()]);
+        let key = key_of(&rig);
+        let mut long_user = UserauthData::hostbound(&key, &host.blob);
+        long_user.user = "u".repeat(MAX_LOGIN_USER_CHARS + 1).into_bytes();
+        let mut conn = bound_connection(&rig, "/usr/bin/ssh", &host, "backup.example.org");
+        assert_eq!(exchange(&mut conn, &sign_message(&key, &long_user.build())).0, message::FAILURE);
+        assert_eq!(result_of(&rig.record()[0]), ("refused", Some("not-showable")));
+        assert!(rig.shown()[0].contains("user name"), "{:?}", rig.shown());
     }
 
     #[test]
