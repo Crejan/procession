@@ -806,6 +806,7 @@ version = "0.0.0"
 dependencies = [
  "base64",
  "p-act",
+ "p-age",
  "rcgen",
  "ring",
  "rustls",

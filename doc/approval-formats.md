@@ -138,6 +138,17 @@ such a key (an unknown extension is ignored, unlike a critical option), and
 Who needs what from it: a service the person; the broker the person and the
 groups; pledge neither, but it checks that the certificate is one it issued.
 
+### 3.2 The certificates the site CA issues
+
+For a person's two approval keys and for the broker's key. Each is a user
+certificate, issued by the site CA's key and no other, with exactly one
+principal (`<person>:confirmed`, `<person>:automatic`, or `broker`), a
+validity (`approvals.md`, section 7), **no critical option and no
+extension**: issued with everything cleared (`-O clear`), and a verifier
+refuses one that carries any. What is not specified must not be there, since
+some other consumer of OpenSSH certificates might honour it. The names
+`broker` and `hosts` are never a person's (section 7).
+
 ## 4. The request
 
 What a service states it will do. Signed by the service.
