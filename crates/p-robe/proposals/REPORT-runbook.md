@@ -346,3 +346,12 @@ binding a socket. **Every write that a program's rules judge, and the mode it ge
 so parallel tests are not disturbed): pledge must come up, and `config.json` must be 0600. **I put the old behaviour back once** (`fs::write` for
 `config.json`): the test failed with pledge's own words, `config.json can be written by someone other than its owner (mode 0664)`; restored, it passes.
 Runbook Stage B: the modes are written out and a paragraph says why (Debian's umask 0002 for an account with a group of its own name).
+
+## Update: two lib tests under umask 0002
+
+`service_tests::sandbox()` made `open/` with `create_dir`: 0775 under umask 0002. The rule "nothing is rated lower under a directory that anyone
+but its owner or root can write" then rightly kept the worst rating, the automatic key could not approve, and the call was `unavailable`: the
+program was right and the test's setup leaned on the umask. Modes are now written out (0755, set explicitly). Whole p-robe suite run under umask
+002 and under 077, with and without `test-verbs`: all pass. **a3's `test read` case cannot meet it:** it reads `/etc/sudoers.d/probe-svc` (made by `a1` with
+`install -o root -g root -m 0440`), and in the sudo run the sandbox of `test read` is not set (`PROBE_TEST_SANDBOX` is dropped by `env_reset` and ignored by a root
+process), so no entry matches and the directory rule is never reached: the call is rated at the worst whatever the umask.

@@ -361,9 +361,15 @@ struct Rig {
 #[cfg(feature = "test-verbs")]
 fn sandbox() -> &'static PathBuf {
     crate::rate::SANDBOX.get_or_init(|| {
+        use std::os::unix::fs::PermissionsExt;
+        // Modes written out: under a umask of 0002 (an account with a group of its own name) `create_dir` would make
+        // `open/` group-writable, and the rule that nothing is rated lower under a directory others can write would
+        // then rightly keep the worst rating.
         let dir = std::fs::canonicalize(crate::testdir::new("sandbox")).unwrap();
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o755)).unwrap();
         for sub in ["open", "private"] {
             std::fs::create_dir(dir.join(sub)).unwrap();
+            std::fs::set_permissions(dir.join(sub), std::fs::Permissions::from_mode(0o755)).unwrap();
         }
         dir
     })
