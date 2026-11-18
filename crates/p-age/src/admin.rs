@@ -22,7 +22,7 @@ use thiserror::Error;
 use tokio::io::AsyncWriteExt;
 use tokio::net::{UnixListener, UnixStream};
 
-use crate::core::{Status, Stored};
+use crate::core::{CertificateStatus, Status, Stored};
 use crate::net::{Broker, Lines};
 use crate::site::valid_name;
 
@@ -200,6 +200,15 @@ struct ReplyWire {
     blocked_persons: Option<Vec<String>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     blocked_keys: Option<Vec<String>>,
+    /// The certificate input, present only if one is configured.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    certificates_carried: Option<usize>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    certificates_not_carried: Option<usize>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    certificates_directory_refused: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    uncovered: Option<Vec<String>>,
 }
 
 impl Reply {
@@ -225,6 +234,12 @@ impl Reply {
                 (w.pledges, w.held, w.delegations, w.withdrawn) =
                     (Some(s.pledges), Some(s.held), Some(s.delegations), Some(s.withdrawn));
                 (w.blocked_persons, w.blocked_keys) = (Some(s.blocked_persons.clone()), Some(s.blocked_keys.clone()));
+                if let Some(c) = &s.certificates {
+                    w.certificates_carried = Some(c.carried);
+                    w.certificates_not_carried = Some(c.not_carried);
+                    w.certificates_directory_refused = Some(c.directory_refused);
+                    w.uncovered = Some(c.uncovered.clone());
+                }
             }
         }
         let mut line = serde_json::to_vec(&w).unwrap_or_default();
@@ -255,6 +270,15 @@ impl Reply {
                 withdrawn: w.withdrawn?,
                 blocked_persons: w.blocked_persons?,
                 blocked_keys: w.blocked_keys?,
+                certificates: match w.certificates_carried {
+                    None => None,
+                    Some(carried) => Some(CertificateStatus {
+                        carried,
+                        not_carried: w.certificates_not_carried?,
+                        directory_refused: w.certificates_directory_refused?,
+                        uncovered: w.uncovered?,
+                    }),
+                },
             })),
             _ => None,
         }
@@ -272,7 +296,7 @@ fn done(stored: Stored) -> Reply {
 pub async fn execute(broker: &Arc<Broker>, command: Command) -> Reply {
     let refused = |r| Reply::Refused(r, None);
     match command {
-        Command::Status => match broker.with_core(|c, _| (c.status(), Vec::new())).await {
+        Command::Status => match broker.with_core(|c, now| (c.status(now), Vec::new())).await {
             Some(status) => Reply::Status(status),
             None => refused(Refusal::Malformed),
         },
@@ -424,7 +448,7 @@ pub fn socket_path(state_dir: &Path) -> PathBuf {
 }
 
 /// The exit codes of the verbs, one meaning each (`SPEC.md`).
-pub const EXIT_TABLE: &str = "exit codes:\n  0  done (and stored, where something is stored)\n  1  refused\n  2  usage\n  3  no broker answers\n  4  in force but NOT stored (block, withdraw)\n  5  the broker is degraded (`status` only)";
+pub const EXIT_TABLE: &str = "exit codes:\n  0  done (and stored, where something is stored)\n  1  refused\n  2  usage\n  3  no broker answers\n  4  in force but NOT stored (block, withdraw)\n  5  the broker is degraded (`status` only)\n  6  an enabled person has no valid certificate for a purpose (`status` only; 5 comes first if both)";
 
 /// Done.
 pub const EXIT_DONE: u8 = 0;
@@ -438,6 +462,8 @@ pub const EXIT_NO_BROKER: u8 = 3;
 pub const EXIT_NOT_STORED: u8 = 4;
 /// The broker is degraded; only `status` returns it.
 pub const EXIT_DEGRADED: u8 = 5;
+/// An enabled person has no valid certificate for a purpose; only `status` returns it, and 5 comes first.
+pub const EXIT_UNCOVERED: u8 = 6;
 
 /// What a verb prints and exits with for an answer (`proposals/admin-socket.md`, section 3; [`EXIT_TABLE`]).
 #[must_use]
@@ -473,7 +499,24 @@ pub fn render(command: &Command, reply: &Reply) -> (String, u8) {
             ));
             out.push_str(&format!("blocked persons: {}\n", list(&s.blocked_persons)));
             out.push_str(&format!("blocked keys: {}", list(&s.blocked_keys)));
-            (out, if s.degraded.is_some() { EXIT_DEGRADED } else { EXIT_DONE })
+            if let Some(c) = &s.certificates {
+                out.push_str(&format!(
+                    "\ncertificates carried: {} ({} not carried{})\npersons without a valid certificate: {}",
+                    c.carried,
+                    c.not_carried,
+                    if c.directory_refused { "; the directory is refused whole" } else { "" },
+                    list(&c.uncovered)
+                ));
+            }
+            let uncovered = s.certificates.as_ref().is_some_and(|c| !c.uncovered.is_empty() || c.directory_refused);
+            let code = if s.degraded.is_some() {
+                EXIT_DEGRADED
+            } else if uncovered {
+                EXIT_UNCOVERED
+            } else {
+                EXIT_DONE
+            };
+            (out, code)
         }
     }
 }

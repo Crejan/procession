@@ -16,7 +16,7 @@ use thiserror::Error;
 pub enum SiteError {
     #[error(transparent)]
     Settings(#[from] p_act::settings::SettingsError),
-    #[error("the certificates or groups of `{name}` are not what a standing may carry: {source}")]
+    #[error("the groups of `{name}` are not what a standing may carry: {source}")]
     BadStanding { name: String, source: p_act::ParseError },
     #[error("`{0}` is not a name ([A-Za-z0-9._-]+, at most 64 characters)")]
     BadName(String),
@@ -74,9 +74,6 @@ struct PersonFile {
     /// approve); never partial, and never on a person who is not enabled (the view the broker is given has none).
     #[serde(default)]
     keys: Option<KeysFile>,
-    /// Certificates of the person's approval keys as the issuer made them, to be carried to pledge.
-    #[serde(default)]
-    certificates: Vec<String>,
     /// The names of the person's groups, to be offered to the person; they decide nothing.
     #[serde(default)]
     groups: Vec<String>,
@@ -133,7 +130,6 @@ pub struct Person {
     pub enabled: bool,
     /// The four keys, if the person has any.
     pub keys: Option<PersonKeys>,
-    pub certificates: Vec<String>,
     pub groups: Vec<String>,
 }
 
@@ -180,7 +176,7 @@ impl Site {
                 v.dedup();
                 v
             };
-            let (certificates, groups) = (sorted(p.certificates), sorted(p.groups));
+            let groups = sorted(p.groups);
             let probe = StandingContent {
                 to: p.name.clone(),
                 nonce: [0; 32],
@@ -188,7 +184,7 @@ impl Site {
                 blocked: false,
                 blocked_keys: Vec::new(),
                 withdrawn: Vec::new(),
-                certificates: certificates.clone(),
+                certificates: Vec::new(),
                 groups: groups.clone(),
             };
             Standing::compose(&probe).map_err(|source| SiteError::BadStanding { name: p.name.clone(), source })?;
@@ -227,7 +223,7 @@ impl Site {
                     Some(parsed)
                 }
             };
-            let person = Person { enabled: p.enabled, keys, certificates, groups };
+            let person = Person { enabled: p.enabled, keys, groups };
             if site.persons.insert(p.name.clone(), person).is_some() {
                 return Err(SiteError::Duplicate(p.name));
             }

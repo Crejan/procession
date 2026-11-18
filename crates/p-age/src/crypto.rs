@@ -28,6 +28,13 @@ pub trait Crypto: Send + Sync {
     fn verify_connection(&self, doc: &ConnectionDocument, sig: &str, key: &PublicKey) -> Result<(), CryptoError>;
     /// An agent's certificate, read under formats section 3.1 and checked to be issued by `delegation_key`.
     fn check_agent_certificate(&self, line: &str, delegation_key: &PublicKey) -> Result<Agent, CryptoError>;
+    /// A certificate of an approval key, checked against the site CA's key by `p_act::sign::check_approval_certificate`
+    /// (shape, name, no critical option, signature and issuer); validity is the caller's to judge.
+    fn check_approval_certificate(
+        &self,
+        line: &str,
+        site_ca: &PublicKey,
+    ) -> Result<sign::ApprovalCertificate, CryptoError>;
     /// The broker's signature over a clearance.
     fn sign_clearance(&self, clearance: &Clearance) -> Result<String, CryptoError>;
     /// The broker's signature over a standing (namespace `broker-v1@procession`).
@@ -63,6 +70,14 @@ impl Crypto for SshCrypto {
 
     fn check_agent_certificate(&self, line: &str, delegation_key: &PublicKey) -> Result<Agent, CryptoError> {
         Ok(sign::verify_agent_certificate(line, delegation_key)?)
+    }
+
+    fn check_approval_certificate(
+        &self,
+        line: &str,
+        site_ca: &PublicKey,
+    ) -> Result<sign::ApprovalCertificate, CryptoError> {
+        Ok(sign::check_approval_certificate(line, site_ca)?)
     }
 
     fn sign_clearance(&self, clearance: &Clearance) -> Result<String, CryptoError> {
