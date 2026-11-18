@@ -146,8 +146,9 @@ fn the_real_pact_calls_the_real_probe_over_http() {
     assert!(is(&kit, "done", None), "{kit:?}");
     expected.push(("approved", None));
 
-    let results: Vec<(String, Option<String>)> = pledge
-        .history()
+    let history = pledge.history();
+    check_peers(&history);
+    let results: Vec<(String, Option<String>)> = history
         .iter()
         .filter(|e| e["type"] == "request")
         .map(|e| (e["result"].as_str().unwrap().to_owned(), e["reason"].as_str().map(str::to_owned)))

@@ -118,6 +118,7 @@ fn the_cases_through_a_real_sudo_rule() {
     expected.push(("approved", None));
 
     let history = pledge.history();
+    check_peers(&history);
     let results: Vec<(String, Option<String>)> = history
         .iter()
         .filter(|e| e["type"] == "request")
