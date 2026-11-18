@@ -107,7 +107,7 @@ impl Crypto for SshCrypto {
         site_ca: &PublicKey,
         now: std::time::SystemTime,
     ) -> Result<BrokerCertificate, BrokerCertificateFailure> {
-        let refused = |e: &dyn std::fmt::Display| BrokerCertificateFailure::Refused(e.to_string());
+        let refused = |e: &dyn std::fmt::Display| BrokerCertificateFailure::Refused(crate::util::shown_error(e));
         let path = self.certificate_file();
         if !path.exists() {
             return Err(BrokerCertificateFailure::Missing);

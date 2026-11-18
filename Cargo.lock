@@ -2933,6 +2933,7 @@ dependencies = [
  "base64",
  "p-act",
  "p-age",
+ "p-ermit",
  "rcgen",
  "ring",
  "rustls",

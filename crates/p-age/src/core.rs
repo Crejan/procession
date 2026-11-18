@@ -27,6 +27,7 @@ use crate::log::{LogEntry, LogSink};
 use crate::perm::{self, PermError};
 use crate::register::{Register, Snapshot, Stopped};
 use crate::site::Site;
+use crate::util::shown_error;
 
 /// What the broker sends to a service on its connection.
 #[derive(Debug, Clone)]
@@ -85,8 +86,10 @@ pub enum StateError {
     Perm(#[from] PermError),
     #[error("cannot read {path}: {source}")]
     Read { path: String, source: std::io::Error },
-    #[error("{path} is not a register: {source}")]
+    #[error("{path} is not a register: {}", crate::util::shown_error(source))]
     Parse { path: String, source: serde_json::Error },
+    #[error("{path} is a register that cannot be read whole: {member} has an entry that is not valid")]
+    Invalid { path: String, member: &'static str },
     #[error("{path} is version {v} of the register, which this broker does not know")]
     Version { path: String, v: u32 },
     #[error(
@@ -163,7 +166,7 @@ fn report_certificates(loaded: &Loaded) {
         eprintln!("page: the certificates directory is refused whole: {why}");
     }
     for n in &loaded.not_carried {
-        eprintln!("page: certificate {:?} is not carried: {}", n.file, n.reason);
+        eprintln!("page: certificate \"{}\" is not carried: {}", n.file, n.reason);
     }
 }
 
@@ -477,7 +480,7 @@ impl Core {
         if snapshot.v != 1 {
             return Err(StateError::Version { path: shown, v: snapshot.v });
         }
-        Ok(Register::restore(snapshot))
+        Register::restore(snapshot).map_err(|member| StateError::Invalid { path: shown, member })
     }
 
     /// The first start: make the empty register. Refused if there is one.
@@ -746,11 +749,12 @@ impl Core {
             groups: known.map(|p| p.groups.clone()).unwrap_or_default(),
         };
         // `compose` writes every member, the lists sorted and without duplicates, and checks the result.
-        let standing = Standing::compose(&content).map_err(|e| eprintln!("page: cannot write the standing: {e}"))?;
+        let standing = Standing::compose(&content)
+            .map_err(|e| eprintln!("page: cannot write the standing: {}", shown_error(&e)))?;
         match self.crypto.sign_standing(&standing) {
             Ok(sig) => Ok(Effect::Pledge(conn, PledgeOut::Notice { doc: standing.as_bytes().to_vec(), sig })),
             Err(e) => {
-                eprintln!("page: cannot sign the standing: {e}");
+                eprintln!("page: cannot sign the standing: {}", shown_error(&e));
                 Err(())
             }
         }
@@ -903,8 +907,10 @@ impl Core {
             return Err(());
         }
         let clearance = Clearance::compose(hash, stamp(now)).map_err(drop)?;
-        let sig =
-            self.crypto.sign_clearance(&clearance).map_err(|e| eprintln!("page: cannot sign a clearance: {e}"))?;
+        let sig = self
+            .crypto
+            .sign_clearance(&clearance)
+            .map_err(|e| eprintln!("page: cannot sign a clearance: {}", shown_error(&e)))?;
         let with = ClearanceAnswer::new(clearance, &sig).map_err(drop)?;
         let approved = Approved::new(approval, Some(with)).map_err(drop)?;
         Ok(Outcome::Approved(approved))
