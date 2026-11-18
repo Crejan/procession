@@ -11,8 +11,8 @@ requirements of `crates/p-ledge/proposals/stage2-mac.md`, section 8.5, one by on
 - **Socket**: `p-reserve.sock` in a directory made 0700 and owned by the daemon's user; the socket is
   0600 in it. Per-user daemon (workstation): `$XDG_RUNTIME_DIR/p-reserve/` on Linux,
   `~/Library/Application Support/p-reserve/` on macOS. Host daemon: `/run/p-reserve/`.
-- **Peer**: read from the kernel at accept (`SO_PEERCRED` on Linux, `getpeereid`/`LOCAL_PEERCRED` on macOS).
-  A peer whose credentials cannot be read is dropped, told nothing. **A peer is served only if its uid is the
+- **Peer**: read at accept with `p_act::peer::admit(&socket, &Policy::OwnUser)` (p-act with `default-features = false`,
+  which pulls only libc); no copy. A peer whose credentials cannot be read is dropped, told nothing, and the throttled log line is p-act's. **A peer is served only if its uid is the
   daemon's own** (proposal). Other uids, root included, are dropped. Reason: `restore` writes a path the
   client names (section 5); a root daemon serving another uid would be a way to write anywhere as root.
   So a host daemon is reached by the user it runs as (or by root if it runs as root).
