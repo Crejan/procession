@@ -33,3 +33,21 @@ pub const DEFAULT_DELEGATION_SECONDS: i64 = 8 * 3600;
 pub const MAX_DELEGATION_SECONDS: i64 = 24 * 3600;
 /// An agent's bundle is at most this many bytes, counted over the whole of what is read from standard input.
 pub const MAX_BUNDLE_BYTES: usize = 64 * 1024;
+
+/// The connection document's nonce, and the TLS exporter value in it, are this many bytes (base64 in the document).
+pub const CONNECTION_SECRET_BYTES: usize = 32;
+/// The TLS exporter label of the sign-in's binding (RFC 5705, no context).
+pub const TLS_EXPORTER_LABEL: &str = "EXPORTER-procession-connection-v1";
+/// pledge sends `hello` within this many seconds of connecting.
+pub const HELLO_SECONDS: u64 = 10;
+/// The broker accepts a sign-in for its nonce this many seconds.
+pub const SIGNIN_SECONDS: u64 = 30;
+/// pledge pings this often while it sends nothing else.
+pub const PING_INTERVAL_SECONDS: u64 = 30;
+/// The broker closes a connection silent for this long (`error` `timeout`).
+pub const PLEDGE_SILENCE_SECONDS: u64 = 90;
+/// A connection document is at most this many bytes (the documents give no limit; it is small).
+pub const MAX_CONNECTION_DOCUMENT_BYTES: usize = 1024;
+/// A standing is at most this many bytes (the documents give no limit; it must fit in a line of the exchange
+/// once in base64, with its signature).
+pub const MAX_STANDING_BYTES: usize = 64 * 1024;

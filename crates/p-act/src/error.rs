@@ -52,6 +52,14 @@ pub enum ParseError {
     MalformedRating { member: &'static str, value: String },
     #[error("`{0}` is not a hash, like sha256:<64 lower-case hex digits>")]
     MalformedHash(String),
+    #[error("member `{member}` is not {expected} bytes of base64")]
+    BadLength { member: &'static str, expected: usize },
+    #[error("`{0}` is not a key fingerprint like SHA256:<43 base64 characters>")]
+    MalformedFingerprint(String),
+    #[error("member `{0}` is not a certificate line")]
+    MalformedCertificateLine(&'static str),
+    #[error("an entry of `{0}` is not a usable name")]
+    MalformedName(&'static str),
     #[error("signature is not an armoured SSH signature")]
     MalformedSignature,
     #[error("the call inside the request is refused: {0}")]
