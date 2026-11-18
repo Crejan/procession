@@ -6,19 +6,45 @@ use serde_json::Value;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
+type Hook = Box<dyn FnOnce() + Send>;
+
+#[derive(Default)]
+struct CancelState {
+    cancelled: AtomicBool,
+    hooks: Mutex<Vec<Hook>>,
+}
+
 /// Set when the model cancels a call: the transport then closes its connection to the service,
-/// which is the service's cancel (agent-to-service.md section 7).
-#[derive(Debug, Clone, Default)]
-pub struct CancelToken(Arc<AtomicBool>);
+/// which is the service's cancel (agent-to-service.md section 7). A transport that is blocked in a read
+/// registers a hook ([`CancelToken::on_cancel`]) that closes the connection.
+#[derive(Clone, Default)]
+pub struct CancelToken(Arc<CancelState>);
+
+impl std::fmt::Debug for CancelToken {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "CancelToken({})", self.is_cancelled())
+    }
+}
 
 impl CancelToken {
+    /// Cancel, and run the hooks, once.
     pub fn cancel(&self) {
-        self.0.store(true, Ordering::SeqCst);
+        self.0.cancelled.store(true, Ordering::SeqCst);
+        let hooks = self.0.hooks.lock().map(|mut h| std::mem::take(&mut *h)).unwrap_or_default();
+        hooks.into_iter().for_each(|hook| hook());
     }
 
     #[must_use]
     pub fn is_cancelled(&self) -> bool {
-        self.0.load(Ordering::SeqCst)
+        self.0.cancelled.load(Ordering::SeqCst)
+    }
+
+    /// Run `hook` when this is cancelled: at once if it already is. A hook runs at most once.
+    pub fn on_cancel(&self, hook: impl FnOnce() + Send + 'static) {
+        match self.0.hooks.lock() {
+            Ok(mut hooks) if !self.is_cancelled() => hooks.push(Box::new(hook)),
+            _ => hook(),
+        }
     }
 }
 
@@ -90,5 +116,37 @@ impl Transport for Memory {
 impl<T: Transport + ?Sized> Transport for Arc<T> {
     fn post(&self, service: &Service, request: &Value, cancel: &CancelToken) -> Result<Value, TransportError> {
         (**self).post(service, request, cancel)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::atomic::AtomicUsize;
+
+    #[test]
+    fn a_cancel_runs_each_hook_once_and_a_late_hook_at_once() {
+        let t = CancelToken::default();
+        let runs = Arc::new(AtomicUsize::new(0));
+        for _ in 0..3 {
+            let r = Arc::clone(&runs);
+            t.on_cancel(move || {
+                r.fetch_add(1, Ordering::SeqCst);
+            });
+        }
+        assert!(!t.is_cancelled());
+        assert_eq!(runs.load(Ordering::SeqCst), 0);
+        t.cancel();
+        t.cancel();
+        assert!(t.is_cancelled());
+        assert_eq!(runs.load(Ordering::SeqCst), 3);
+        let r = Arc::clone(&runs);
+        t.on_cancel(move || {
+            r.fetch_add(10, Ordering::SeqCst);
+        });
+        assert_eq!(runs.load(Ordering::SeqCst), 13);
+        // A clone is the same token.
+        let c = t.clone();
+        assert!(c.is_cancelled());
     }
 }

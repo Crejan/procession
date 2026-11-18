@@ -3,9 +3,10 @@
 use super::Settings;
 use super::bundle::Bundle;
 use super::catalogue::Catalogue;
+use super::http::HttpTransport;
 use super::mcp::{Context, call_once, serve};
 use super::rt::{SystemClock, SystemRandomSource, harden};
-use super::transport::{NoHttp, Transport};
+use super::transport::Transport;
 use serde_json::Value;
 use std::io::{self, Read, Write};
 use std::os::unix::fs::PermissionsExt;
@@ -93,7 +94,14 @@ fn context(options: &Options) -> Result<Arc<Context>, String> {
     let now = super::rt::Clock::now(&SystemClock);
     let bundle = Bundle::read(io::stdin().lock(), now).map_err(|e| e.to_string())?;
     let settings = Settings::new(bundle.config.deadline_seconds, options.min_wait);
-    let transport: Box<dyn Transport> = Box::new(NoHttp);
+    #[cfg(not(feature = "pact-tls"))]
+    if let Some(s) = bundle.config.services.iter().find(|s| s.url.starts_with("https://")) {
+        return Err(format!(
+            "{}@{} is an https service, and this pact was built without TLS (feature pact-tls)",
+            s.name, s.host
+        ));
+    }
+    let transport: Box<dyn Transport> = Box::new(HttpTransport::new(bundle.config.tls_root.clone()));
     let (catalogue, dropped) =
         Catalogue::build(&bundle.config.services, &settings, &*transport).map_err(|e| e.to_string())?;
     dropped.iter().for_each(|d| log(d));
