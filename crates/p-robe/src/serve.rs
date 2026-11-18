@@ -20,6 +20,12 @@ use crate::store::UsedStore;
 
 const DEFAULT_CONFIG: &str = crate::config::DEFAULT_FILE;
 
+/// An error message for a person: paths and words that came from files and arguments are made visible by the rule for
+/// strings from outside (`text_rule`), and cut at a bound.
+fn shown(message: &str) -> String {
+    crate::text_rule::visible(message, 600).0
+}
+
 /// Builds the service a configuration describes.
 ///
 /// # Errors
@@ -80,7 +86,7 @@ pub fn serve(args: &[&str]) -> u8 {
     let (config, service) = match built {
         Ok(built) => built,
         Err(why) => {
-            eprintln!("probe serve: {why}");
+            eprintln!("probe serve: {}", shown(&why));
             return 64;
         }
     };
@@ -96,7 +102,7 @@ pub fn serve(args: &[&str]) -> u8 {
     match run(&config.listen, Arc::new(service)) {
         Ok(()) => 0,
         Err(why) => {
-            eprintln!("probe serve: {why}");
+            eprintln!("probe serve: {}", shown(&why));
             1
         }
     }
@@ -111,7 +117,7 @@ pub fn run(listen: &str, service: Arc<Service>) -> Result<(), String> {
     runtime.block_on(async {
         let listener =
             tokio::net::TcpListener::bind(listen).await.map_err(|e| format!("cannot listen on {listen}: {e}"))?;
-        eprintln!("probe serve: listening on {listen}");
+        eprintln!("probe serve: listening on {}", shown(listen));
         // The sender is kept for as long as the process runs: dropping it would stop the loop.
         let (_keep, shutdown) = tokio::sync::oneshot::channel();
         crate::http::accept_loop(listener, service, crate::http::Limits::default(), shutdown).await;
@@ -162,14 +168,14 @@ pub fn setup(args: &[&str]) -> u8 {
     let config = match Config::load_optional(Path::new(crate::config::DEFAULT_FILE)) {
         Ok(config) => config,
         Err(why) => {
-            eprintln!("probe setup: {why}");
+            eprintln!("probe setup: {}", shown(&why));
             return 64;
         }
     };
     let (default_key, default_host, default_out) = match setup_defaults(config.as_ref(), &hostname) {
         Ok(defaults) => defaults,
         Err(why) => {
-            eprintln!("probe setup: {}: {why}", crate::config::DEFAULT_FILE);
+            eprintln!("probe setup: {}: {}", crate::config::DEFAULT_FILE, shown(&why));
             return 64;
         }
     };
@@ -190,7 +196,7 @@ pub fn setup(args: &[&str]) -> u8 {
                 0
             }
             Err(why) => {
-                eprintln!("probe setup --if-due: {why}");
+                eprintln!("probe setup --if-due: {}", shown(&why));
                 1
             }
         };
@@ -201,7 +207,7 @@ pub fn setup(args: &[&str]) -> u8 {
             0
         }
         Err(why) => {
-            eprintln!("probe setup: {why}");
+            eprintln!("probe setup: {}", shown(&why));
             1
         }
     }

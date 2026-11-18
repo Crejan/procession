@@ -81,6 +81,13 @@ pub struct Verb {
     pub args: Args,
     pub summary: &'static str,
     pub availability: Availability,
+    /// The output can carry text that is not the service's (a thread's name, a command line, a file's bytes, a
+    /// string from a configuration): marked in the catalogue and in the tool's description. It does not change
+    /// the rating.
+    pub host_text: bool,
+    /// Fields of its records that are content, not names, with the limit of their own in bytes of escaped text
+    /// (the usual bound is `text_rule::FIELD_MAX`).
+    pub content: &'static [(&'static str, usize)],
 }
 
 impl Verb {
@@ -147,6 +154,8 @@ const CORE: &[Verb] = &[
         args: Args::None,
         summary: "what this installation is and whether it can run its verbs",
         availability: Availability::Ready(kit::run),
+        host_text: true,
+        content: &[],
     },
     Verb {
         noun: "rt",
@@ -156,6 +165,8 @@ const CORE: &[Verb] = &[
         args: Args::Params { floor: Rating::HARMLESS, params: IRQ_PARAMS },
         summary: "interrupts, their threads and the CPUs they run on",
         availability: Availability::Ready(prover::irq),
+        host_text: true,
+        content: &[],
     },
     Verb {
         noun: "rt",
@@ -168,6 +179,8 @@ const CORE: &[Verb] = &[
         },
         summary: "realtime processes and threads, with their command lines",
         availability: Availability::Ready(prover::procs),
+        host_text: true,
+        content: &[],
     },
     Verb {
         noun: "rt",
@@ -177,6 +190,8 @@ const CORE: &[Verb] = &[
         args: Args::Some,
         summary: "measure wake-up jitter; loads the host and restores what it changed",
         availability: NEEDS_PROVER,
+        host_text: false,
+        content: &[],
     },
     Verb {
         noun: "run",
@@ -186,6 +201,8 @@ const CORE: &[Verb] = &[
         args: Args::Some,
         summary: "the fallback: one command, stated in full, run once without a terminal",
         availability: Availability::ServiceOnly,
+        host_text: true,
+        content: &[],
     },
 ];
 
@@ -262,14 +279,15 @@ pub fn catalog_text(only: Option<&str>) -> String {
     let mut text = String::from("noun verb        exposure  damage       disruption  status        summary\n");
     for row in verbs().filter(|row| only.is_none_or(|noun| row.noun == noun)) {
         text.push_str(&format!(
-            "{:<4} {:<11} {:<9} {:<12} {:<11} {:<13} {}\n",
+            "{:<4} {:<11} {:<9} {:<12} {:<11} {:<13} {}{}\n",
             row.noun,
             row.verb,
             exposure(row.rating.exposure),
             damage(row.rating.damage),
             disruption(row.rating.disruption),
             row.status(),
-            row.summary
+            row.summary,
+            if row.host_text { " [output may hold text from the host]" } else { "" }
         ));
     }
     text
@@ -304,6 +322,7 @@ pub fn catalog_records(only: Option<&str>) -> Vec<Record> {
                 .str("disruption", disruption(row.rating.disruption))
                 .bool("needs_confirmation", row.rating.needs_confirmation())
                 .bool("takes_arguments", row.args.takes_any())
+                .bool("host_text", row.host_text)
                 .str("status", row.status())
                 .opt_str("reason", row.reason())
                 .str("summary", row.summary),
@@ -326,6 +345,28 @@ mod tests {
         assert_eq!(fallback.rating, Rating::WORST);
         assert!(fallback.rating.needs_confirmation());
         assert_eq!(fallback.status(), "service-only");
+    }
+
+    #[test]
+    fn the_rows_whose_output_can_carry_text_from_the_host_are_marked_and_the_mark_is_in_the_catalogue() {
+        let marked: Vec<String> = verbs().filter(|row| row.host_text).map(Verb::label).collect();
+        let expected = ["sys kit", "rt irq", "rt procs", "run command"];
+        for label in expected {
+            assert!(marked.contains(&label.to_string()), "{label}: {marked:?}");
+        }
+        assert!(!marked.contains(&"rt jitter".to_string()), "{marked:?}");
+        let records = catalog_records(Some("rt"));
+        let members: Vec<(String, bool)> = records
+            .iter()
+            .map(|r| r.line())
+            .filter(|l| l.contains("\"type\":\"verb\""))
+            .map(|l| (l.clone(), l.contains("\"host_text\":true")))
+            .collect();
+        assert_eq!(members.len(), 3);
+        assert!(members.iter().all(|(l, _)| l.contains("\"host_text\":")), "{members:?}");
+        assert!(members.iter().any(|(l, on)| l.contains("\"verb\":\"irq\"") && *on));
+        assert!(members.iter().any(|(l, on)| l.contains("\"verb\":\"jitter\"") && !*on));
+        assert!(catalog_text(Some("rt")).contains("[output may hold text from the host]"));
     }
 
     #[test]

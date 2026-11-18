@@ -402,6 +402,7 @@ impl<'a> Dispatcher<'a> {
             prover: self.prover.clone(),
         };
         let mut answer = Answer::new(out, self.cap);
+        answer.set_content(call.verb.content);
         // A verb that stops because the answer is full ends cleanly (the answer says `truncated`); one
         // whose reader is gone, or whose code is not 0, did not give a usable result.
         let result = run(&env, &call.args, &mut answer);
