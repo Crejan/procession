@@ -26,6 +26,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         backend.options.insert("known_hosts_strategy".into(), s);
     }
     let backends = backend.to_backends()?;
+    println!("backends built; opening (this connects over ssh and loads the index)");
 
     let t = Instant::now();
     let repo = Repository::new(&RepositoryOptions::default(), &backends)?
@@ -37,6 +38,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         println!("snapshot {} {} {:?}", s.id, s.time, s.paths);
     }
 
+    println!("listing {}", var("TRIAL_DIR")?);
     let dir = repo.node_from_snapshot_path(&format!("latest:{}", var("TRIAL_DIR")?), |_| true)?;
     let t = Instant::now();
     for item in repo.ls(&dir, &LsOptions::default())? {
@@ -44,6 +46,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     }
     println!("ls: {:?}", t.elapsed());
 
+    println!("restoring {}", var("TRIAL_FILE")?);
     let node = repo.node_from_snapshot_path(&format!("latest:{}", var("TRIAL_FILE")?), |_| true)?;
     let ls = repo.ls(&node, &LsOptions::default())?;
     let dest = LocalDestination::new(&var("TRIAL_DEST")?, true, !node.is_dir())?;

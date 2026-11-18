@@ -405,8 +405,10 @@ where
             out = rx.recv() => match out {
                 Some(Out::Service(ServiceOut::Close)) | None => break,
                 Some(Out::Service(o)) => {
-                    if let Some(line) = service_line(&o) {
-                        if !write_line(&mut wr, &line).await { break; }
+                    if let Some(line) = service_line(&o)
+                        && !write_line(&mut wr, &line).await
+                    {
+                        break;
                     }
                 }
                 Some(Out::Pledge(_)) => {}
@@ -540,8 +542,10 @@ where
             out = rx.recv() => match out {
                 Some(Out::Pledge(PledgeOut::Close)) | None => break,
                 Some(Out::Pledge(o)) => {
-                    if let Some(line) = pledge_line(&o) {
-                        if !write_line(&mut wr, &line).await { break; }
+                    if let Some(line) = pledge_line(&o)
+                        && !write_line(&mut wr, &line).await
+                    {
+                        break;
                     }
                 }
                 Some(Out::Service(_)) => {}

@@ -691,14 +691,23 @@ dependencies = [
 name = "p-reserve"
 version = "0.0.0"
 dependencies = [
+ "humantime",
  "p-reserve-core",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "toml",
 ]
 
 [[package]]
 name = "p-reserve-core"
 version = "0.0.0"
 dependencies = [
+ "libc",
  "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror",
 ]
 
 [[package]]
@@ -726,6 +735,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "p-roc"
+version = "0.1.0"
+dependencies = [
+ "libc",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror",
+]
+
+[[package]]
 name = "p-usher"
 version = "0.1.0"
 dependencies = [
@@ -734,6 +754,7 @@ dependencies = [
  "lettre",
  "libc",
  "nix",
+ "p-roc",
  "regex",
  "serde",
  "signal-hook",

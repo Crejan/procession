@@ -18,6 +18,7 @@ email = ["dep:lettre"]
 anyhow = "1"
 humantime = "2"
 libc = "0.2"
+p-roc = { path = "../p-roc" }
 nix = { version = "0.30", features = ["user", "hostname"] }
 regex = "1"
 serde = { version = "1", features = ["derive"] }

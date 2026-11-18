@@ -348,6 +348,13 @@ pub fn bind(state_dir: &Path) -> Result<(UnixListener, u32), BindError> {
     Ok((listener, uid))
 }
 
+/// Whether a peer may speak to the broker: its user is root or the broker's own. A peer whose credentials could not
+/// be read (`Err`) is not allowed, and nothing is said to it.
+#[must_use]
+pub fn peer_allowed(uid: std::io::Result<u32>, broker_uid: u32) -> bool {
+    uid.is_ok_and(|uid| uid == 0 || uid == broker_uid)
+}
+
 /// Serve commands for ever. A peer that is neither root nor `broker_uid` is closed without a word.
 pub async fn serve(listener: UnixListener, broker: Arc<Broker>, broker_uid: u32) {
     loop {
@@ -357,8 +364,8 @@ pub async fn serve(listener: UnixListener, broker: Arc<Broker>, broker_uid: u32)
         };
         let broker = Arc::clone(&broker);
         tokio::spawn(async move {
-            let Ok(cred) = stream.peer_cred() else { return };
-            if cred.uid() != 0 && cred.uid() != broker_uid {
+            // A peer whose credentials cannot be read is dropped, told nothing (the rule for every socket).
+            if !peer_allowed(stream.peer_cred().map(|cred| cred.uid()), broker_uid) {
                 return;
             }
             serve_one(stream, broker).await;
