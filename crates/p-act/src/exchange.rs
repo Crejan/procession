@@ -770,7 +770,12 @@ mod tests {
 
     fn approved(clearance: bool) -> Message {
         let c = clearance.then(|| {
-            let c = Clearance::compose(hash(), Timestamp::from_unix(1_794_409_481).unwrap()).unwrap();
+            let c = Clearance::compose(
+                hash(),
+                crate::clearance::approval_hash("an approval"),
+                Timestamp::from_unix(1_794_409_481).unwrap(),
+            )
+            .unwrap();
             ClearanceAnswer::new(c, SIG).unwrap()
         });
         answer(Outcome::Approved(Approved::new(SIG, c).unwrap()))

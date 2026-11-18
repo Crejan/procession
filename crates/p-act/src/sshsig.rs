@@ -822,6 +822,7 @@ mod tests {
             to: "jan".into(),
             nonce: [1; 32],
             n: 0,
+            at: crate::time::Timestamp::from_unix(1_794_409_481).unwrap(),
             blocked: false,
             blocked_keys: vec![],
             withdrawn: vec![],

@@ -131,6 +131,8 @@ pub enum SignError {
     BadGroups(&'static str),
     #[error("`{0}` is not a fingerprint like SHA256:<43 base64 characters>")]
     MalformedFingerprint(String),
+    #[error("the clearance names another approval than the one held")]
+    ClearanceNamesAnotherApproval,
     #[error("the certificate's principal `{0}` is not `broker`")]
     NotBrokerName(String),
     #[error("there is no ssh-keygen to trust: {0}")]
@@ -864,13 +866,23 @@ pub fn sign_clearance(signer: &(impl SshsigSigner + ?Sized), clearance: &Clearan
     signer.sign(Namespace::Clearance, clearance.as_bytes())
 }
 
-/// Verify a clearance against the site CA, under the name `broker`. Whether it
-/// is fresh, and whether it covers the request at hand ([`Clearance::covers`]),
-/// is the caller's to check.
-pub fn verify_clearance(clearance: &Clearance, sig: &str, site_ca: &PublicKey) -> Result<(), SignError> {
+/// Verify a clearance against the site CA, under the name `broker`, and that it names exactly `approval`, the armoured
+/// signature the service holds ([`Clearance::names_approval`]): a clearance says what it cleared, one approval by one
+/// key, and another is [`SignError::ClearanceNamesAnotherApproval`]. Whether it is fresh, and whether it covers the
+/// request at hand ([`Clearance::covers`]), is the caller's to check.
+pub fn verify_clearance(
+    clearance: &Clearance,
+    sig: &str,
+    site_ca: &PublicKey,
+    approval: &str,
+) -> Result<(), SignError> {
     let allowed = ca_line("broker", &[Namespace::Clearance], site_ca);
     verify(Namespace::Clearance, &allowed, "broker", sig, clearance.as_bytes())?;
-    site_certificate_in(sig)
+    site_certificate_in(sig)?;
+    if !clearance.names_approval(approval) {
+        return Err(SignError::ClearanceNamesAnotherApproval);
+    }
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------
