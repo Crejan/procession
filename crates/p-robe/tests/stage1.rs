@@ -137,14 +137,9 @@ fn the_real_parts_against_each_other() {
     // out and did not complete, which an agent is told as `failed`, with no result and no code. The cause is
     // in the log and in the host's audit line under the call's identifier.
     let failed = call(&agent, "test_fail", &["2"]);
-    // `pact` (p-act) does not know the word `failed` yet and says `unknown` for it; until it passes it on, both
-    // are accepted here, and what the service did is checked by its log and the host's audit line below. After
-    // that: `assert!(is(&failed, "failed", None))` alone.
-    assert!(
-        (is(&failed, "failed", None) || is(&failed, "unknown", None)) && failed.rc.is_none(),
-        "{failed:?} {:?}",
-        log.lock().unwrap()
-    );
+    assert!(is(&failed, "failed", None) && failed.rc.is_none(), "{failed:?}");
+    // The text `pact` gives the model is its own and fixed; nothing of the service's reaches it.
+    assert!(!failed.rest.concat().contains("verb-code"), "{failed:?}");
     assert!(log.lock().unwrap().iter().any(|l| l.contains("dispatcher-failed")), "{:?}", log.lock().unwrap());
     let audit_text = std::fs::read_to_string(dir.join("dispatcher.log")).unwrap();
     assert!(

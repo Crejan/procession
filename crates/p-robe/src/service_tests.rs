@@ -552,7 +552,9 @@ fn with_no_answer_the_call_expires_at_its_deadline_by_our_own_clock_and_nothing_
     let started = Instant::now();
     assert_eq!(rig.outcome(&sent), Outcome::Expired);
     let took = started.elapsed();
-    assert!(took >= Duration::from_secs(1) && took < Duration::from_secs(4), "{took:?}");
+    // The call was signed before the clock started and a deadline is whole seconds: a little under the second
+    // that is left is what can be relied on, and a slow machine may take longer.
+    assert!(took >= Duration::from_millis(500) && took < Duration::from_secs(10), "{took:?}");
     assert!(rig.ran().is_empty());
     rig.pledge.wait_for("closed");
 }
@@ -594,7 +596,7 @@ fn a_call_for_another_host_or_service_or_a_verb_that_does_not_exist_asks_nobody(
     for (sent, exact) in [
         (sign(&CallSpec { host: "elsewhere", ..spec(a, "sys kit", &[]) }), "wrong-service"),
         (sign(&CallSpec { name: "other", ..spec(a, "sys kit", &[]) }), "wrong-service"),
-        (sign(&spec(a, "rt irq", &[])), "unknown-action"),
+        (sign(&spec(a, "rt jitter", &[])), "unknown-action"),
         (sign(&spec(a, "run command", &["x"])), "unknown-action"),
         (sign(&spec(a, "sys nope", &[])), "unknown-action"),
         (sign(&spec(a, "sys kit", &["x=1"])), "params-not-accepted"),
@@ -1142,7 +1144,13 @@ mod with_test_verbs {
         let listed = value(mcp.handle(&post(json!({"jsonrpc": "2.0", "id": 1, "method": "tools/list"})), &cancel));
         let names: Vec<_> =
             listed["result"]["tools"].as_array().unwrap().iter().map(|t| t["name"].as_str().unwrap()).collect();
-        assert!(names.contains(&"sys_kit") && names.contains(&"test_echo") && !names.contains(&"rt_irq"), "{names:?}");
+        assert!(
+            names.contains(&"sys_kit")
+                && names.contains(&"test_echo")
+                && names.contains(&"rt_irq")
+                && !names.contains(&"rt_jitter"),
+            "{names:?}"
+        );
 
         let sent = rig.jan("test echo", &["a=1"]);
         let good = json!({"procession/call": sent.call, "procession/call_sig": sent.call_sig});
@@ -1169,8 +1177,9 @@ mod with_test_verbs {
             let resp = value(mcp.handle(&call(&sent, "test_echo", meta), &cancel));
             assert_eq!(resp["error"]["code"], -32602, "{why}: {resp}");
         }
-        let unknown =
-            value(mcp.handle(&call(&sent, "rt_irq", json!({"procession/call": c, "procession/call_sig": s})), &cancel));
+        let unknown = value(
+            mcp.handle(&call(&sent, "rt_jitter", json!({"procession/call": c, "procession/call_sig": s})), &cancel),
+        );
         assert_eq!(unknown["error"]["code"], -32602);
         assert_eq!(rig.pledge.count("submit"), 1);
     }
