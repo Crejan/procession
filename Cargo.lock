@@ -691,14 +691,23 @@ dependencies = [
 name = "p-reserve"
 version = "0.0.0"
 dependencies = [
+ "humantime",
  "p-reserve-core",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "toml",
 ]
 
 [[package]]
 name = "p-reserve-core"
 version = "0.0.0"
 dependencies = [
+ "libc",
  "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror",
 ]
 
 [[package]]

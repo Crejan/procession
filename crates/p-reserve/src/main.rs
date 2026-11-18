@@ -1,7 +1,10 @@
 //! `preserve`: the command line of p-reserve.
 //!
-//! The verbs are declared in [`VERBS`]; none of them does anything yet. What
-//! each will do is in `SPEC.md`.
+//! The verbs are declared in [`VERBS`]; `health` is implemented, the rest are
+//! not yet. What each will do is in `SPEC.md`.
+
+mod config;
+mod health;
 
 use std::process::ExitCode;
 
@@ -9,19 +12,29 @@ use std::process::ExitCode;
 struct Verb {
     name: &'static str,
     summary: &'static str,
+    implemented: bool,
 }
 
 const VERBS: &[Verb] = &[
-    Verb { name: "serve", summary: "run the daemon: scheduled backups, the socket the other front ends use" },
-    Verb { name: "run", summary: "back up the declared sources now" },
-    Verb { name: "status", summary: "what is running, and what ran last" },
-    Verb { name: "health", summary: "the freshness of every source; the exit code is the worst band" },
-    Verb { name: "snapshots", summary: "list the snapshots of a target" },
-    Verb { name: "ls", summary: "list a directory of a snapshot" },
-    Verb { name: "restore", summary: "restore a file or a directory of a snapshot" },
-    Verb { name: "prune", summary: "apply the retention policy" },
-    Verb { name: "check", summary: "verify the repository" },
-    Verb { name: "verify", summary: "restore a sample and compare it with its source" },
+    Verb {
+        name: "serve",
+        summary: "run the daemon: scheduled backups, the socket the other front ends use",
+        implemented: false,
+    },
+    Verb { name: "run", summary: "back up the declared sources now", implemented: false },
+    Verb { name: "status", summary: "what is running, and what ran last", implemented: false },
+    Verb {
+        name: "health",
+        summary: "the freshness of every source; exit code 0 ok, 1 warnings, 2 critical",
+        implemented: true,
+    },
+    Verb { name: "snapshots", summary: "list the snapshots of a target", implemented: false },
+    Verb { name: "ls", summary: "list a directory of a snapshot", implemented: false },
+    Verb { name: "restore", summary: "restore a file or a directory of a snapshot", implemented: false },
+    Verb { name: "prune", summary: "forget by the retention policy, then prune", implemented: false },
+    Verb { name: "check", summary: "verify the repository", implemented: false },
+    Verb { name: "verify", summary: "restore a sample and compare it with its source", implemented: false },
+    Verb { name: "reprovision", summary: "initialise a repository only when it is proven absent", implemented: false },
 ];
 
 const SCHEMA_VERSION: u32 = 1;
@@ -39,7 +52,12 @@ fn usage() -> String {
 fn catalog_json() -> String {
     let verbs: Vec<String> = VERBS
         .iter()
-        .map(|verb| format!("{{\"name\":\"{}\",\"summary\":\"{}\",\"implemented\":false}}", verb.name, verb.summary))
+        .map(|verb| {
+            format!(
+                "{{\"name\":\"{}\",\"summary\":\"{}\",\"implemented\":{}}}",
+                verb.name, verb.summary, verb.implemented
+            )
+        })
         .collect();
     format!("{{\"schema_version\":{SCHEMA_VERSION},\"type\":\"catalog\",\"verbs\":[{}]}}", verbs.join(","))
 }
@@ -64,13 +82,16 @@ fn main() -> ExitCode {
             println!("{}", catalog_json());
             ExitCode::SUCCESS
         }
+        ["health", rest @ ..] => {
+            ExitCode::from(health::run(rest, &mut std::io::stdout().lock(), &mut std::io::stderr().lock()))
+        }
         [verb, ..] if VERBS.iter().any(|known| known.name == *verb) => {
             eprintln!("preserve {verb}: not implemented yet");
-            ExitCode::from(2)
+            ExitCode::from(health::EXIT_USAGE)
         }
         [other, ..] => {
             eprintln!("preserve: unknown verb '{other}'\n\n{}", usage());
-            ExitCode::from(2)
+            ExitCode::from(health::EXIT_USAGE)
         }
     }
 }

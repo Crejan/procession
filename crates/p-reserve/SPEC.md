@@ -20,9 +20,10 @@ and when it has proven itself.
 
 License: MIT OR Apache-2.0.
 
-Status: the three crates exist as skeletons. `p-reserve-core` holds the named
-outcomes, the freshness bands, the ledger and the engine trait, with tests.
-No engine is implemented, no verb does anything, the desktop app has no window.
+Status: `p-reserve-core` holds the named outcomes, the freshness bands, the
+ledger with its Prometheus textfile, the health rule and the engine trait, with
+tests. `preserve health` works from the ledger file. No engine is implemented,
+no other verb does anything, the desktop app has no window.
 
 ## Problem
 
@@ -102,11 +103,39 @@ Implemented, with tests:
   `fresh_within` and `stale_after`, with a grace period for a source that
   never succeeded. Only `stale` asks for attention.
 - **`Ledger`**: per (source, target) pair the last success, the bytes it
-  added, the first attempt of a pair that never succeeded, the last outcome.
+  added, how many files it could not read, the first attempt of a pair that
+  never succeeded, the last outcome.
   A failure keeps the last success so the pair ages; a deferred run is never
   a success, but it starts the grace period of a pair that has none yet; a
   pair leaves only when it is no longer declared.
 - **`Engine`**: an opened repository. So far `snapshots` and `list`.
+- **`Run`**: how one run of one pair ended. A snapshot with unreadable files
+  is `incomplete`, never `ok`, and `Run::stored` is the one place that says so;
+  the run over several sources is the worst of its sources' outcomes
+  (`Outcome::worst`; the order among the failures is a proposal, only
+  "`ok` < `deferred` < `incomplete` < any failure" is settled).
+- **`Textfile`**: the ledger as the Prometheus textfile fundament publishes
+  today (its three families under a configurable prefix, `preserve_` by
+  default) plus `backup_last_unreadable_files` and
+  `backup_last_outcome{outcome=...}`, so that `health` can read everything
+  from the file. Written atomically with an explicit mode (0644, whatever the
+  umask), read back strictly: a malformed file is an error and never an empty
+  ledger (which would read as stale everywhere); a missing file is the first
+  run.
+- **`health`**: the level of every declared pair, from one rule (below).
+
+### Health
+
+`preserve health` reads the ledger file, needs no daemon, and exits with the
+worst level: 0 ok, 1 warnings, 2 critical; 3 the ledger or configuration could
+not be read; 4 a usage error. Per pair, the level is the loudest of: the
+freshness band (`overdue` warning, `stale` critical); the last outcome
+(`incomplete` and every failure are warnings, `ok` and `deferred` are not);
+files the last successful snapshot could not read (any: warning). So an
+`incomplete` snapshot counts for freshness and is never shown as `ok`; a
+failure keeps the pair a warning until its age makes it critical; repeating a
+failure raises nothing. A declared pair the ledger has not seen is critical.
+Without declared pairs, every pair in the ledger is reported.
 
 To come, in the order of "Order of work":
 
@@ -116,10 +145,6 @@ To come, in the order of "Order of work":
   guard file.
 - Policy: retention; the schedule and its gates. Every gate defaults to
   defer on ambiguous input.
-- Ledger persistence: the Prometheus textfile fundament publishes today
-  (`*_backup_last_success_timestamp_seconds`, `*_backup_last_added_bytes`,
-  `*_backup_first_attempt_timestamp_seconds`, labels `source` and `target`),
-  written atomically, read back on the next run.
 - Restore test: restore one file of a snapshot and compare its SHA-256 with
   the source snapshot it was taken from.
 
@@ -132,7 +157,12 @@ From fundament (`backup_engines/`):
 
 - Verbs `run`, `prune`, `check`, `verify`, `snapshots`, `restore`, `mount`,
   `unmount`, `unlock`, `reprovision`; `run`, `prune` and `unlock` only on a
-  machine declared the writer.
+  machine declared the writer. p-reserve keeps `run`, `prune` (which forgets
+  by the retention policy, then prunes; `forget` is not a verb), `check`,
+  `verify`, `snapshots`, `restore`, `reprovision` (initialise only when the
+  repository is proven absent), and adds `ls`, `health`, `status`, `serve`.
+  `mount` and `unmount` are not in v1 (no FUSE). `unlock` is dropped while the
+  engine is rustic, which takes no locks.
 - Per-source tags (dataset name and `snap:<zfs snapshot>`), an exclude file
   in the source root, an upload limit that applies only inside a window of
   hours, a deadline per source and per operation.
@@ -165,10 +195,10 @@ Where they disagree:
 
 - **A snapshot with unreadable files.** Atticus counts it as a success
   ("complete with warnings"); fundament counts restic's exit 3 as a failure.
-  The core currently follows Atticus (`Outcome::stored_snapshot`). On a
-  workstation unreadable files are normal (cloud placeholders, protected
-  folders); on a host they are not. This probably wants to be a setting per
-  source, not one rule.
+  Decided: it counts for freshness (a snapshot was made), is never shown as
+  `ok`, is a warning in `health`, is recorded per source with the count of
+  what could not be read, a run's outcome is the worst of its sources', and
+  repeating it does not escalate it. One rule, not a setting per source.
 
 ## Platforms
 
@@ -232,20 +262,27 @@ share their views. Not decided; see "Open decisions".
   Atticus or fundament still writes to a repository, p-reserve reads it
   (browse, restore, verify) and does not prune. The switch of the writer is
   one step per repository, not a gradual one.
+- `unlock` does not exist while the engine is rustic, which takes no restic
+  locks; a lock left by a restic client stays that client's to clear. The
+  hazard is the other direction: a restic client's `prune` beside p-reserve's
+  backup is unsafe, because restic deletes at once and relies on the lock
+  p-reserve never takes.
 - p-reserve's own daemon, CLI and desktop app all go through one engine in one
   process where they can, so concurrent access from its own front ends is
   mostly not a question for the repository at all.
 
 ## Risks, and what is known
 
-Checked against documentation only, in November 2026; none of it tried.
+Checked against documentation in November 2026, and against the sources of
+`rustic_backend`, OpenDAL and `openssh`; the SFTP row also against a run by
+the owner on 2026-11-18 (`trial/REPORT.md`). The rest was not tried.
 
 | Question | Known | Open |
 |---|---|---|
-| SFTP | `rustic_backend` reaches SFTP through OpenDAL, which drives the system `ssh` (the `openssh` crate). Unix only; no password login; host keys through a `known_hosts` strategy. | Whether an agent socket (`SSH_AUTH_SOCK`), a specific key file, a pinned `known_hosts` file and extra `ssh` options can be passed the way both predecessors pass them through `sftp.command`. This decides whether rustic can be the engine. |
+| SFTP | `rustic_backend` reaches SFTP through OpenDAL, which drives the system `ssh` (the `openssh` crate). Unix only; no password login; host keys through a `known_hosts` strategy. | Run: a key file with strict checking works; an agent works with `key` naming the public half (`SSH_AUTH_SOCK` is inherited). Read: OpenDAL's sftp takes only `endpoint`, `root`, `user`, `key`, `known_hosts_strategy`. **A pinned `known_hosts` file cannot be passed**: strict checking fails unless the host key is in the real `~/.ssh/known_hosts` (run, A1/A2); no `-F`, no extra `-o`. Open: open time and memory (the run did not finish), and whether to pin through the real `known_hosts` or write a backend of our own that spawns `ssh -s sftp` (below). |
 | Maturity | `rustic_core` 0.13.0 and `rustic_backend` 0.7.0 (August 2026). rustic's own comparison page lists few tests against restic's coverage. | Its current stability statement; an older README advised against production use. |
 | Toolchain | `rustic_core` and `rustic_backend` state a minimum rustc of 1.91. | Decided: the workspace has one `rust-version` for all crates, raised to what its dependencies need (1.91). |
-| Fresh snapshot mounts | restic needs `device-id-for-hardlinks`, or every run from a freshly mounted ZFS snapshot rewrites every tree. | rustic's equivalent. |
+| Fresh snapshot mounts | restic needs `device-id-for-hardlinks`, or every run from a freshly mounted ZFS snapshot rewrites every tree. | Read from the source, not run: rustic's `set_devid` defaults to `hardlink` (the device id only for hardlinks), and its parent match compares size, mtime, ctime and inode, not the device. Run against a real fresh mount. |
 | macOS metadata | - | Extended attributes, ACLs, flags, resource forks, firmlinks, compared with restic. |
 | Index held open | - | Memory of a loaded index for a large repository (the Atticus test repository: about 1.4 million files, 233 index files), and how the daemon learns that another writer changed the repository. |
 
@@ -269,7 +306,7 @@ loses the open index.
 4. **The daemon and the socket**; `ls` answered from an open repository.
    Measure open time and memory.
 5. **Ledger persistence and `preserve health`**; fundament's metrics from
-   p-reserve's ledger.
+   p-reserve's ledger. (Done, in `p-reserve-core` and `preserve health`.)
 6. **Backup of a tree**, then of a snapshot source on each platform; forget
    and prune; check. From here a repository can switch its writer.
 7. **Schedule and gates.**
@@ -281,12 +318,14 @@ Steps 1 and 2 are days, not weeks, and either can end the plan as written.
 
 ## Open decisions
 
-- The desktop app's toolkit (above).
-- Whether a host runs the daemon or only one-shot verbs from systemd units.
+- The desktop app's toolkit (above). Provisionally, on macOS, the SwiftUI
+  front end of Atticus as a client of the socket; no Rust toolkit is chosen;
+  the Linux desktop is decided later; `p-reserve-gui` has no code.
+- Decided: a host runs one-shot verbs from systemd timers; the daemon is for
+  where something stays open. The CLI works fully without a daemon.
 - Privilege on macOS: which part runs as root (snapshots), which as the user
   (Keychain, the agent socket), and how they talk.
 - One desktop app for p-reserve and p-ledge, or one each.
-- `incomplete` as success or failure, and whether per source.
 - The profile format: `.attic` as it is, or a new one that reads `.attic`.
 - The name of the product a user sees. `preserve` is the binary; an app may
   carry another.
