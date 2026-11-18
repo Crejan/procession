@@ -378,7 +378,7 @@ the owner on 2026-11-18 (`trial/REPORT.md`). The rest was not tried.
 | Toolchain | `rustic_core` and `rustic_backend` state a minimum rustc of 1.91. | Decided: the workspace has one `rust-version` for all crates, raised to what its dependencies need (1.91). The dependency closure of `rustic_core` 0.14.0 and `rustic_backend` 0.8.0 (default features, OpenDAL included) builds offline from the unpacked registry; adding it took 4 min 17 s of a debug build on a loaded machine (about 700 crates in all), and a test build of the three p-reserve crates with optimised dependencies about 30 min on the same machine. Debug-build dependencies make the key derivation and the index load about 30 times slower (140 s against 4 s): the workspace wants `[profile.dev.package."*"] opt-level = 2` (requested from the orchestrator). |
 | Fresh snapshot mounts | restic needs `device-id-for-hardlinks`, or every run from a freshly mounted ZFS snapshot rewrites every tree. | Read from the source, not run: rustic's `set_devid` defaults to `hardlink` (the device id only for hardlinks), and its parent match compares size, mtime, ctime and inode, not the device. Run against a real fresh mount. |
 | macOS metadata | - | Extended attributes, ACLs, flags, resource forks, firmlinks, compared with restic. |
-| Index held open | Measured once, release build, a tiny local repository, on a machine with a load average of about 145: init and one snapshot 6.3 s, open and load the index 4.3 s (a debug build: 140 s, nearly all in dependencies, see the Toolchain row). Memory not measured. | Memory of a loaded index for a large repository (the Atticus test repository: about 1.4 million files, 233 index files), and how the daemon learns that another writer changed the repository. |
+| Index held open | Measured once, release build, a tiny local repository, on a machine with a load average of about 145: init and one snapshot 6.3 s, open and load the index 4.3 s (a debug build: 140 s, nearly all in dependencies, see the Toolchain row). Memory not measured. Observed with a repository written by restic 0.19.0 (local, temporary): the engine lists, reads and restores it with matching SHA-256; opening takes no lock and changes nothing; while a `restic backup` holds its lock the repository opens and reads normally (rustic neither waits nor refuses); a snapshot written after the open is listed at once (the list is read from the repository each time) but its data is not in the loaded index, so reading it fails with `failed` ("Tree ID ... not found in index") until the repository is opened again: the daemon must reopen when that happens, or when it learns of a new snapshot. | Memory of a loaded index for a large repository (the Atticus test repository: about 1.4 million files, 233 index files), and how the daemon learns that another writer changed the repository. |
 
 If SFTP through the predecessors' SSH setups does not work, the fallbacks
 are, in order: a backend of our own on `rustic_core`'s backend trait that
@@ -397,8 +397,11 @@ loses the open index.
 3. **Read-only engine**: `snapshots`, `list`, `dump`, `restore` behind
    `Engine`; `preserve snapshots`, `ls`, `restore`. Verified with fundament's
    restore test (SHA-256 against the source snapshot) run through p-reserve.
-   (Built and tested against a local repository made in a temporary directory;
-   not yet against SFTP, a restic-written repository, or with the SHA-256 test.)
+   (Built and tested against local repositories in a temporary directory, one
+   written by rustic and one by restic 0.19.0, with the SHA-256 restore test
+   against a source tree; not yet against SFTP. The engine tests are not in the
+   default run: `cargo test -p p-reserve-core --features testing --offline --test engine`
+   and `cargo test -p p-reserve --features engine-rustic --offline`.)
 4. **The daemon and the socket**; `ls` answered from an open repository.
    Measure open time and memory.
 5. **Ledger persistence and `preserve health`**; fundament's metrics from
