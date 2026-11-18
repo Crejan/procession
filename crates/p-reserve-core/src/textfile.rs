@@ -74,6 +74,10 @@ pub enum TextfileError {
     Write { path: String, source: io::Error },
     #[error("{0} is not a regular file")]
     NotARegularFile(String),
+    #[error(
+        "a source or target name in the ledger has a control character or a bidirectional mark; it was not written"
+    )]
+    BadName,
     #[error("{0} is larger than the limit")]
     TooLarge(String),
     #[error("{0} is not UTF-8")]
@@ -135,6 +139,10 @@ impl Textfile {
 
     /// Publish `ledger`, replacing the file atomically.
     pub fn save(&self, ledger: &Ledger) -> Result<(), TextfileError> {
+        let clean = |s: &str| p_ermit::text::check(s).is_ok();
+        if ledger.pairs().any(|(pair, _)| !clean(&pair.source) || !clean(&pair.target)) {
+            return Err(TextfileError::BadName);
+        }
         write_atomic(&self.path, render(ledger, &self.prefix).as_bytes(), FILE_MODE)
             .map_err(|source| TextfileError::Write { path: self.path.display().to_string(), source })
     }
@@ -206,10 +214,10 @@ pub fn parse(text: &str, prefix: &str) -> Result<Ledger, (usize, String)> {
                 "target" => &mut target,
                 "outcome" => &mut outcome,
                 "cause" => &mut cause,
-                other => return Err(fail(&format!("unknown label {other:?}"))),
+                _ => return Err(fail("an unknown label")),
             };
             if slot.replace(value).is_some() {
-                return Err(fail(&format!("label {key:?} given twice")));
+                return Err(fail("a label given twice"));
             }
         }
         let (Some(source), Some(target)) = (source, target) else {
@@ -217,6 +225,9 @@ pub fn parse(text: &str, prefix: &str) -> Result<Ledger, (usize, String)> {
         };
         if outcome.is_some() != (family == LAST_OUTCOME) || (cause.is_some() && outcome.is_none()) {
             return Err(fail("the outcome and cause labels belong to the last-outcome family, and only to it"));
+        }
+        if p_ermit::text::check(&source).is_err() || p_ermit::text::check(&target).is_err() {
+            return Err(fail("a source or target name has a control character or a bidirectional mark"));
         }
         let pair = Pair::new(source, target);
         if !seen.insert((family.to_owned(), pair.clone())) {
@@ -235,13 +246,10 @@ pub fn parse(text: &str, prefix: &str) -> Result<Ledger, (usize, String)> {
                     return Err(fail("an outcome sample has the value 1"));
                 }
                 let name = outcome.unwrap_or_default();
-                entry.last_outcome =
-                    Some(Outcome::from_name(&name).ok_or_else(|| fail(&format!("unknown outcome {name:?}")))?);
+                entry.last_outcome = Some(Outcome::from_name(&name).ok_or_else(|| fail("an unknown outcome"))?);
                 entry.last_cause = match cause {
                     None => None,
-                    Some(name) => {
-                        Some(Cause::from_name(&name).ok_or_else(|| fail(&format!("unknown cause {name:?}")))?)
-                    }
+                    Some(name) => Some(Cause::from_name(&name).ok_or_else(|| fail("an unknown cause"))?),
                 };
             }
         }
@@ -254,11 +262,11 @@ pub fn parse(text: &str, prefix: &str) -> Result<Ledger, (usize, String)> {
 }
 
 fn count(value: &str) -> Result<u64, String> {
-    value.parse().map_err(|_| format!("{value:?} is not a non-negative whole number"))
+    value.parse().map_err(|_| "not a non-negative whole number".to_owned())
 }
 
 fn time(value: &str) -> Result<SystemTime, String> {
-    let bad = || format!("{value:?} is not a time in seconds since the epoch");
+    let bad = || "not a time in seconds since the epoch".to_owned();
     let secs: f64 = value.parse().map_err(|_| bad())?;
     if !secs.is_finite() || secs < 0.0 {
         return Err(bad());
@@ -371,7 +379,7 @@ mod tests {
     fn sample() -> Ledger {
         let mut ledger = Ledger::default();
         ledger.record(Pair::new("home", "offsite"), Run::stored(10, 0), t(1_700_000_000));
-        ledger.record(Pair::new("docs \"x\"\\\nnew", "off,site"), Run::stored(7, 3), t(1_700_000_500));
+        ledger.record(Pair::new("docs \"x\"\\ new", "off,site"), Run::stored(7, 3), t(1_700_000_500));
         ledger.record(Pair::new("never", "offsite"), Run::ended(Outcome::Locked), t(1_700_000_900));
         ledger.record(Pair::new("cut", "offsite"), Run::interrupted(), t(1_700_001_000));
         ledger
@@ -444,6 +452,44 @@ mod tests {
         ];
         for (text, line) in cases {
             assert_eq!(parse(text, p).map_err(|e| e.0), Err(line), "{text:?}");
+        }
+    }
+
+    #[test]
+    fn a_name_with_a_control_character_or_bidirectional_mark_is_neither_read_nor_written_and_no_error_repeats_it() {
+        for bad in ["a\u{85}b", "a\u{9b}b", "a\u{202e}b", "a\x1bb", "a\\nb"] {
+            let text = format!("p_backup_last_added_bytes{{source=\"{bad}\",target=\"t\"}} 1\n");
+            let err = parse(&text, "p_").unwrap_err();
+            assert_eq!(err.0, 1, "{bad:?}");
+            assert!(err.1.contains("control character"), "{err:?}");
+            for c in ['\u{85}', '\u{9b}', '\u{202e}', '\x1b'] {
+                assert!(!err.1.contains(c), "{err:?}");
+            }
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let file = Textfile::new(dir.path().join("ledger.prom"), DEFAULT_PREFIX).unwrap();
+        file.save(&sample()).unwrap();
+        let before = fs::read(file.path()).unwrap();
+        for bad in ["a\u{85}b", "a\u{202e}b", "a\nb"] {
+            let mut ledger = sample();
+            ledger.record(Pair::new(bad, "t"), Run::stored(1, 0), t(1));
+            assert!(matches!(file.save(&ledger), Err(TextfileError::BadName)), "{bad:?}");
+            assert_eq!(fs::read(file.path()).unwrap(), before, "the file is untouched");
+        }
+    }
+
+    #[test]
+    fn errors_about_a_ledger_say_the_line_and_what_and_never_the_value() {
+        let secret = "SECRET\u{202e}VALUE";
+        for text in [
+            format!("p_backup_last_added_bytes{{source=\"a\",target=\"b\",{secret}=\"x\"}} 1\n"),
+            format!("p_backup_last_outcome{{source=\"a\",target=\"b\",outcome=\"{secret}\"}} 1\n"),
+            format!("p_backup_last_outcome{{source=\"a\",target=\"b\",outcome=\"failed\",cause=\"{secret}\"}} 1\n"),
+            format!("p_backup_last_added_bytes{{source=\"a\",target=\"b\"}} {secret}\n"),
+            format!("p_backup_last_success_timestamp_seconds{{source=\"a\",target=\"b\"}} {secret}\n"),
+        ] {
+            let err = parse(&text, "p_").unwrap_err();
+            assert!(!err.1.contains("SECRET") && !err.1.contains('\u{202e}'), "{err:?}");
         }
     }
 

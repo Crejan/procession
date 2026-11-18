@@ -153,3 +153,21 @@ fn a_pair_judged_by_its_own_limits_through_the_configuration() {
     assert_eq!(json["pairs"][1]["level"], "ok");
     assert_eq!(out.status.code(), Some(2));
 }
+
+#[test]
+fn a_ledger_with_a_control_character_or_bidi_mark_in_a_name_is_refused_with_the_line_and_never_printed() {
+    let dir = tempfile::tempdir().unwrap();
+    for bad in ["a\u{85}b", "a\u{9b}b", "a\u{202e}b", "a\x1bb"] {
+        let path = dir.path().join("ledger.prom");
+        fs::write(&path, format!("preserve_backup_last_added_bytes{{source=\"{bad}\",target=\"t\"}} 1\n")).unwrap();
+        for format in ["text", "json"] {
+            let out = run_at(&path, 0, &["--format", format]);
+            assert_eq!(out.status.code(), Some(3), "{bad:?}");
+            let all = [out.stdout.clone(), out.stderr.clone()].concat();
+            let text = String::from_utf8_lossy(&all);
+            assert!(text.contains("line 1"), "{text}");
+            assert!(!text.chars().any(|c| (c.is_control() && c != '\n') || p_ermit::text::is_bidi_mark(c)), "{text:?}");
+            assert!(!text.contains('b') || !text.contains("a\u{202e}"), "{text:?}");
+        }
+    }
+}

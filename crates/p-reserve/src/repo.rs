@@ -63,11 +63,13 @@ fn parse(verb: Verb, args: &[&str]) -> Result<Options, String> {
                 options.json = match value("text or json")? {
                     "json" => true,
                     "text" => false,
-                    other => return Err(format!("unknown format {other:?}")),
+                    other => return Err(format!("unknown format {}", p_reserve_core::text::shown(other))),
                 }
             }
             "--to" if verb == Verb::Restore => options.to = Some(value("a destination")?.into()),
-            flag if flag.starts_with("--") => return Err(format!("unknown argument {flag:?}")),
+            flag if flag.starts_with("--") => {
+                return Err(format!("unknown argument {}", p_reserve_core::text::shown(flag)));
+            }
             positional => options.positional.push(positional.to_owned()),
         }
     }
@@ -93,21 +95,42 @@ fn rfc3339(time: SystemTime) -> String {
     humantime::format_rfc3339_seconds(SystemTime::UNIX_EPOCH + Duration::from_secs(unix(time))).to_string()
 }
 
+/// What is shown of a string from outside: the escape form, and whether anything was escaped.
+struct Shown {
+    text: String,
+    flagged: bool,
+}
+
+fn show(text: &str) -> Shown {
+    let e = p_reserve_core::text::escape(text);
+    Shown { flagged: e.was_flagged(), text: e.text }
+}
+
+fn show_bytes(bytes: &[u8]) -> Shown {
+    let e = p_reserve_core::text::escape_bytes(bytes);
+    Shown { flagged: e.was_flagged(), text: e.text }
+}
+
+/// A snapshot as written to JSON. `escaped` is true if any of host, paths or tags held a character the rule refuses.
 #[derive(Serialize)]
 struct SnapshotRecord<'a> {
     id: &'a str,
     time: u64,
-    host: &'a str,
-    paths: &'a [String],
-    tags: &'a [String],
+    host: String,
+    paths: Vec<String>,
+    tags: Vec<String>,
+    escaped: bool,
 }
 
+/// A directory entry as written to JSON: `name` is the escape form of the name's bytes, and `escaped` says whether
+/// that differs from the name itself.
 #[derive(Serialize)]
-struct NodeRecord<'a> {
-    name: &'a str,
+struct NodeRecord {
+    name: String,
     kind: NodeKind,
     size: u64,
     mtime: Option<u64>,
+    escaped: bool,
 }
 
 #[derive(Serialize)]
@@ -142,10 +165,7 @@ impl From<EngineError> for Failure {
 }
 
 fn plain(detail: impl Into<String>) -> Failure {
-    Failure {
-        outcome: Outcome::NotRun,
-        detail: p_reserve_core::text::for_display(&detail.into(), p_reserve_core::text::MAX_DETAIL),
-    }
+    Failure { outcome: Outcome::NotRun, detail: p_reserve_core::text::for_log(&detail.into()) }
 }
 
 /// Whether this build can read a repository at all.
@@ -189,10 +209,9 @@ pub fn run(verb: Verb, args: &[&str], out: &mut impl Write, err: &mut impl Write
                 #[derive(Serialize)]
                 struct Body {
                     outcome: &'static str,
-                    /// The engine's own words, for a log; not for display.
-                    detail: String,
                 }
-                let _ = emit(out, "error", Body { outcome: failure.outcome.name(), detail: failure.detail });
+                // the engine's own words are not forwarded to a machine reader: the outcome is the code
+                let _ = emit(out, "error", Body { outcome: failure.outcome.name() });
             } else {
                 let _ = writeln!(err, "preserve {}: {}: {}", verb.name(), failure.outcome.name(), failure.detail);
             }
@@ -219,13 +238,14 @@ fn execute(verb: Verb, options: &Options, out: &mut impl Write) -> Result<(), Fa
                 snapshots
                     .iter()
                     .try_for_each(|s| {
+                        let paths: Vec<String> = s.paths.iter().map(|p| show(p).text).collect();
                         writeln!(
                             out,
                             "{}  {}  {}  {}",
                             &s.id[..s.id.len().min(8)],
                             rfc3339(s.time),
-                            s.host,
-                            s.paths.join(",")
+                            show(&s.host).text,
+                            paths.join(",")
                         )
                     })
                     .map_err(io)
@@ -238,12 +258,18 @@ fn execute(verb: Verb, options: &Options, out: &mut impl Write) -> Result<(), Fa
                 #[derive(Serialize)]
                 struct Body<'a> {
                     target: &'a str,
-                    snapshot: &'a str,
-                    path: &'a str,
-                    entries: Vec<NodeRecord<'a>>,
+                    snapshot: String,
+                    path: String,
+                    entries: Vec<NodeRecord>,
                 }
                 let entries = nodes.iter().map(node_record).collect();
-                emit(out, "ls", Body { target: &target, snapshot: &options.positional[1], path, entries }).map_err(io)
+                let body = Body {
+                    target: &target,
+                    snapshot: show(&options.positional[1]).text,
+                    path: show(path).text,
+                    entries,
+                };
+                emit(out, "ls", body).map_err(io)
             } else {
                 nodes
                     .iter()
@@ -253,7 +279,7 @@ fn execute(verb: Verb, options: &Options, out: &mut impl Write) -> Result<(), Fa
                             NodeKind::Symlink => "@",
                             _ => "",
                         };
-                        writeln!(out, "{:>12}  {}{mark}", n.size, n.name)
+                        writeln!(out, "{:>12}  {}{mark}", n.size, show_bytes(&n.name).text)
                     })
                     .map_err(io)
             }
@@ -270,20 +296,43 @@ fn execute(verb: Verb, options: &Options, out: &mut impl Write) -> Result<(), Fa
                     #[serde(flatten)]
                     summary: RestoreSummary,
                 }
-                emit(out, "restore", Body { target: &target, destination: destination.display().to_string(), summary })
+                emit(out, "restore", Body { target: &target, destination: shown_path(destination), summary })
                     .map_err(io)
             } else {
-                writeln!(out, "restored {} files, {} bytes, to {}", summary.files, summary.bytes, destination.display())
-                    .map_err(io)
+                writeln!(
+                    out,
+                    "restored {} files, {} bytes, to {}",
+                    summary.files,
+                    summary.bytes,
+                    shown_path(destination)
+                )
+                .map_err(io)
             }
         }
     }
 }
 
-fn snapshot_record(s: &Snapshot) -> SnapshotRecord<'_> {
-    SnapshotRecord { id: &s.id, time: unix(s.time), host: &s.host, paths: &s.paths, tags: &s.tags }
+fn shown_path(path: &Path) -> String {
+    use std::os::unix::ffi::OsStrExt;
+    show_bytes(path.as_os_str().as_bytes()).text
 }
 
-fn node_record(n: &Node) -> NodeRecord<'_> {
-    NodeRecord { name: &n.name, kind: n.kind, size: n.size, mtime: n.mtime.map(unix) }
+fn snapshot_record(s: &Snapshot) -> SnapshotRecord<'_> {
+    let host = show(&s.host);
+    let paths: Vec<Shown> = s.paths.iter().map(|p| show(p)).collect();
+    let tags: Vec<Shown> = s.tags.iter().map(|t| show(t)).collect();
+    let escaped = host.flagged || paths.iter().chain(&tags).any(|x| x.flagged);
+    SnapshotRecord {
+        id: &s.id,
+        time: unix(s.time),
+        host: host.text,
+        paths: paths.into_iter().map(|x| x.text).collect(),
+        tags: tags.into_iter().map(|x| x.text).collect(),
+        escaped,
+    }
+}
+
+fn node_record(n: &Node) -> NodeRecord {
+    let name = show_bytes(&n.name);
+    NodeRecord { name: name.text, kind: n.kind, size: n.size, mtime: n.mtime.map(unix), escaped: name.flagged }
 }

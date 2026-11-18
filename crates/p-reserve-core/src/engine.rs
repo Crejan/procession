@@ -40,7 +40,8 @@ pub enum NodeKind {
 /// One entry of a directory in a snapshot.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Node {
-    pub name: String,
+    /// The name as the bytes the source file system held. Show it through `text::escape_bytes`, never lossily.
+    pub name: Vec<u8>,
     pub kind: NodeKind,
     pub size: u64,
     pub mtime: Option<SystemTime>,

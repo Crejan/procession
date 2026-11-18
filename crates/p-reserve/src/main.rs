@@ -98,7 +98,7 @@ fn main() -> ExitCode {
             ExitCode::from(health::EXIT_USAGE)
         }
         [other, ..] => {
-            eprintln!("preserve: unknown verb '{other}'\n\n{}", usage());
+            eprintln!("preserve: unknown verb '{}'\n\n{}", p_reserve_core::text::shown(other), usage());
             ExitCode::from(health::EXIT_USAGE)
         }
     }

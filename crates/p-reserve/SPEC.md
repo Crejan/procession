@@ -190,6 +190,20 @@ repository address, no credential, no path from inside a home directory.
 
 ### Reading a repository
 
+Strings from outside (a file name in a snapshot, a host, a path, a tag) are
+shown through `p_ermit::text`, never raw: a control character (C1 included), a
+bidirectional mark or a byte that is not UTF-8 is written as visible literal
+text (`\u{202e}`, `\x{ff}`), reversibly, and a record that holds one says
+`"escaped": true`. A name is taken as the bytes the file system held
+(`escape_bytes`), so a file named with a newline or an ESC is listed as what it
+is, never refused. `restore` writes the real name; only what is shown is
+escaped. The engine's own words (rustic quotes paths and repository data) are
+never in the JSON: an `error` record has the outcome and nothing else; the text
+goes to stderr, escaped and cut at 512 characters. Ledger and marker files are
+read with the character rule (a name with a control character or bidirectional
+mark is refused, with the line and never the value) and written only if every
+name passes it.
+
 The engine is a cargo feature, `engine-rustic` of `p-reserve` (and of
 `p-reserve-core`), off by default: `rustic_core` and `rustic_backend` are about
 500 crates and minutes of build. A build without it still has everything else
