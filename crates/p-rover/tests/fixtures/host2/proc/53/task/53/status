@@ -1,0 +1,7 @@
+Name:	ls
+Tgid:	53
+Pid:	53
+Uid:	1000	1000	1000	1000
+Gid:	1000	1000	1000	1000
+Groups:	1000
+Cpus_allowed_list:	0-3

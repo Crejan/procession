@@ -6,7 +6,7 @@ use std::process::ExitCode;
 use std::time::Duration;
 
 use clap::{Args, Parser, Subcommand, ValueEnum};
-use p_rover::observe::{clock, cmdline, irq, nic, procs, sched, serial};
+use p_rover::observe::{clock, cmdline, hung, irq, lastboot, nic, procs, sched, serial};
 use p_rover::{Config, Env, Error, Report, render};
 use p_roc::{CpuSet, Root};
 
@@ -92,6 +92,27 @@ enum Cmd {
     Serial,
     /// Who disciplines CLOCK_REALTIME: chrony, ptp4l, phc2sys, PTP clocks (cost: light).
     Clock,
+    /// Freeze post-mortem: the previous boot's kernel log, filtered (cost: light).
+    Lastboot {
+        /// Boot offset: -1 the previous boot, 0 the current one.
+        #[arg(long, default_value = "-1", allow_hyphen_values = true)]
+        boot: String,
+    },
+    /// Live hang triage: tasks in D state across two samples, with wait class and kernel stack (cost: light).
+    Hung {
+        /// Also list tasks in S whose wait is NFS or RPC.
+        #[arg(long)]
+        all: bool,
+        /// Time between the two samples, 1s to 60s.
+        #[arg(long, default_value = "2s", value_parser = humantime::parse_duration)]
+        duration: Duration,
+        /// Kernel stack lines per task.
+        #[arg(long, default_value_t = hung::DEFAULT_STACK_LINES)]
+        stack_lines: usize,
+        /// At most this many tasks.
+        #[arg(long, default_value_t = hung::DEFAULT_MAX)]
+        max: usize,
+    },
     /// Live kernel command line against the declared one, kernel flavour, sysctls (cost: light).
     Cmdline,
     /// IRQ affinity, /proc/interrupts delta, timer ticks (cost: light).
@@ -130,6 +151,10 @@ fn run(cli: &Cli) -> Result<Report, Error> {
         }
         Cmd::Serial => serial::run(&env),
         Cmd::Clock => clock::run(&env),
+        Cmd::Lastboot { boot } => lastboot::run(&env, &lastboot::Args { boot: boot.clone() }),
+        Cmd::Hung { all, duration, stack_lines, max } => {
+            hung::run(&env, &hung::Args { all: *all, duration: *duration, stack_lines: *stack_lines, max: *max })
+        }
         Cmd::Cmdline => cmdline::run(&env),
         Cmd::Irq { duration, top } => irq::run(&env, &irq::Args { duration: *duration, top: *top }),
     }

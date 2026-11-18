@@ -2,7 +2,9 @@
 
 pub mod clock;
 pub mod cmdline;
+pub mod hung;
 pub mod irq;
+pub mod lastboot;
 pub mod nic;
 pub mod procs;
 pub mod sched;

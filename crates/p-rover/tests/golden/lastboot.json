@@ -1,0 +1,86 @@
+{
+  "schema_version": 1,
+  "subcommand": "lastboot",
+  "host": "testhost",
+  "started_at": "2026-11-06T21:20:00Z",
+  "mode": "observe",
+  "cost": "light",
+  "unreadable": [],
+  "records": [
+    {
+      "type": "boots",
+      "known": 2,
+      "last": [
+        "-1 aaaa Tue 2026-11-03 08:00:00 UTC—Wed 2026-11-04 09:10:00 UTC",
+        " 0 bbbb Wed 2026-11-04 09:12:00 UTC—Wed 2026-11-04 12:00:00 UTC"
+      ]
+    },
+    {
+      "type": "detectors",
+      "values": {
+        "hung_task_timeout_secs": "0",
+        "nmi_watchdog": "1",
+        "panic": null,
+        "soft_watchdog": "0",
+        "watchdog": "1"
+      },
+      "nosoftlockup_on_cmdline": false,
+      "nmi_watchdog_cmdline": null
+    },
+    {
+      "type": "kernel_log",
+      "source": "journalctl -b -1 -k --grep",
+      "lines": [
+        "2026-11-04T09:05:00+0000 h kernel: rcu: INFO: rcu_sched self-detected stall on CPU",
+        "2026-11-04T09:05:01+0000 h kernel: watchdog: Enabled. Permanently consumes one hw-PMU counter."
+      ]
+    },
+    {
+      "type": "signature",
+      "categories": {
+        "stall": 1
+      }
+    },
+    {
+      "type": "boot_tail",
+      "source": "journalctl -b -1 -n 40",
+      "lines": [
+        "2026-11-04T09:09:59+0000 h kernel: eth0: link up"
+      ],
+      "ends_in_orderly_shutdown": false
+    }
+  ],
+  "restored": [],
+  "findings": [
+    {
+      "id": "freeze-signature",
+      "severity": "crit",
+      "subject": {
+        "kind": "host"
+      },
+      "evidence": [
+        {
+          "name": "stall",
+          "value": 1
+        }
+      ],
+      "recommendation": "the previous boot's kernel log holds stall, hung-task or watchdog lines; read them in kernel_log, newest last",
+      "changes": []
+    },
+    {
+      "id": "unclean-shutdown",
+      "severity": "warn",
+      "subject": {
+        "kind": "host"
+      },
+      "evidence": [
+        {
+          "name": "boot",
+          "value": "-1"
+        }
+      ],
+      "recommendation": "the previous boot's log does not end in an orderly shutdown; with the watchdogs tuned off a hard freeze can leave no stall report, so a missing signature is not proof of a clean stop",
+      "changes": []
+    }
+  ]
+}
