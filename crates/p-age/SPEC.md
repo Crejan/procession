@@ -110,6 +110,24 @@ a register that cannot be written holds for them: a restricting verb prints
 "blocked and stored" or "blocked, NOT stored: <why>" and exits non-zero in the
 second case; unblocking is refused while the register cannot be written.
 `page delegations` (a list) is not built.
+
+The verbs' exit codes have one meaning each; each verb's `--help` and usage
+print this table:
+
+| Code | Meaning |
+|---|---|
+| 0 | done (and stored, where something is stored) |
+| 1 | refused (an unknown person, key or delegation; unblocking while the register cannot be written) |
+| 2 | usage |
+| 3 | no broker answers |
+| 4 | in force but NOT stored (block, withdraw) |
+| 5 | the broker is degraded (`status` only; nothing else returns it) |
+
+The socket is `admin.sock` in the state directory (0600 set after `bind`); a
+peer is served only if `p_act::peer` read its credentials and its user is the
+broker's own or root (`Policy::OwnUserOrRoot`: the broker runs as the owner of
+its state directory, so no list of users is needed). A peer whose credentials
+cannot be read is dropped, told nothing.
 Blocking a key means: no request is passed to a pledge that signed in with
 it, and no approval by it is given a clearance.
 
@@ -162,6 +180,11 @@ does not cost the person a second dialog. Never on disk, never past the
 deadline. An approval is not a secret and is of use only to the service
 whose request it signs.
 
+The register's `v`: `blocked_keys` was added with `v` still 1 and "a missing
+member is empty", **this one time**, because no register exists outside tests
+yet. From now on a member that is added is a new `v`, and a reader refuses a
+`v` it does not know (it does).
+
 A delegation is known in the register by the SHA-256 fingerprint of the
 agent's public key (`doc/approval-formats.md`, section 3.1).
 
@@ -171,6 +194,77 @@ agent's public key (`doc/approval-formats.md`, section 3.1).
    with persons and hosts from a file. Stage 2 of `doc/approvals.md`.
 2. `page load` from the site project, checks 3 and 4, blocking. Stage 3.
 3. Renewed certificates and group names to the pledges.
+
+## What `page load` reads
+
+The target form of the broker's site file, written once. It is the
+`approval_view` of `doc/fundament-approvals-note.md` (its point 4), which is
+the site model's view and wins on shape; the broker's file follows it when
+`page load` is built (stage 3). One JSON object:
+
+```json
+{"v":1,
+ "persons":{"alice":{"enabled":true,"keys":{
+    "confirmed":{"key":"ecdsa-sha2-nistp256 AAAA...","verified_on":"2026-11-10"},
+    "automatic":{"key":"ecdsa-sha2-nistp256 AAAA..."},
+    "delegation":{"key":"ecdsa-sha2-nistp256 AAAA..."},
+    "connection":{"key":"ecdsa-sha2-nistp256 AAAA..."}}},
+  "bob":{"enabled":false}},
+ "services":{"probe":{"a.example":["rt-operators"]}},
+ "hosts":{"a.example":"ssh-ed25519 AAAA..."},
+ "groups":{"rt-operators":{"description":"Operators of the realtime hosts"}},
+ "members":{"rt-operators":["alice"]},
+ "ca":"ssh-ed25519 AAAA...",
+ "settings":{"waiting_per_agent":5}}
+```
+
+| Member | Form | Meaning |
+|---|---|---|
+| `v` | number | `1`. A file with a `v` the broker does not know is refused, as the register is |
+| `persons` | login -> `{enabled, keys?}` | every person of the site. `keys` is `{confirmed, automatic, delegation, connection}`, each `{key, verified_on?}`: all four or the file is refused, never on a person who is not enabled, four different keys, none another person's or a host's, each Ed25519 or ECDSA P-256. A person without `keys` can neither sign in nor approve nor have a delegation accepted |
+| `services` | type -> host -> groups | which groups' agents may use the service of that type on that host. The type's name is the service's name in a call (`doc/approval-formats.md`, section 3) |
+| `hosts` | name -> public host key | the hosts that run such a service |
+| `groups` | name -> `{description?}` | the groups some service names; what a pledge is shown |
+| `members` | group -> logins | who is in which group. Present on a local site; absent on a directory site, where the sync job beside the broker writes it in this same form |
+| `ca` | public key | the site CA's public key |
+| `settings` | object | the site's settings for the broker |
+
+An unknown member is refused, at every level.
+
+**`members`, absent and empty.** Absent means "the directory's: wait for
+the sync job". Empty means nobody is in any group. A broker that has neither
+a `members` part nor a result of the sync job answers R10 with no.
+
+**Certificates are not part of this view.** The certificates the broker
+carries to a pledge are products of the converge's signing step: a separate
+input beside the view, with its own check (signed by the site CA; the name;
+the validity). So a view can be replaced without touching the certificates,
+and the certificates without touching the view.
+
+**The file read today is the stage-2 stand-in.** Where it differs from the
+form above (`proposals/REPORT.md`, "Where the fundament note ... and my site
+file differ"):
+
+1. `persons` is a list of `{name, enabled, keys, ...}`, not a mapping by
+   login.
+2. `hosts` is a list of `{name, key}`, not a mapping by name.
+3. Groups are a `groups` list inside each person, which the broker only
+   carries to pledge; there is no `groups` with descriptions and no
+   `members`, which R10 (check 4, not built) needs.
+4. There is no `services`; check 4 is stage 3.
+5. There is no `ca` and no `settings`; the one setting,
+   `waiting_per_agent`, is in the configuration file.
+6. It has `certificates` per person, which the form above does not: see
+   the paragraph on certificates.
+7. A person who is not enabled: the same in both. The row stays, without
+   keys; keys on such a person are refused.
+8. There is no `v`.
+9. The four keys have the same shape. The site model's loader also refuses
+   a key that is a login key or an account's key; the broker refuses a
+   partial set, equal keys within a person, another person's key and a
+   host's key, and does not hold the rest.
+10. An enabled person without `keys` is accepted in both, and can then
+    neither sign in nor have delegations.
 
 ## Open, each with a proposal
 

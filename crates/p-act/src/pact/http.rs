@@ -279,8 +279,7 @@ impl Transport for HttpTransport {
         if cancel.is_cancelled() {
             return Err(lost("cancelled"));
         }
-        let body = serde_json::to_vec(request)
-            .map_err(|e| TransportError::NotSent(format!("cannot encode the request: {e}")))?;
+        let body = super::canon::bytes(request);
         let id = request.get("id").cloned().unwrap_or(Value::Null);
         let mut response = agent
             .post(&service.url)
@@ -376,7 +375,8 @@ mod tests {
         assert_eq!(read_sse(Cursor::new(stream), &id()).unwrap()["id"], 7);
         // CRLF, no space after the colon, an event split over several data lines, the last event without its blank line.
         assert!(read_sse(Cursor::new(format!("data:{a}\r\n\r\n")), &id()).is_ok());
-        let (first, second) = a.split_at(10);
+        // Split inside the string `"2.0"`, wherever the members of the object are: a newline there is not JSON.
+        let (first, second) = a.split_at(a.find("2.0").unwrap() + 1);
         assert!(
             read_sse(Cursor::new(format!("data: {first}\ndata: {second}\n\n")), &id()).is_err(),
             "joined with a newline, which JSON does not allow inside a token"

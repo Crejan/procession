@@ -17,9 +17,10 @@ use crate::hash::{Document, DocumentHash};
 use crate::limits::{CONNECTION_SECRET_BYTES, MAX_CONNECTION_DOCUMENT_BYTES, MAX_STANDING_BYTES};
 use crate::object::{Object, check_bytes};
 use crate::sign::{
-    Agent, Fingerprint, PublicKey, SignError, Signer, agent_certificate, certificate_line_blob, looks_armoured,
-    sign_broker, sign_connection, signature_to_base64, verify_broker, verify_connection,
+    Agent, Fingerprint, PublicKey, SignError, agent_certificate, certificate_line_blob, looks_armoured, sign_broker,
+    sign_connection, signature_to_base64, verify_broker, verify_connection,
 };
+use crate::sshsig::SshsigSigner;
 use crate::text;
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD;
@@ -27,6 +28,29 @@ use serde::Serialize;
 
 /// 32 random bytes: the sign-in's nonce, and the TLS exporter value.
 pub type Secret32 = [u8; CONNECTION_SECRET_BYTES];
+
+// What the two ends of the broker's TLS connection must agree on (`approval-connections.md` sections 5 and 8). `p-act`
+// has no TLS dependency; both ends use these and say them to their TLS library.
+
+/// The label of the TLS exporter whose value the sign-in carries (RFC 5705): `tls` of the connection document.
+pub const TLS_EXPORTER_LABEL: &[u8] = crate::limits::TLS_EXPORTER_LABEL.as_bytes();
+/// The exporter's context: none (`None`, not an empty context: RFC 5705 tells them apart).
+pub const TLS_EXPORTER_CONTEXT: Option<&[u8]> = None;
+/// The exporter's output length: 32 bytes, the length of `tls` and of the nonce.
+pub const TLS_EXPORTER_LENGTH: usize = CONNECTION_SECRET_BYTES;
+/// The only protocol version of both broker transports: TLS 1.3 (no 1.2, no fallback). This is its name as RFC 8446
+/// and OpenSSL spell it. `p-act` has no TLS library, so it holds no typed value: each end passes its own library's
+/// (`rustls::version::TLS13`), and this name is for logs and tests; [`is_tls_1_3`] compares a name from a library
+/// (rustls's `Debug` spells it `TLSv1_3`) so that nobody normalises it by hand.
+pub const TLS_PROTOCOL_VERSION: &str = "TLSv1.3";
+
+/// Whether `name` is TLS 1.3 as a library spells it: `TLSv1.3` or `TLSv1_3`.
+#[must_use]
+pub fn is_tls_1_3(name: &str) -> bool {
+    matches!(name, "TLSv1.3" | "TLSv1_3")
+}
+/// The crypto provider of both ends: `ring` (not `aws-lc-rs`: the C and CMake toolchain it needs).
+pub const TLS_CRYPTO_PROVIDER: &str = "ring";
 
 fn decode32(member: &'static str, s: &str) -> Result<Secret32, ParseError> {
     let bytes = STANDARD.decode(s).map_err(|_| ParseError::MalformedBase64(member))?;
@@ -107,7 +131,7 @@ impl ConnectionDocument {
     }
 
     /// Sign it with the person's connection key (a plain key).
-    pub fn sign(&self, signer: &Signer) -> Result<String, SignError> {
+    pub fn sign(&self, signer: &(impl SshsigSigner + ?Sized)) -> Result<String, SignError> {
         sign_connection(signer, &self.bytes)
     }
 
@@ -289,7 +313,7 @@ impl Standing {
     }
 
     /// Sign it with the broker's key, certified by the site CA as `broker`.
-    pub fn sign(&self, signer: &Signer) -> Result<String, SignError> {
+    pub fn sign(&self, signer: &(impl SshsigSigner + ?Sized)) -> Result<String, SignError> {
         sign_broker(signer, &self.bytes)
     }
 
@@ -1347,5 +1371,21 @@ mod tests {
         assert_eq!(Standing::parse_unverified(with_cert), Err(ParseError::ControlCharacter("certificates".into())));
         let key = standing("", "jan").replace(r#""blocked_keys":[]"#, r#""blocked_keys":["SHA256:\u202e"]"#);
         assert_eq!(Standing::parse_unverified(key), Err(ParseError::BidiMark("blocked_keys".into())));
+    }
+
+    #[test]
+    fn the_tls_agreements_are_the_documents() {
+        // Section 5: label `EXPORTER-procession-connection-v1`, no context, 32 bytes; sections 1 and 8: TLS 1.3 only, `ring`.
+        assert_eq!(TLS_EXPORTER_LABEL, b"EXPORTER-procession-connection-v1");
+        assert_eq!(TLS_EXPORTER_CONTEXT, None);
+        assert_eq!(TLS_EXPORTER_LENGTH, 32);
+        assert_eq!(TLS_EXPORTER_LENGTH, std::mem::size_of::<Secret32>());
+        assert_eq!(TLS_PROTOCOL_VERSION, "TLSv1.3");
+        assert!(is_tls_1_3(TLS_PROTOCOL_VERSION) && is_tls_1_3("TLSv1_3"));
+        for other in ["TLSv1.2", "TLSv1_2", "tlsv1.3", "TLSv1.3 ", "", "TLS1.3", "SSLv3"] {
+            assert!(!is_tls_1_3(other), "{other:?}");
+        }
+        assert_eq!(TLS_CRYPTO_PROVIDER, "ring");
+        assert_eq!(TLS_EXPORTER_LABEL, crate::limits::TLS_EXPORTER_LABEL.as_bytes());
     }
 }

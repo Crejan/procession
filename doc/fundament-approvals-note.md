@@ -338,7 +338,7 @@ derivation, `approval_view(site)`, pure and byte-stable;
 
 | Part | From | Notes |
 |---|---|---|
-| `persons`: login -> `{enabled, keys}` | `persons.yml` | every row; the four keys only while enabled |
+| `persons`: login -> `{enabled, keys?}` | `persons.yml` | every row; `keys` is the row's `approval_keys` as point 1 has it (the four purposes, each `{key, verified_on?}`), present only while the person is enabled and the row has the field |
 | `services`: type -> host -> groups | bindings of types flagged `agents` | point 5; keyed by type and host, since that is the name a call carries |
 | `hosts`: name -> host key | the providers of those services | `public/host/<h>/ssh-host-key.pub`, which the loader reads already for every converged host (`Site.host_key_public`, `loader.py`) |
 | `groups`: name -> `{description}` | `identity.yml` `groups` | the groups some binding names; for point 6 |
@@ -504,7 +504,8 @@ would then have renewed only at a converge.
 Through the broker, which carries and cannot alter what the site CA signed:
 
 - **Renewed certificates.** Public data, in no slot; from the converge to
-  the broker's host as files.
+  the broker's host as files. They are delivered beside the view and are
+  not part of it: `approval_view` holds no certificate.
 - **The list of hosts' keys**, signed by the site CA's key itself in the
   namespace `hosts-v1@procession` (point 3). What the model gives the issuer
   for it is `approval_hosts(site)`: for each provider of a type flagged

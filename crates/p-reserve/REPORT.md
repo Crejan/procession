@@ -52,3 +52,21 @@ For the designer / owner:
 - `p_act::settings` reads JSON only and checks owner and mode; the workspace convention is TOML config, so
   I did not use it for `/etc/p-reserve.toml` (it is not a security-bearing file yet) nor for the ledger. I
   will use `p_act::exchange::LineBuffer`/`LineReader` for the socket (unit 3) if its limits suit.
+
+## Unit 3: the daemon protocol proposal (done; for the designer, nothing built)
+`proposals/socket-protocol.md`. Merged `integration` again first (brings stage2-mac.md).
+- Follows both sets of decisions: 0700 directory, peer read or dropped, one JSON object per line with
+  `schema_version`, ids, progress events; **jobs outlive connections** (backup, prune, check, verify, reprovision, restore:
+  explicit `cancel {job}` only, `jobs` and `attach` for a later connection); browsing, `read` previews and
+  subscriptions end with their connection. A per-operation table is in section 4.
+- Section 6 answers the ten requirements of section 8.5 of stage2-mac.md one by one: met 1 (with the exclude/prune-marker/schedule
+  nouns named, to be specified with their units), 2, 3, 4, 6, 7, 8, 9, 10; 5 is not applicable now (no question in v1).
+- Decisions I made that the designer should look at: only the daemon's own uid is served (root and others dropped, because `restore` writes a
+  client-named path); framing limits 64 KiB requests, 1 MiB answers, uses `p_act::exchange::LineBuffer::with_limit`
+  (not the p-act message types); paged `ls`, pulled `read` (no streaming); `cancelled` is a job result, not an `Outcome`.
+  Six open questions are at the end of the proposal.
+SPEC changes (same commit): the desktop-app section marks the web-view recommendation superseded for macOS and states the
+two conditions for the SwiftUI front end (browser, exclude store, prune marker move behind the protocol first; section 8.5);
+Architecture gains the "jobs belong to the daemon" bullet pointing to the proposal. Not changed: Open decisions (it already
+says provisionally SwiftUI).
+Verified: nothing to run (a document). `cargo test --workspace --offline` and clippy were not rerun after this unit; no code changed.

@@ -43,10 +43,12 @@ pub mod pact;
 pub mod peer;
 #[cfg(feature = "formats")]
 pub mod rating;
-#[cfg(all(feature = "formats", unix))]
+#[cfg(unix)]
 pub mod settings;
 #[cfg(feature = "formats")]
 pub mod sign;
+#[cfg(feature = "formats")]
+pub mod sshsig;
 
 #[cfg(feature = "formats")]
 pub use call::{Call, CallContent, CallId, NotShowable, ServiceId};

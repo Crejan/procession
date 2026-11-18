@@ -9,9 +9,12 @@ use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD;
 use common::*;
 use p_act::Document;
+use p_act::broker::{
+    TLS_CRYPTO_PROVIDER, TLS_EXPORTER_CONTEXT, TLS_EXPORTER_LABEL, TLS_EXPORTER_LENGTH, TLS_PROTOCOL_VERSION,
+};
 use p_act::exchange::{ClearancePolicy, Message};
 use p_age::net::{Lines, serve_tls};
-use p_age::tls::{EXPORTER_LABEL, client_config, server_config};
+use p_age::tls::{client_config, server_config};
 use rcgen::{BasicConstraints, CertificateParams, IsCa, Issuer, KeyPair};
 use rustls_pki_types::ServerName;
 use tokio::io::{AsyncWriteExt, duplex};
@@ -46,9 +49,13 @@ async fn a_pledge_signs_in_over_tls_with_the_binding_both_ends_export() {
     tokio::spawn(serve_tls(server_end, acceptor(&p), Arc::clone(&w.broker)));
     let connector = TlsConnector::from(client_config(p.root_pem.as_bytes()).unwrap());
     let tls = connector.connect(ServerName::try_from("broker.test").unwrap(), client_end).await.unwrap();
-    assert_eq!(tls.get_ref().1.protocol_version(), Some(rustls::ProtocolVersion::TLSv1_3));
-    let mut binding = [0u8; 32];
-    tls.get_ref().1.export_keying_material(&mut binding, EXPORTER_LABEL, None).unwrap();
+    // what p-act says both ends agree on: the protocol version, and the crypto provider this crate is built with
+    // (rustls spells the version `TLSv1_3`, the constant `TLSv1.3`)
+    let negotiated = tls.get_ref().1.protocol_version().and_then(|v| v.as_str()).map(|s| s.replace('_', "."));
+    assert_eq!(negotiated.as_deref(), Some(TLS_PROTOCOL_VERSION));
+    assert_eq!(TLS_CRYPTO_PROVIDER, "ring", "tls.rs builds its configurations on rustls' ring provider");
+    let mut binding = [0u8; TLS_EXPORTER_LENGTH];
+    tls.get_ref().1.export_keying_material(&mut binding, TLS_EXPORTER_LABEL, TLS_EXPORTER_CONTEXT).unwrap();
     let (rd, wr) = tokio::io::split(tls);
     let mut lines = Lines::new(rd, std::time::Duration::from_secs(5));
     let mut wr = wr;

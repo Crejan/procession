@@ -8,6 +8,7 @@
 //! module that is added to it later.
 
 pub mod bundle;
+pub mod canon;
 pub mod catalogue;
 pub mod cli;
 pub mod compose;

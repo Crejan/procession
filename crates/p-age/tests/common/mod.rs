@@ -145,18 +145,22 @@ impl World {
         let (jan_delegation, eva_delegation) = (keys.key("jan-delegation"), keys.key("eva-delegation"));
         let jan_confirmed = keys.certified("jan-confirmed", &site_ca, "jan:confirmed", VALID, &[]);
         let agent = keys.certified("agent", &jan_delegation, "jan", "-5m:+8h", &["extension:groups@procession=ops"]);
-        let person = |name: &str, conn: &Path, deleg: &Path, approval: Option<&Path>| {
-            let confirmed = approval.map_or(String::new(), |k| format!(r#","confirmed_key":"{}""#, keys.public(k)));
+        let (jan_automatic, eva_confirmed, eva_automatic) =
+            (keys.key("jan-automatic"), keys.key("eva-confirmed"), keys.key("eva-automatic"));
+        let row = |k: &Path| format!(r#"{{"key":"{}","verified_on":"2026-11-10"}}"#, keys.public(k));
+        let person = |name: &str, conn: &Path, deleg: &Path, confirmed: &Path, automatic: &Path| {
             format!(
-                r#"{{"name":"{name}","enabled":true,"connection_key":"{}","delegation_key":"{}","groups":["ops"]{confirmed}}}"#,
-                keys.public(conn),
-                keys.public(deleg)
+                r#"{{"name":"{name}","enabled":true,"groups":["ops"],"keys":{{"confirmed":{},"automatic":{},"delegation":{},"connection":{}}}}}"#,
+                row(confirmed),
+                row(automatic),
+                row(deleg),
+                row(conn)
             )
         };
         let json = format!(
-            r#"{{"persons":[{},{}],"hosts":[{{"name":"a.example","key":"{}"}}]}}"#,
-            person("jan", &jan_connection, &jan_delegation, Some(&jan_confirmed)),
-            person("eva", &eva_connection, &eva_delegation, None),
+            r#"{{"v":1,"persons":[{},{}],"hosts":[{{"name":"a.example","key":"{}"}}]}}"#,
+            person("jan", &jan_connection, &jan_delegation, &jan_confirmed, &jan_automatic),
+            person("eva", &eva_connection, &eva_delegation, &eva_confirmed, &eva_automatic),
             keys.public(&host_key)
         );
         let site = Arc::new(Site::from_json(&json).unwrap());
@@ -420,8 +424,8 @@ fn rand_suffix() -> u64 {
 
 /// Bind the administrator's socket in the world's state directory and serve it; the socket's path.
 pub fn serve_admin(w: &World) -> PathBuf {
-    let (listener, uid) = p_age::admin::bind(w.keys.dir.path()).unwrap();
-    tokio::spawn(p_age::admin::serve(listener, Arc::clone(&w.broker), uid));
+    let listener = p_age::admin::bind(w.keys.dir.path()).unwrap();
+    tokio::spawn(p_age::admin::serve(listener, Arc::clone(&w.broker)));
     p_age::admin::socket_path(w.keys.dir.path())
 }
 

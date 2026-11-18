@@ -470,7 +470,7 @@ async fn a_service_gets_one_request_per_connection_and_no_answer_type_from_it() 
 
 #[tokio::test]
 async fn the_limit_per_agent_is_the_setting() {
-    let w = World::with(Settings { max_waiting_per_agent: 2 }, Timeouts::default());
+    let w = World::with(Settings { waiting_per_agent: 2 }, Timeouts::default());
     let mut pledge = open_pledge(&w).await;
     pledge.connect_as("jan", &w.jan_connection).await;
     register(&w, &mut pledge).await;

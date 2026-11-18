@@ -284,13 +284,13 @@ request in front of a person that is not from that person's agent.
 | The sandbox leaks: the agent gets its person's account | G1 | Nothing in this design (trusted, above) | Everything the person can do on that host. R1 does not apply any more |
 | A person approves the wrong thing, or asks for more than they may | G3 | R10 at the broker. R9: the dialog shows the request as it is | An entitled person approving a wrong but permitted action. A second person's approval is later |
 | A stranger sends calls, requests or approvals | G4, G6 | An approval verifies only with a key the site CA certified for that person. R8 keeps requests away. A request verifies only with a service key that a known host certified. The broker is recognised by its certificate | Nothing known |
-| A person's machine is stolen | G4 | A confirmed approval and a new delegation need a presence check. An administrator blocks its keys at the broker; no clearance, no action | Until it is blocked, and if the thief has the unlocked session: automatic approvals for agents already running |
+| A person's machine is stolen | G4 | A confirmed approval and a new delegation need a presence check. An administrator blocks its keys at the broker; no clearance, no action | Until it is blocked: automatic approvals for agents already running. On a Mac the automatic key is usable after the first unlock since boot, so a locked screen does not stop them; what bounds them is the delegation's end and the administrator's block. |
 | A person signs as another | G5 | Each key is certified for one person by the site CA; a service checks that the approval is by the person the request names; an administrator, not the person, enters keys | An administrator entering a wrong key (trusted) |
 | Someone floods a person with dialogs | G6 | R8, checked by pledge itself; limits and muting (section 7), enforced by pledge; one dialog at a time | A person's own agent, up to those limits |
 | The broker is taken over | G3 | R1, R6, R8 are checked by pledge and by services without it | R10 is gone: a person can have carried out what the site would not let them. Withdrawals by an administrator and blocks are gone. It can refuse everything, and sees who asks for what |
 | The broker is taken over and a person's machine is stolen | G4 | The presence check for confirmed approvals | Automatic approvals, until that person's certificates run out |
 | Someone on the network | all | TLS; everything that matters is signed; calls and requests are single-use and end | Delay and loss, which end in "no" |
-| Malware in the person's session | G4 | Presence checks; pledge checks which program connects to its sockets | Automatic approvals. A dialog imitated to obtain a touch |
+| Malware in the person's session | G4 | Presence checks; pledge checks which program connects to its sockets | Automatic approvals. A dialog imitated to obtain a touch. With keys kept as blobs in files (stage 2 on a Mac) such a program can use the automatic key and the connection key itself, without pledge, and can raise a Touch ID prompt for the confirmed key under its own name (`crates/p-ledge/SPEC.md`, section 11) |
 | A service lies about what it will do, or rates dishonestly | G1, G3 | Nothing (trusted) | Stated so that nobody assumes otherwise |
 
 ## 5. By what means
@@ -563,7 +563,12 @@ specifications:
   never a longer one.
 - What a model can be told of a call's outcome is a closed list: `done`,
   `declined`, `expired`, `refused` (with its class), `unavailable` (nothing
-  was done) and `unknown` (the call was sent; whether it ran is not known;
+  was done, and trying again is safe), `failed` (the call was approved and
+  the action was started, and it did not complete: there is no result,
+  something may have happened on the host, and the exact cause is in the
+  service's log and the host's audit lines under the call's identifier; an
+  agent must not blindly repeat an action that changes something) and
+  `unknown` (the call was sent; whether it ran is not known;
   only the signer makes this one, and its text tells the model to find out
   by a query before repeating anything that changes something). While the
   signer waits for an answer it tells the model's client so at a fixed

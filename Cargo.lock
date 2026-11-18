@@ -790,6 +790,7 @@ dependencies = [
  "serde_json",
  "tempfile",
  "thiserror",
+ "toml",
  "ureq",
 ]
 
@@ -818,10 +819,16 @@ dependencies = [
  "base64",
  "libc",
  "p-act",
+ "p-age",
+ "rcgen",
  "ring",
+ "rustls",
+ "rustls-pki-types",
  "serde",
  "serde_json",
  "thiserror",
+ "tokio",
+ "tokio-rustls",
 ]
 
 [[package]]

@@ -157,12 +157,12 @@ pub struct Status {
 #[derive(Debug, Clone)]
 pub struct Settings {
     /// How many requests of one agent may wait; further ones are refused (five by default).
-    pub max_waiting_per_agent: usize,
+    pub waiting_per_agent: usize,
 }
 
 impl Default for Settings {
     fn default() -> Self {
-        Settings { max_waiting_per_agent: 5 }
+        Settings { waiting_per_agent: 5 }
     }
 }
 
@@ -230,7 +230,7 @@ pub fn vet(crypto: &dyn Crypto, site: &Site, submit: Submit, now: SystemTime) ->
     }
     // 2. The call is signed under a certificate of a delegation key of the person it names.
     let Ok(person) = signature_person(request.call_sig()) else { return refuse(submit, BrokerReason::Delegation) };
-    let Some(key) = site.person(&person).map(|p| p.delegation_key.clone()) else {
+    let Some(key) = site.person(&person).and_then(|p| p.delegation_key().cloned()) else {
         return refuse(submit, BrokerReason::Delegation);
     };
     match crypto.verify_call(call, request.call_sig(), &key) {
@@ -500,7 +500,7 @@ impl Core {
         if !self.site.person(&person).is_some_and(|p| p.enabled) {
             return deny(self, Some(person), BrokerReason::Person);
         }
-        if self.waiting_of(&fingerprint) >= self.settings.max_waiting_per_agent {
+        if self.waiting_of(&fingerprint) >= self.settings.waiting_per_agent {
             return deny(self, Some(person), BrokerReason::TooManyWaiting);
         }
         self.seq += 1;
@@ -693,7 +693,10 @@ impl Core {
     }
 
     fn delegation_key_blocked(&self, person: &str) -> bool {
-        self.site.person(person).is_some_and(|p| self.register.is_key_blocked(p.delegation_key.fingerprint().as_str()))
+        self.site
+            .person(person)
+            .and_then(|p| p.delegation_key())
+            .is_some_and(|k| self.register.is_key_blocked(k.fingerprint().as_str()))
     }
 
     /// Whether this person is known: in the site file, or by a registered delegation.
@@ -728,7 +731,8 @@ impl Core {
             || self
                 .site
                 .person(person)
-                .is_some_and(|p| self.register.is_key_blocked(p.connection_key.fingerprint().as_str()))
+                .and_then(|p| p.connection_key())
+                .is_some_and(|k| self.register.is_key_blocked(k.fingerprint().as_str()))
     }
 
     /// A delegation pledge registers. Authenticated by the sign-in alone; the certificate is what authorises it.
@@ -764,7 +768,7 @@ impl Core {
         if unix(now) < from || unix(now) >= until {
             return no(NotRegisteredReason::BadCertificate);
         }
-        let Some(key) = self.site.person(person).map(|p| p.delegation_key.clone()) else {
+        let Some(key) = self.site.person(person).and_then(|p| p.delegation_key().cloned()) else {
             return no(NotRegisteredReason::NotYours);
         };
         if self.crypto.check_agent_certificate(cert, &key).is_err() {
@@ -862,8 +866,11 @@ impl Core {
             .collect();
         fx.extend(self.refuse_held(hashes, BrokerReason::Delegation, now));
         if let Some(owner) = owner {
-            let signed_in_with =
-                self.site.person(&owner).is_some_and(|p| p.connection_key.fingerprint().as_str() == fingerprint);
+            let signed_in_with = self
+                .site
+                .person(&owner)
+                .and_then(|p| p.connection_key())
+                .is_some_and(|k| k.fingerprint().as_str() == fingerprint);
             if signed_in_with {
                 // "No request is passed to a pledge that signed in with it": the connection ends; what waits, waits.
                 if let Some(link) = self.links.remove(&owner) {
@@ -978,7 +985,6 @@ mod tests {
     use p_act::{Call, CallContent, CallId, Request, ServiceId};
 
     const SIG: &str = "-----BEGIN SSH SIGNATURE-----\nU1NIU0lH\n-----END SSH SIGNATURE-----\n";
-    const KEY: &str = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOMqqnkVzrm0SdG6UOoqKLsabgH5C9okWi0dh2l9GKJl";
     const AGENT_A: &str = "SHA256:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
     const AGENT_B: &str = "SHA256:BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB";
     const NOW: i64 = 1_800_000_000;
@@ -1013,17 +1019,33 @@ mod tests {
         }
     }
 
+    /// A public key line for an Ed25519 key of 32 bytes all `n`: valid in shape, and different for each `n`.
+    fn key_line(n: u8) -> String {
+        let mut blob = Vec::new();
+        blob.extend(11u32.to_be_bytes());
+        blob.extend(b"ssh-ed25519");
+        blob.extend(32u32.to_be_bytes());
+        blob.extend([n; 32]);
+        format!("ssh-ed25519 {}", base64::Engine::encode(&base64::engine::general_purpose::STANDARD, blob))
+    }
+
     fn site() -> Arc<Site> {
-        let person = |name: &str, enabled: bool| {
+        // `off` is not enabled and so has no keys; `jan` has keys 1 to 4 and `eva` 9 to 12.
+        let person = |name: &str, first: u8| {
+            let row = |n: u8| format!(r#"{{"key":"{}"}}"#, key_line(first + n));
             format!(
-                r#"{{"name":"{name}","enabled":{enabled},"connection_key":"{KEY}","delegation_key":"{KEY}","groups":["ops"]}}"#
+                r#"{{"name":"{name}","enabled":true,"groups":["ops"],"keys":{{"confirmed":{},"automatic":{},"delegation":{},"connection":{}}}}}"#,
+                row(0),
+                row(1),
+                row(2),
+                row(3)
             )
         };
         let json = format!(
-            r#"{{"persons":[{},{},{}],"hosts":[{{"name":"a.example","key":"{KEY}"}}]}}"#,
-            person("jan", true),
-            person("off", false),
-            person("eva", true)
+            r#"{{"v":1,"persons":[{},{{"name":"off","enabled":false}},{}],"hosts":[{{"name":"a.example","key":"{}"}}]}}"#,
+            person("jan", 1),
+            person("eva", 9),
+            key_line(30)
         );
         Arc::new(Site::from_json(&json).unwrap())
     }
@@ -1044,7 +1066,7 @@ mod tests {
         register.register("SHA256:DDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDD", "eva", until);
         let core = Core::new(
             site(),
-            Settings { max_waiting_per_agent: max_waiting },
+            Settings { waiting_per_agent: max_waiting },
             register,
             None,
             Arc::new(Fake),
@@ -1206,7 +1228,7 @@ mod tests {
 
     #[test]
     fn the_default_limit_is_five() {
-        assert_eq!(Settings::default().max_waiting_per_agent, 5);
+        assert_eq!(Settings::default().waiting_per_agent, 5);
     }
 
     #[test]
@@ -1483,7 +1505,6 @@ mod tests {
         let mut f = fixture(5);
         sign_in(&mut f.core, "jan", PLEDGE);
         f.core.submit(SVC, vetted("jan", AGENT_A, 1, 120), now(0));
-        // in the fixture every person has the same key line, so the first person of the site owns it
         assert!(f.core.knows_key(AGENT_A) && f.core.knows_delegation(AGENT_A) && f.core.knows_person("jan"));
         assert!(!f.core.knows_key("SHA256:ZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZ"));
         let (fx, stored) = f.core.block_key(AGENT_A, now(1));

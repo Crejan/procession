@@ -71,6 +71,13 @@ preserve-gui ─────┼──> p-reserve.sock ──> preserve serve
   view talk to the daemon over a Unix socket and hold no backup logic. This is
   p-layer's shape (`player serve` behind a socket), and identity can come from
   the socket the same way.
+- **Jobs belong to the daemon, not to a connection.** Closing a connection
+  cancels only what was asked as bound to it: browsing, a preview or dump for
+  display, subscriptions. A backup, a prune, a check and a restore are jobs:
+  each has an identifier, goes on when the connection that started it closes, is
+  cancelled only by an explicit message naming it, and a front end that connects
+  later lists the running jobs and attaches to their events. The protocol is
+  `proposals/socket-protocol.md` (a proposal, for the designer).
 - **The core decides, once.** What a run's outcome is called, which freshness
   band a source is in, which pair last succeeded: one function each, in
   `p-reserve-core`. A front end that needs words for a band maps the band,
@@ -246,8 +253,17 @@ from the daemon, the toolkit decides only how it is drawn. The candidates:
   each. Costs: two apps to write and keep in step, which is the duplication
   this project exists to end. Tolerable only because the app holds no logic.
 
-Recommended: the first, because the host case and the workstation case then
-share their views. Not decided; see "Open decisions".
+**Superseded for macOS.** The recommendation of the first candidate (web views) is
+withdrawn there: Atticus's SwiftUI front end becomes preserve's Mac front end, a
+client of the socket, and only after two conditions hold: the logic still in its
+views and view models has moved into the daemon (first: the snapshot browser,
+which drove the engine class directly; the exclude store and the rules of the
+backup pane; the prune marker a view model wrote), and the protocol offers what
+section 8.5 of `crates/p-ledge/proposals/stage2-mac.md` lists (met or answered
+point by point in `proposals/socket-protocol.md`). Nothing is copied from Atticus
+yet: the licence between Atticus and procession is the owner's decision.
+`p-reserve-gui` gets no code. The Linux desktop stays open, and the web-view
+candidate stays the one that also serves a headless host.
 
 ## Repositories and restic
 

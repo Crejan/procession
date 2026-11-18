@@ -32,42 +32,43 @@ use crate::service_conn;
 use crate::shared::KeyMeta;
 use crate::testing::{Rig, TestDir};
 
-const INTERNAL: Rating = Rating { exposure: Exposure::Internal, damage: Damage::None, disruption: Disruption::None };
+pub(crate) const INTERNAL: Rating =
+    Rating { exposure: Exposure::Internal, damage: Damage::None, disruption: Disruption::None };
 const SECRET: Rating = Rating { exposure: Exposure::Secret, damage: Damage::None, disruption: Disruption::None };
 
-fn yes() -> Outcome<Scripted> {
+pub(crate) fn yes() -> Outcome<Scripted> {
     Outcome::Answer(Scripted::Yes(true))
 }
-fn no() -> Outcome<Scripted> {
+pub(crate) fn no() -> Outcome<Scripted> {
     Outcome::Answer(Scripted::Yes(false))
 }
-fn hold() -> Outcome<Scripted> {
+pub(crate) fn hold() -> Outcome<Scripted> {
     Outcome::Answer(Scripted::Hold)
 }
-fn words(e: &str, d: &str, s: &str) -> RatingWords {
+pub(crate) fn words(e: &str, d: &str, s: &str) -> RatingWords {
     RatingWords { exposure: e.into(), damage: d.into(), disruption: s.into() }
 }
-fn uuid(n: u32) -> String {
+pub(crate) fn uuid(n: u32) -> String {
     format!("00000000-0000-4000-8000-{n:012}")
 }
-fn keygen(args: &[&str]) {
+pub(crate) fn keygen(args: &[&str]) {
     let out = Command::new("ssh-keygen").args(args).stdin(Stdio::null()).output().expect("ssh-keygen");
     assert!(out.status.success(), "ssh-keygen {args:?}: {}", String::from_utf8_lossy(&out.stderr));
 }
-fn now() -> i64 {
+pub(crate) fn now() -> i64 {
     Timestamp::now().expect("clock").unix()
 }
 
 /// The keys of the world outside pledge: a host, a service certified by it, a rogue service.
-struct Material {
-    dir: TestDir,
+pub(crate) struct Material {
+    pub(crate) dir: TestDir,
 }
 
 impl Material {
-    fn new() -> Self {
+    pub(crate) fn new() -> Self {
         let dir = TestDir::new("material");
         let path = |name: &str| dir.path().join(name).to_string_lossy().into_owned();
-        for key in ["host", "other-host", "svc", "rogue"] {
+        for key in ["host", "other-host", "svc", "rogue", "site-ca", "broker"] {
             keygen(&["-q", "-t", "ed25519", "-N", "", "-C", "", "-f", &path(key)]);
         }
         let certify = |ca: &str, key: &str, principal: &str| {
@@ -88,47 +89,70 @@ impl Material {
         };
         certify("host", "svc", "probe@a.example");
         certify("other-host", "rogue", "probe@a.example");
+        certify("site-ca", "broker", "broker");
         Self { dir }
     }
-    fn signer(&self, name: &str) -> Signer {
+    pub(crate) fn signer(&self, name: &str) -> Signer {
         Signer::certified(self.dir.path().join(name)).expect("certified")
     }
-    fn host_line(&self) -> String {
+    /// The site CA's public key line.
+    pub(crate) fn ca_line(&self) -> String {
+        std::fs::read_to_string(self.dir.path().join("site-ca.pub")).expect("site-ca.pub").trim().to_owned()
+    }
+    pub(crate) fn host_line(&self) -> String {
         std::fs::read_to_string(self.dir.path().join("host.pub")).expect("host.pub").trim().to_owned()
     }
 }
 
-struct Agent {
-    id: String,
-    signer: Signer,
+pub(crate) struct Agent {
+    pub(crate) id: String,
+    pub(crate) signer: Signer,
 }
 
 /// pledge, a service, and agents.
-struct Lab {
-    rig: Rig,
-    material: Material,
-    next_call: u32,
-    next_agent: u32,
+pub(crate) struct Lab {
+    pub(crate) rig: Rig,
+    pub(crate) material: Material,
+    pub(crate) next_call: u32,
+    pub(crate) next_agent: u32,
 }
 
 impl Lab {
-    fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::with(json!({}))
     }
 
-    fn with(extra: Value) -> Self {
+    pub(crate) fn with(extra: Value) -> Self {
         Self::build(extra, KeyType::Ed25519)
     }
 
-    fn build(extra: Value, delegation_type: KeyType) -> Self {
+    pub(crate) fn build(extra: Value, delegation_type: KeyType) -> Self {
+        Self::build_with(move |_| extra, delegation_type)
+    }
+
+    /// Stage 2: a `broker` member in the configuration, with a throwaway TLS root and the site CA of the material.
+    pub(crate) fn stage2() -> Self {
+        Self::build_with(
+            |m| {
+                json!({"broker": {
+                    "address": "broker.test:8443", "server_name": "broker.test",
+                    "tls_root": include_str!("../testdata/tls_root.pem"), "site_ca": m.ca_line(),
+                }})
+            },
+            KeyType::Ed25519,
+        )
+    }
+
+    pub(crate) fn build_with(extra: impl FnOnce(&Material) -> Value, delegation_type: KeyType) -> Self {
         let material = Material::new();
         let host = material.host_line();
+        let extra = extra(&material);
         let rig = Rig::live([], move |dir| {
             let mut config = json!({"person": "jan", "hosts": [{"host": "a.example", "key": host}]});
             config.as_object_mut().expect("object").extend(extra.as_object().expect("object").clone());
             crate::testing::write_settings(&dir.join("config.json"), &config.to_string());
         });
-        for purpose in ["delegation", "confirmed", "automatic"] {
+        for purpose in ["delegation", "confirmed", "automatic", "connection"] {
             rig.shared
                 .create_key(
                     if purpose == "delegation" { delegation_type } else { KeyType::Ed25519 },
@@ -146,7 +170,7 @@ impl Lab {
         Self { rig, material, next_call: 1, next_agent: 1 }
     }
 
-    fn start_args(
+    pub(crate) fn start_args(
         groups: &[&str],
         automatic: Option<RatingWords>,
         ask: Option<RatingWords>,
@@ -169,7 +193,7 @@ impl Lab {
     }
 
     /// Writes the key block and certificate of a bundle as `<name>` and `<name>-cert.pub`; the signer for them.
-    fn write_bundle(&self, data: &Value, name: &str) -> Signer {
+    pub(crate) fn write_bundle(&self, data: &Value, name: &str) -> Signer {
         let bundle = String::from_utf8(STANDARD.decode(data["bundle"].as_str().expect("bundle")).expect("base64"))
             .expect("text");
         let (_, rest) = bundle.split_once('\n').expect("line 1");
@@ -184,7 +208,7 @@ impl Lab {
     }
 
     /// An agent under a delegation `agents start` issued and delivered, with its bundle's key and certificate on disk.
-    fn agent(&mut self, groups: &[&str], automatic: RatingWords, ask: RatingWords, valid: u64) -> Agent {
+    pub(crate) fn agent(&mut self, groups: &[&str], automatic: RatingWords, ask: RatingWords, valid: u64) -> Agent {
         self.rig.dialogs.push(yes());
         let args = Self::start_args(groups, Some(automatic), Some(ask), Some(valid));
         let (data, delegation) = agents::start(&self.rig.shared, args).expect("agents start");
@@ -195,17 +219,17 @@ impl Lab {
         Agent { id, signer }
     }
 
-    fn default_agent(&mut self) -> Agent {
+    pub(crate) fn default_agent(&mut self) -> Agent {
         self.agent(&["admins"], words("open", "none", "none"), words("secret", "lasting", "outage"), 3600)
     }
 
-    fn call(&mut self, agent: &Agent, params: &[&str], deadline_in: i64) -> (Call, String) {
+    pub(crate) fn call(&mut self, agent: &Agent, params: &[&str], deadline_in: i64) -> (Call, String) {
         let id = uuid(self.next_call);
         self.next_call += 1;
         self.call_with_id(agent, &id, params, deadline_in)
     }
 
-    fn call_with_id(&self, agent: &Agent, id: &str, params: &[&str], deadline_in: i64) -> (Call, String) {
+    pub(crate) fn call_with_id(&self, agent: &Agent, id: &str, params: &[&str], deadline_in: i64) -> (Call, String) {
         let content = CallContent {
             id: CallId::parse(id).expect("uuid"),
             deadline: Timestamp::from_unix(now() + deadline_in).expect("time"),
@@ -219,19 +243,19 @@ impl Lab {
         (call, sig)
     }
 
-    fn request(&self, call: &Call, call_sig: &str, rating: Rating, service: &str) -> (Request, String) {
+    pub(crate) fn request(&self, call: &Call, call_sig: &str, rating: Rating, service: &str) -> (Request, String) {
         let request = Request::compose(call, call_sig, rating).expect("request");
         let sig = sign_request(&self.material.signer(service), &request).expect("sign request");
         (request, sig)
     }
 
     /// A whole request from `agent`, signed by the service.
-    fn make(&mut self, agent: &Agent, params: &[&str], rating: Rating) -> (Request, String) {
+    pub(crate) fn make(&mut self, agent: &Agent, params: &[&str], rating: Rating) -> (Request, String) {
         let (call, sig) = self.call(agent, params, 120);
         self.request(&call, &sig, rating, "svc")
     }
 
-    fn connect(&self) -> Svc {
+    pub(crate) fn connect(&self) -> Svc {
         let (client, server) = UnixStream::pair().expect("pair");
         let shared = Arc::clone(&self.rig.shared);
         thread::spawn(move || {
@@ -244,18 +268,18 @@ impl Lab {
         Svc::new(client)
     }
 
-    fn entries(&self) -> Vec<Value> {
+    pub(crate) fn entries(&self) -> Vec<Value> {
         self.rig.record().into_iter().filter(|e| e["type"] == "request").collect()
     }
 
-    fn results(&self) -> Vec<(String, Option<String>)> {
+    pub(crate) fn results(&self) -> Vec<(String, Option<String>)> {
         self.entries()
             .iter()
             .map(|e| (e["result"].as_str().expect("result").to_owned(), e["reason"].as_str().map(str::to_owned)))
             .collect()
     }
 
-    fn verifies(&self, request: &Request, approval: &str) -> ApprovalKind {
+    pub(crate) fn verifies(&self, request: &Request, approval: &str) -> ApprovalKind {
         let key = |purpose: &str| {
             let key = self.rig.shared.key_with_purpose(purpose).expect("key");
             PublicKey::parse(&key.public_line()).expect("public key")
@@ -271,35 +295,35 @@ impl Lab {
 }
 
 /// The fake service's end of a connection.
-struct Svc {
-    stream: UnixStream,
-    lines: LineReader<UnixStream>,
+pub(crate) struct Svc {
+    pub(crate) stream: UnixStream,
+    pub(crate) lines: LineReader<UnixStream>,
 }
 
 impl Svc {
-    fn new(stream: UnixStream) -> Self {
+    pub(crate) fn new(stream: UnixStream) -> Self {
         stream.set_read_timeout(Some(Duration::from_secs(15))).expect("timeout");
         let lines = LineReader::new(stream.try_clone().expect("clone"));
         Self { stream, lines }
     }
 
-    fn submit(&mut self, request: &Request, sig: &str) {
+    pub(crate) fn submit(&mut self, request: &Request, sig: &str) {
         let submit = Submit::new(request.clone(), sig).expect("submit");
         write_message(&mut self.stream, &Message::Submit(submit), ClearancePolicy::Refused).expect("write");
     }
 
-    fn cancel(&mut self, request: &Request) {
+    pub(crate) fn cancel(&mut self, request: &Request) {
         write_message(&mut self.stream, &Message::Cancel(Cancel { request: request.hash() }), ClearancePolicy::Refused)
             .expect("write");
     }
 
-    fn raw(&mut self, line: &str) {
+    pub(crate) fn raw(&mut self, line: &str) {
         use std::io::Write;
         self.stream.write_all(line.as_bytes()).expect("write");
     }
 
     /// The next answer; panics if there is none in 15 seconds.
-    fn answer(&mut self) -> Answer {
+    pub(crate) fn answer(&mut self) -> Answer {
         match self.lines.read_message(ClearancePolicy::Refused).expect("a message") {
             Some(Message::Answer(answer)) => answer,
             other => panic!("expected an answer, got {other:?}"),
@@ -307,7 +331,7 @@ impl Svc {
     }
 
     /// An answer within `wait`, or `None`.
-    fn try_answer(&mut self, wait: Duration) -> Option<Answer> {
+    pub(crate) fn try_answer(&mut self, wait: Duration) -> Option<Answer> {
         self.stream.set_read_timeout(Some(wait)).expect("timeout");
         let answer = match self.lines.read_message(ClearancePolicy::Refused) {
             Ok(Some(Message::Answer(answer))) => Some(answer),
@@ -317,31 +341,31 @@ impl Svc {
         answer
     }
 
-    fn ask(&mut self, request: &Request, sig: &str) -> Answer {
+    pub(crate) fn ask(&mut self, request: &Request, sig: &str) -> Answer {
         self.submit(request, sig);
         self.answer()
     }
 }
 
-fn approval(answer: &Answer) -> &str {
+pub(crate) fn approval(answer: &Answer) -> &str {
     match &answer.outcome {
         Result_::Approved(approved) => approved.approval(),
         other => panic!("not approved: {other:?}"),
     }
 }
 
-fn refusal(answer: &Answer) -> PledgeReason {
+pub(crate) fn refusal(answer: &Answer) -> PledgeReason {
     match &answer.outcome {
         Result_::Refused(Refused::Pledge(reason)) => *reason,
         other => panic!("not refused by pledge: {other:?}"),
     }
 }
 
-fn shown(lab: &Lab) -> Vec<String> {
+pub(crate) fn shown(lab: &Lab) -> Vec<String> {
     lab.rig.shown().into_iter().filter(|s| s.starts_with("request")).collect()
 }
 
-fn dialogs(lab: &Lab) -> usize {
+pub(crate) fn dialogs(lab: &Lab) -> usize {
     lab.rig.shown().iter().filter(|s| s.starts_with("request") || s.starts_with("confirm sign the approval")).count()
 }
 

@@ -89,7 +89,7 @@ pub fn serve(shared: &Arc<Shared>, stream: UnixStream, peer: Option<crate::peer:
         }
     });
     let id = shared.approvals.responder_id();
-    let responder = Responder { id, send, peer };
+    let responder = Responder { id, send, peer, via_broker: false };
     let open: Arc<Mutex<HashSet<String>>> = Arc::new(Mutex::new(HashSet::new()));
     let mut hashes: Vec<DocumentHash> = Vec::new();
     let mut lines = LineReader::new(TimedRead::new(stream));

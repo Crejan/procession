@@ -62,6 +62,13 @@ pub struct StartArgs {
 /// arguments outside what a person may set, the presence check, issuing.
 pub fn start(shared: &Shared, args: StartArgs) -> Result<(Value, Delegation), Code> {
     let person = shared.approvals.config.person.clone().ok_or(Code::Refused)?;
+    // With a broker configured, issuing needs the connection and a standing verified on it: nothing is
+    // issued otherwise, and never a local-only delegation.
+    let link = shared.link();
+    if shared.approvals.config.broker.is_some() && !link.as_ref().is_some_and(|l| l.can_issue()) {
+        eprintln!("pledge: the broker cannot be reached (or has not sent its standing yet): nothing issued");
+        return Err(Code::BrokerUnavailable);
+    }
     let mut groups = args.groups;
     if !groups.iter().all(|g| is_name(g)) {
         return Err(Code::BadArguments);
@@ -121,9 +128,22 @@ pub fn start(shared: &Shared, args: StartArgs) -> Result<(Value, Delegation), Co
         eprintln!("pledge: issuing a certificate failed: {e}");
         Code::Unavailable
     })?;
+    // Registered with the broker before the bundle is handed over.
+    if let Some(link) = &link {
+        link.register(&issued.certificate, issued.agent.delegation.as_str()).map_err(|e| match e {
+            crate::broker_link::RegisterError::Unavailable => Code::BrokerUnavailable,
+            crate::broker_link::RegisterError::Refused(reason) => {
+                eprintln!("pledge: the broker did not register the delegation: {reason}");
+                Code::BrokerRefused
+            }
+        })?;
+    }
     // Written once, and read back with `pact`'s own parser before it is handed out.
     let bundle = Bundle::write(&bundle_config, &issued.key, &issued.certificate, now).map_err(|e| {
         eprintln!("pledge: the bundle is refused: {e}");
+        if link.is_some() {
+            withdraw_at_broker(shared, issued.agent.delegation.as_str());
+        }
         Code::BadArguments
     })?;
     let id = issued.agent.delegation.as_str().to_owned();
@@ -171,6 +191,24 @@ pub fn delivered(shared: &Shared, delegation: Delegation) -> Result<Value, Code>
 /// the record has an event of its own.
 pub fn abandoned(shared: &Shared, id: &str) {
     shared.event("delegation-not-delivered", json!({"delegation": id}));
+    // A registration that succeeded for a bundle that was never delivered is withdrawn at the broker,
+    // through the same path as any withdrawal (re-sent until stored).
+    if shared.approvals.config.broker.is_some() {
+        withdraw_at_broker(shared, id);
+    }
+}
+
+/// Tells the broker about a withdrawal and follows it: noted at once, sent if connected, re-sent at every
+/// sign-in and at most once a minute until the broker says it stored it. Returns where it stands.
+pub fn withdraw_at_broker(shared: &Shared, id: &str) -> crate::broker_state::Withdrawal {
+    use crate::broker_state::Withdrawal;
+    let _ = shared.broker_state.note_withdrawal(id);
+    if shared.link().is_some_and(|link| link.send_withdraw(id))
+        && shared.broker_state.withdrawal(id) == Some(Withdrawal::NotTold)
+    {
+        let _ = shared.broker_state.set_withdrawal(id, Withdrawal::InForce);
+    }
+    shared.broker_state.withdrawal(id).unwrap_or(Withdrawal::NotTold)
 }
 
 /// Withdraws a delegation and records it.
@@ -181,7 +219,8 @@ pub fn abandoned(shared: &Shared, id: &str) {
 pub fn withdraw(shared: &Shared, id: &str) -> Result<Value, Code> {
     match shared.approvals.delegations.withdraw(id, shared.now().unix()) {
         Ok(true) => {
-            shared.event("delegation-withdrawn", json!({"delegation": id, "by": "person"}));
+            let broker = shared.approvals.config.broker.is_some().then(|| withdraw_at_broker(shared, id).words());
+            shared.event("delegation-withdrawn", json!({"delegation": id, "by": "person", "broker": broker}));
             Ok(json!({}))
         }
         Ok(false) => Err(Code::NotFound),
@@ -211,6 +250,7 @@ pub fn list(shared: &Shared) -> Value {
                 "delegation": d.id, "person": d.person, "groups": d.groups, "automatic": d.automatic, "ask": d.ask,
                 "valid_until": time(d.valid_until), "state": state,
                 "withdrawn": d.withdrawn.and_then(time), "last_asked": d.last_asked.and_then(time),
+                "broker": shared.broker_state.withdrawal(&d.id).map(|w| w.words()),
             })
         })
         .collect();

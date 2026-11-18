@@ -52,7 +52,9 @@ Two types besides `error`:
   `already-exists`, `refused` (a rule says no: the program is blocked, the
   ceiling set above what a person may set), `presence-denied` (the presence
   check failed or the person said no), `unavailable` (no terminal, no key
-  hardware, record not writable). Nothing else is put into a reply: no
+  hardware, record not writable), `broker-unavailable` (stage 2: no connection
+  to the broker, no answer in 10 s, or it said `unavailable`: nothing was issued, try
+  again), `broker-refused` (the broker refused the delegation). Nothing else is put into a reply: no
   paths, no text from outside.
 
 ## 4. Commands
