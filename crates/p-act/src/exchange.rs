@@ -578,52 +578,134 @@ pub fn write_message<W: Write>(out: &mut W, message: &Message, policy: Clearance
 // Reading
 // ---------------------------------------------------------------------------
 
-/// A reader of lines of at most [`MAX_LINE`] bytes. It holds at most one line
-/// and one chunk, whatever the peer sends. The timeout for a line that is not
-/// finished is the transport's.
+/// The framing rule of the exchange without any I/O: bytes in, complete lines or the limit error out. A
+/// blocking reader ([`LineReader`]) and an asynchronous one (in a program that has a runtime; `p-act` has
+/// none) share this one rule.
+///
+/// To keep memory bounded, call [`LineBuffer::next_line`] until it returns `None` after each
+/// [`LineBuffer::push`], and push chunks of a bounded size: it then never holds more than a line and one
+/// chunk, whatever the peer sends. It keeps no state in the caller's future, so a reader built on it is
+/// cancel-safe: cancelling a read between `push` calls loses nothing.
+#[derive(Debug, Clone)]
+pub struct LineBuffer {
+    buf: Vec<u8>,
+    /// Where the next line starts.
+    start: usize,
+    /// How far `buf` has been searched for a `\n`.
+    scanned: usize,
+    limit: usize,
+    failed: bool,
+}
+
+impl Default for LineBuffer {
+    fn default() -> Self {
+        LineBuffer::new()
+    }
+}
+
+impl LineBuffer {
+    /// A buffer for lines of at most [`MAX_LINE`] bytes, `\n` not counted.
+    #[must_use]
+    pub fn new() -> LineBuffer {
+        LineBuffer::with_limit(MAX_LINE)
+    }
+
+    /// As [`LineBuffer::new`] with another limit, for a line-based protocol that is not this exchange.
+    #[must_use]
+    pub fn with_limit(limit: usize) -> LineBuffer {
+        LineBuffer { buf: Vec::new(), start: 0, scanned: 0, limit, failed: false }
+    }
+
+    /// Add what was read. After [`ExchangeError::LineTooLong`] the connection is over and what is pushed is dropped.
+    pub fn push(&mut self, bytes: &[u8]) {
+        if !self.failed {
+            self.buf.extend_from_slice(bytes);
+        }
+    }
+
+    /// The next complete line without its `\n`, if there is one. [`ExchangeError::LineTooLong`] when a
+    /// line is longer than the limit, or more than the limit has arrived without a `\n`; it is then the
+    /// same answer for ever (the connection ends).
+    pub fn next_line(&mut self) -> Result<Option<Vec<u8>>, ExchangeError> {
+        if self.failed {
+            return Err(ExchangeError::LineTooLong);
+        }
+        if let Some(offset) = self.buf[self.scanned..].iter().position(|&b| b == b'\n') {
+            let end = self.scanned + offset;
+            if end - self.start > self.limit {
+                return Err(self.fail());
+            }
+            let line = self.buf[self.start..end].to_vec();
+            self.start = end + 1;
+            self.scanned = self.start;
+            if self.start == self.buf.len() {
+                self.buf.clear();
+                self.start = 0;
+                self.scanned = 0;
+            }
+            return Ok(Some(line));
+        }
+        if self.buf.len() - self.start > self.limit {
+            return Err(self.fail());
+        }
+        // Nothing complete: forget what was handed out, and remember how far the search went.
+        self.buf.drain(..self.start);
+        self.scanned = self.buf.len();
+        self.start = 0;
+        Ok(None)
+    }
+
+    fn fail(&mut self) -> ExchangeError {
+        self.failed = true;
+        self.buf = Vec::new();
+        self.start = 0;
+        self.scanned = 0;
+        ExchangeError::LineTooLong
+    }
+
+    /// How many bytes are held that do not yet make a line.
+    #[must_use]
+    pub fn pending(&self) -> usize {
+        self.buf.len() - self.start
+    }
+
+    /// The input has ended. Fine between lines; [`ExchangeError::Truncated`] in the middle of one.
+    pub fn finish(&self) -> Result<(), ExchangeError> {
+        if self.failed {
+            Err(ExchangeError::LineTooLong)
+        } else if self.pending() > 0 {
+            Err(ExchangeError::Truncated)
+        } else {
+            Ok(())
+        }
+    }
+}
+
+/// A blocking reader of lines of at most [`MAX_LINE`] bytes, on a [`LineBuffer`]. It holds at most one line
+/// and one chunk, whatever the peer sends. The timeout for a line that is not finished is the transport's.
 #[derive(Debug)]
 pub struct LineReader<R> {
     inner: R,
-    buf: Vec<u8>,
-    start: usize,
-    limit: usize,
+    lines: LineBuffer,
 }
 
 impl<R: Read> LineReader<R> {
     pub fn new(inner: R) -> LineReader<R> {
-        LineReader::with_limit(inner, MAX_LINE)
+        LineReader { inner, lines: LineBuffer::new() }
     }
 
     /// As [`LineReader::new`] with another limit, for a line-based protocol that is not this exchange.
     pub fn with_limit(inner: R, limit: usize) -> LineReader<R> {
-        LineReader { inner, buf: Vec::new(), start: 0, limit }
+        LineReader { inner, lines: LineBuffer::with_limit(limit) }
     }
 
     /// The next line without its `\n`; `None` at the end of the input between lines.
     /// After `LineTooLong`, `Truncated` or `Io` the connection is over and the reader is not to be used again.
     pub fn read_line(&mut self) -> Result<Option<Vec<u8>>, ExchangeError> {
-        let mut scanned = self.start;
         loop {
-            if let Some(offset) = self.buf[scanned..].iter().position(|&b| b == b'\n') {
-                let end = scanned + offset;
-                if end - self.start > self.limit {
-                    return Err(ExchangeError::LineTooLong);
-                }
-                let line = self.buf[self.start..end].to_vec();
-                self.start = end + 1;
-                if self.start == self.buf.len() {
-                    self.buf.clear();
-                    self.start = 0;
-                }
+            if let Some(line) = self.lines.next_line()? {
                 return Ok(Some(line));
             }
-            scanned = self.buf.len();
-            if self.buf.len() - self.start > self.limit {
-                return Err(ExchangeError::LineTooLong);
-            }
-            self.buf.drain(..self.start);
-            scanned -= self.start;
-            self.start = 0;
             let mut chunk = [0u8; 8192];
             let n = loop {
                 match self.inner.read(&mut chunk) {
@@ -633,9 +715,9 @@ impl<R: Read> LineReader<R> {
                 }
             };
             if n == 0 {
-                return if self.buf.is_empty() { Ok(None) } else { Err(ExchangeError::Truncated) };
+                return self.lines.finish().map(|()| None);
             }
-            self.buf.extend_from_slice(&chunk[..n]);
+            self.lines.push(&chunk[..n]);
         }
     }
 
@@ -1201,5 +1283,105 @@ mod tests {
         assert_eq!(r.read_message(REQUIRED).unwrap().unwrap(), submit());
         assert_eq!(r.read_message(REQUIRED).unwrap(), None);
         assert!(matches!(write_message(&mut Vec::new(), &m, REFUSED), Err(EncodeError::ClearanceNotAllowed)));
+    }
+
+    #[test]
+    fn the_sans_io_framing_is_the_one_rule() {
+        let mut b = LineBuffer::new();
+        assert_eq!(b.next_line(), Ok(None));
+        assert_eq!(b.finish(), Ok(()));
+        // Bytes in any pieces; lines out, in order, without their newline.
+        for piece in [&b"{\"a\""[..], b":1}\n{\"b\":2}", b"\n\n", b"tail"] {
+            b.push(piece);
+        }
+        assert_eq!(b.next_line(), Ok(Some(br#"{"a":1}"#.to_vec())));
+        assert_eq!(b.next_line(), Ok(Some(br#"{"b":2}"#.to_vec())));
+        assert_eq!(b.next_line(), Ok(Some(vec![])), "a blank line is a line");
+        assert_eq!(b.next_line(), Ok(None));
+        assert_eq!(b.pending(), 4);
+        assert_eq!(b.finish(), Err(ExchangeError::Truncated));
+        b.push(b"\n");
+        assert_eq!(b.next_line(), Ok(Some(b"tail".to_vec())));
+        assert_eq!((b.pending(), b.finish()), (0, Ok(())));
+        // A line may arrive one byte at a time.
+        let mut b = LineBuffer::new();
+        for byte in b"abc\ndef\n" {
+            b.push(&[*byte]);
+        }
+        assert_eq!(
+            (b.next_line(), b.next_line(), b.next_line()),
+            (Ok(Some(b"abc".to_vec())), Ok(Some(b"def".to_vec())), Ok(None))
+        );
+    }
+
+    #[test]
+    fn the_sans_io_limit() {
+        let mut b = LineBuffer::with_limit(10);
+        b.push(&[b'x'; 10]);
+        assert_eq!(b.next_line(), Ok(None), "ten bytes and no newline yet may still be a line");
+        b.push(b"\n");
+        assert_eq!(b.next_line(), Ok(Some(vec![b'x'; 10])), "exactly the limit is a line");
+        // One more byte is not, with or without its newline, and it stays failed.
+        let mut b = LineBuffer::with_limit(10);
+        b.push(&[b'x'; 11]);
+        assert_eq!(b.next_line(), Err(ExchangeError::LineTooLong));
+        b.push(b"\nok\n");
+        assert_eq!(b.next_line(), Err(ExchangeError::LineTooLong));
+        assert_eq!((b.pending(), b.finish()), (0, Err(ExchangeError::LineTooLong)));
+        let mut b = LineBuffer::with_limit(10);
+        b.push(&[b'x'; 11]);
+        b.push(b"\n");
+        assert_eq!(b.next_line(), Err(ExchangeError::LineTooLong));
+        // A long line behind a short one in one push is found when it is reached.
+        let mut b = LineBuffer::with_limit(10);
+        b.push(b"ok\n");
+        b.push(&[b'y'; 40]);
+        b.push(b"\n");
+        assert_eq!(b.next_line(), Ok(Some(b"ok".to_vec())));
+        assert_eq!(b.next_line(), Err(ExchangeError::LineTooLong));
+        // With the exchange's own limit.
+        let mut b = LineBuffer::default();
+        b.push(&vec![b'z'; MAX_LINE]);
+        assert_eq!(b.next_line(), Ok(None));
+        b.push(b"z");
+        assert_eq!(b.next_line(), Err(ExchangeError::LineTooLong));
+    }
+
+    #[test]
+    fn the_sans_io_buffer_stays_bounded_for_a_peer_that_never_ends_a_line() {
+        let mut b = LineBuffer::with_limit(1000);
+        let mut fed = 0usize;
+        let result = loop {
+            b.push(&[b'q'; 300]);
+            fed += 300;
+            assert!(fed < 10_000, "read far past the limit");
+            match b.next_line() {
+                Ok(None) => assert!(b.pending() <= 1000),
+                other => break other,
+            }
+        };
+        assert_eq!(result, Err(ExchangeError::LineTooLong));
+        assert!(fed <= 1200, "{fed}");
+    }
+
+    #[test]
+    fn a_line_buffer_is_cancel_safe_between_pushes() {
+        // What an async reader does: push what one read gave, ask for lines, read again. Dropping the
+        // future in between loses nothing, because the buffer is the reader's own.
+        let input = format!(
+            "{}\n{}\n",
+            text(&submit(), REFUSED).trim_end(),
+            text(&Message::Cancel(Cancel { request: hash() }), REFUSED).trim_end()
+        );
+        let mut b = LineBuffer::new();
+        let mut messages = vec![];
+        for chunk in input.as_bytes().chunks(37) {
+            b.push(chunk);
+            while let Some(line) = b.next_line().unwrap() {
+                messages.push(Message::parse(&line, REFUSED).unwrap());
+            }
+        }
+        assert!(b.finish().is_ok());
+        assert!(matches!(messages.as_slice(), [Message::Submit(_), Message::Cancel(_)]));
     }
 }

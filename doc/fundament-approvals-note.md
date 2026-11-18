@@ -3,10 +3,11 @@
 **A second writing.** The first copy of this note and its report were lost
 with a scratchpad. This one is written again on 2026-11-18 from the same
 session's text, not rebuilt from the repository, so points 1 to 8 are the
-first writing's. It differs in four ways: the issuer is decided, so the
-always-on variant is kept only as a short record; the decided points are
-marked decided; memberships on directory sites are open again with the
-owner; the report is the last section of this file. Nothing in fundament
+first writing's. It differs in three ways: the issuer, the certifier of a
+service's key and the source of memberships on a directory site are
+decided, so the variants not chosen are kept only as short records; the
+decided points are marked decided; the report is the last section of this
+file. Nothing in fundament
 was read again for this writing: every statement about fundament is as of
 its `main` checkout on 2026-11-11.
 
@@ -53,8 +54,8 @@ defines its own.
 | the issuer is the operator at a converge; 90-day certificates, renewed at a converge once fewer than 60 days remain; no always-on issuer | decided (J1) |
 | which groups may use a service: a required `groups` parameter on the binding | decided |
 | an agent's certificate: the person its only principal, groups in the extension `groups@procession` | decided; nothing in the model follows from it but the login grammar of point 1 |
-| a service's key certified by its host's key, not by the site CA | decided by the owner on 2026-11-18 (J8). Where the text below still calls it open, it is not |
-| memberships on a directory site come from the directory, through the sync job beside the broker | decided by the owner on 2026-11-18 (C2). Where the text below still calls it open, it is not |
+| a service's key certified by its host's key, not by the site CA | decided by the owner on 2026-11-18 (J8) |
+| memberships on a directory site come from the directory, through the sync job beside the broker | decided by the owner on 2026-11-18 (C2) |
 | whether the first sandboxes separate model and signer | open with the owner; not a model question, see the end of [Open](#open-for-the-owner) |
 
 ## 1. A person's approval keys
@@ -349,14 +350,14 @@ host whose public half the store has not written is left out of `hosts` and
 is a finding, as a cluster member without its half is (`doc/linux.md`,
 admin_keys).
 
-**Who is in which group** (open with the owner, C2). The model's rule is
+**Who is in which group** (decided, C2: on a directory site from the
+directory, through the sync job). The model's rule is
 that a membership has one home per site: the person row on a local site, the
 directory on a directory site, where `groups` on a row is refused
 (`doc/model/people.md`, Persons). The view follows it exactly as
 `vpn_identities` does: the members on a local site, nothing on a directory
-site, "where the converge expands it from the directory". The designer's
-answer, which this note takes as its proposal: a job expands it instead of
-the converge, a kit program beside the broker on a timer (`sync_seconds`,
+site, "where the converge expands it from the directory". Here a job
+expands it instead of the converge: a kit program beside the broker on a timer (`sync_seconds`,
 300 proposed), which reads the members of the groups the view names from the
 directory and writes them in the same form. The broker does not know which
 of the two wrote the part. What the job needs from the model on a directory
@@ -488,22 +489,13 @@ providers with their public halves.
 **Agent to service.** Where an agent's sandbox runs is no model fact. The
 site declares the flow to the `mcp` endpoint.
 
-**If the site CA certified service keys instead of the host key** (open with
-the owner, J8). The text above is correct for the host-key variant. With the
-other:
-
-- the service's key becomes a generated host slot of the type
-  (`{ns: host, key: probe-signing-key, generator: ssh-key}`), because the
-  issuer needs its public half and the model never reads a host;
-- the issuer signs a third name form, `<type>@<host>`, still built from
-  model names only (point 3 holds; the verifiers gain a line for it);
-- the host timer, the host-key type check, the live-key comparison,
-  `approval_hosts`, the `hosts` part of the view, the signed list of point 6
-  and the name `hosts` all go;
-- with the operator as issuer, a service's certificate then renews only at a
-  converge, like a person's, with the same 60-day cliff for every service of
-  the site at once, and a new host cannot serve before a converge of the
-  broker's host has run.
+**Not chosen: the site CA certifying service keys** (decided, J8: the host's
+key certifies). For the record, it would have made the service's key a
+generated host slot of the type and given the issuer a third name form,
+`<type>@<host>`; the host timer, the host-key checks, `approval_hosts`, the
+`hosts` part of the view, the signed list of point 6 and the name `hosts`
+would have gone. With the operator as issuer, every service's certificate
+would then have renewed only at a converge.
 
 **Cost without approvals.** None; the flag is on unbound types.
 
@@ -525,8 +517,8 @@ Through the broker, which carries and cannot alter what the site CA signed:
   (`approval-formats.md` 6.1), so the model owes no cadence. A host removed
   from the site stays in a pledge's list until the next one; harmless, since
   it has left the broker's view with the same converge and the broker passes
-  on nothing from a host it does not know. All of this stands under J8: if
-  the site CA certifies service keys, there is no list.
+  on nothing from a host it does not know. The list exists because a
+  service's key is certified by its host's key (decided, J8).
 - **Group names and descriptions**: `groups` of the view. A group's
   `description` is optional in the model; one without gives its name alone.
   Which groups are a person's comes from `members` or the sync job.
@@ -634,16 +626,17 @@ role or site that needs it, and it puts design questions to the owner.
 the broker; then build, and write `doc/model/approvals.md` as the reference
 of what was built.
 
-**C2. Memberships on a directory site are not model data. Open with the
-owner.** `persons.yml` refuses `groups` on a directory site: "memberships
+**C2. Memberships on a directory site are not model data. Decided:** they
+come from the directory, through the sync job beside the broker (point 4).
+`persons.yml` refuses `groups` on a directory site: "memberships
 are the directory's" (`doc/model/people.md`, Persons), seeded by the people
 lifecycle and changed by hand with `ipa group-add-member`
 (`doc/identity.md`, What a site does by hand). The converge cannot hand the
 broker what the model does not hold, and a second home in the model would
-break the rule that a membership has one home per site. *Recommendation:*
-the sync job of point 4, which is the model's own precedent
-(`vpn_identities`: `None` on a directory site, expanded from the directory).
-What the owner accepts with it: on a directory site R10's answer is partly
+break the rule that a membership has one home per site. The sync job is the
+model's own precedent (`vpn_identities`: `None` on a directory site,
+expanded from the directory). What follows from the decision: on a
+directory site R10's answer is partly
 the directory's, as fresh as the timer, and the broker's host holds a
 read-only bind credential.
 
@@ -706,16 +699,12 @@ Each with a recommendation and what it rests on.
   *Recommendation:* not now. No people converge reads deliveries yet, and a
   profile must name every active delivery (`doc/model/people.md`, Person
   profiles), which would cost every profile of such a site a line.
-- **J8. Service keys certified by the host key or by the site CA. Open.**
-  What changes is at the end of point 5. For the model the site CA is less:
-  no host timer, no host-key checks, no signed list, no `hosts` name. With
-  the operator as issuer it costs more than it did when this was first
-  weighed: every service's certificate would renew only at a converge, a
-  new host could not serve before a converge of the broker's host, and a
-  site that misses the 60 days loses its services as well as its persons.
-  *Recommendation:* the host key, as written. Basis: a managed host's key is
-  already in the store with its half in the site (`catalogue/slots.yml`,
-  `Site.host_key_public`), and the host renews by itself.
+- **J8. Service keys certified by the host key or by the site CA.
+  Decided:** the host's key, as point 5 is written. It rests on a managed
+  host's key being in the store already with its half in the site
+  (`catalogue/slots.yml`, `Site.host_key_public`), and on the host renewing
+  by itself. The site CA variant is not chosen; its record is at the end of
+  point 5.
 - **J9. The sync job's condition** (point 4). *Recommendation:* a bind
   account contributed by a type derives on a directory site only. Basis: a
   bind account is "a directory entry that never logs in"
