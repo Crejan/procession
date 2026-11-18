@@ -41,6 +41,12 @@ struct PersonFile {
     enabled: bool,
     connection_key: String,
     delegation_key: String,
+    /// The person's approval keys as public keys (not their certificates): with the two above, the "four keys".
+    /// Optional; they let the broker tell whose a blocked key is.
+    #[serde(default)]
+    confirmed_key: Option<String>,
+    #[serde(default)]
+    automatic_key: Option<String>,
     /// Certificates of the person's approval keys as the issuer made them, to be carried to pledge.
     #[serde(default)]
     certificates: Vec<String>,
@@ -72,6 +78,8 @@ pub struct Person {
     pub connection_key: PublicKey,
     /// What the person's delegations are certified by.
     pub delegation_key: PublicKey,
+    /// The confirmed and the automatic approval key, if the site file has them.
+    pub approval_keys: Vec<PublicKey>,
     pub certificates: Vec<String>,
     pub groups: Vec<String>,
 }
@@ -129,6 +137,10 @@ impl Site {
                 enabled: p.enabled,
                 connection_key: key("connection key", &p.name, &p.connection_key)?,
                 delegation_key: key("delegation key", &p.name, &p.delegation_key)?,
+                approval_keys: [("confirmed key", &p.confirmed_key), ("automatic key", &p.automatic_key)]
+                    .into_iter()
+                    .filter_map(|(what, line)| line.as_ref().map(|l| key(what, &p.name, l)))
+                    .collect::<Result<_, _>>()?,
                 certificates,
                 groups,
             };
@@ -148,6 +160,20 @@ impl Site {
         Ok(site)
     }
 
+    /// Every person's name.
+    pub fn person_names(&self) -> impl Iterator<Item = &str> {
+        self.persons.keys().map(String::as_str)
+    }
+
+    /// The person whose key this is (connection, delegation or an approval key), if the site file says.
+    #[must_use]
+    pub fn owner_of_key(&self, fingerprint: &str) -> Option<&str> {
+        self.persons
+            .iter()
+            .find(|(_, p)| p.key_fingerprints().iter().any(|f| f.as_str() == fingerprint))
+            .map(|(n, _)| n.as_str())
+    }
+
     #[must_use]
     pub fn person(&self, name: &str) -> Option<&Person> {
         self.persons.get(name)
@@ -157,5 +183,17 @@ impl Site {
     #[must_use]
     pub fn host_key(&self, host: &str) -> Option<&PublicKey> {
         self.hosts.get(host)
+    }
+}
+
+impl Person {
+    /// The fingerprints of the person's keys the site file has: connection, delegation, and the approval keys.
+    #[must_use]
+    pub fn key_fingerprints(&self) -> Vec<p_act::sign::Fingerprint> {
+        [&self.connection_key, &self.delegation_key]
+            .into_iter()
+            .chain(&self.approval_keys)
+            .map(PublicKey::fingerprint)
+            .collect()
     }
 }

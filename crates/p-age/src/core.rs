@@ -93,23 +93,65 @@ pub enum StateError {
     Exists { path: String },
 }
 
+/// Why the register could not be written: a code from a closed list (it goes into an administrator's answer) and
+/// the operating system's text (it goes to standard error and nowhere else).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StoreError {
+    /// `permission-denied`, `read-only`, `no-space` or `io`.
+    pub code: &'static str,
+    pub text: String,
+}
+
+impl StoreError {
+    fn of(e: &std::io::Error) -> StoreError {
+        // 30 is EROFS on Linux and macOS alike; `ErrorKind::ReadOnlyFilesystem` is not stable.
+        let code = match e.kind() {
+            _ if e.raw_os_error() == Some(30) => "read-only",
+            std::io::ErrorKind::PermissionDenied => "permission-denied",
+            std::io::ErrorKind::StorageFull => "no-space",
+            _ => "io",
+        };
+        StoreError { code, text: e.to_string() }
+    }
+}
+
+impl std::fmt::Display for StoreError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.text)
+    }
+}
+
 /// Whether a change to the register reached the disk.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Stored {
     Yes,
     /// In force in memory, but the write failed: why.
-    No(String),
+    No(StoreError),
 }
 
 /// The broker could not write its register; it goes on from memory and tries again.
 #[derive(Debug, Clone)]
 struct Degraded {
-    why: String,
+    why: StoreError,
     last_try: SystemTime,
 }
 
 /// A degraded broker tries the whole write again at least this often.
 const RETRY_EVERY: Duration = Duration::from_secs(60);
+
+/// What `page status` shows.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Status {
+    /// The closed code of why the register cannot be stored, if it cannot (the broker is degraded).
+    pub degraded: Option<&'static str>,
+    /// Pledges that are connected, requests held, delegations registered and how many of them are withdrawn.
+    pub pledges: usize,
+    pub held: usize,
+    pub delegations: usize,
+    pub withdrawn: usize,
+    pub blocked_persons: Vec<String>,
+    pub blocked_keys: Vec<String>,
+}
 
 /// The broker's settings.
 #[derive(Debug, Clone)]
@@ -299,12 +341,12 @@ impl Core {
 
     /// Write the whole register. The first failure makes the broker degraded (and says so on standard error);
     /// a success while degraded ends that. Every attempt is the whole write.
-    fn try_store(&mut self, now: SystemTime) -> Result<(), String> {
+    fn try_store(&mut self, now: SystemTime) -> Result<(), StoreError> {
         let Some(path) = &self.state_path else { return Ok(()) };
         let result = serde_json::to_vec(&self.register.snapshot())
             .map_err(std::io::Error::other)
             .and_then(|bytes| perm::replace_private_file(path, &bytes))
-            .map_err(|e| e.to_string());
+            .map_err(|e| StoreError::of(&e));
         match (&result, self.degraded.is_some()) {
             (Ok(()), true) => {
                 eprintln!("page: the register is stored again; no longer degraded");
@@ -312,8 +354,9 @@ impl Core {
             }
             (Err(why), false) => {
                 eprintln!(
-                    "page: DEGRADED: the register cannot be stored in {}: {why}; going on from memory",
-                    path.display()
+                    "page: DEGRADED: the register cannot be stored in {}: {}; going on from memory",
+                    path.display(),
+                    why.text
                 );
                 self.degraded = Some(Degraded { why: why.clone(), last_try: now });
             }
@@ -333,7 +376,7 @@ impl Core {
 
     /// A change that permits happens only if the register can be written: it is applied, stored, and undone if
     /// the write fails. Nothing is permitted that would not survive a restart as recorded.
-    fn permit(&mut self, now: SystemTime, change: impl FnOnce(&mut Register)) -> Result<(), String> {
+    fn permit(&mut self, now: SystemTime, change: impl FnOnce(&mut Register)) -> Result<(), StoreError> {
         let before = self.register.clone();
         change(&mut self.register);
         self.try_store(now).inspect_err(|_| self.register = before)
@@ -342,7 +385,13 @@ impl Core {
     /// Why the register could not be stored, if it cannot: the broker is degraded.
     #[must_use]
     pub fn degraded(&self) -> Option<&str> {
-        self.degraded.as_ref().map(|d| d.why.as_str())
+        self.degraded.as_ref().map(|d| d.why.text.as_str())
+    }
+
+    /// The closed code of why the register cannot be stored, if it cannot.
+    #[must_use]
+    pub fn degraded_code(&self) -> Option<&'static str> {
+        self.degraded.as_ref().map(|d| d.why.code)
     }
 
     fn log(&mut self, now: SystemTime, h: &HeldInfo, result: &str) {
@@ -444,6 +493,10 @@ impl Core {
             }
             Err(Stopped::PersonBlocked) => return deny(self, Some(agent.person.clone()), BrokerReason::Person),
         };
+        // A blocked agent key, or the delegation key behind it, is a delegation that stops here (check 2).
+        if self.register.is_key_blocked(fingerprint.as_str()) || self.delegation_key_blocked(&person) {
+            return deny(self, Some(person), BrokerReason::Delegation);
+        }
         if !self.site.person(&person).is_some_and(|p| p.enabled) {
             return deny(self, Some(person), BrokerReason::Person);
         }
@@ -519,7 +572,12 @@ impl Core {
             nonce,
             n,
             blocked: self.register.is_blocked(person),
-            blocked_keys: Vec::new(),
+            blocked_keys: known
+                .map(|p| p.key_fingerprints())
+                .unwrap_or_default()
+                .into_iter()
+                .filter(|fp| self.register.is_key_blocked(fp.as_str()))
+                .collect(),
             withdrawn: self.register.withdrawn_of(person, now).iter().filter_map(|fp| fp.parse().ok()).collect(),
             certificates: known.map(|p| p.certificates.clone()).unwrap_or_default(),
             groups: known.map(|p| p.groups.clone()).unwrap_or_default(),
@@ -588,6 +646,18 @@ impl Core {
         let deadline = self.held.get(&hash).map_or(now, |h| h.deadline);
         match answer.outcome {
             Outcome::Approved(approved) => {
+                // An approval by a blocked key is given no clearance. The key is read from the certificate inside
+                // the signature, as the person is: a claim, which only ever makes the broker refuse more.
+                let by_blocked = p_act::sign::signature_fingerprint(approved.approval())
+                    .is_ok_and(|fp| self.register.is_key_blocked(fp.as_str()));
+                if by_blocked {
+                    return self.finish(
+                        hash,
+                        Outcome::Refused(Refused::Broker(BrokerReason::Person)),
+                        "refused:person",
+                        now,
+                    );
+                }
                 if now >= deadline {
                     // An approval that comes late is worthless.
                     return self.finish(hash, Outcome::Expired(By::Broker), "expired", now);
@@ -622,6 +692,45 @@ impl Core {
         Ok(Outcome::Approved(approved))
     }
 
+    fn delegation_key_blocked(&self, person: &str) -> bool {
+        self.site.person(person).is_some_and(|p| self.register.is_key_blocked(p.delegation_key.fingerprint().as_str()))
+    }
+
+    /// Whether this person is known: in the site file, or by a registered delegation.
+    #[must_use]
+    pub fn knows_person(&self, person: &str) -> bool {
+        self.site.person(person).is_some() || self.register.knows_person(person)
+    }
+
+    /// Whether this key is one an administrator can name: one of a person's keys in the site file, or the key of a
+    /// registered delegation.
+    #[must_use]
+    pub fn knows_key(&self, fingerprint: &str) -> bool {
+        self.site.owner_of_key(fingerprint).is_some() || self.register.knows_delegation(fingerprint)
+    }
+
+    /// Whether the key is blocked.
+    #[must_use]
+    pub fn key_is_blocked(&self, fingerprint: &str) -> bool {
+        self.register.is_key_blocked(fingerprint)
+    }
+
+    /// Whether this delegation is registered.
+    #[must_use]
+    pub fn knows_delegation(&self, fingerprint: &str) -> bool {
+        self.register.knows_delegation(fingerprint)
+    }
+
+    /// Whether a pledge may sign in as this person: not if the person or the connection key is blocked.
+    #[must_use]
+    pub fn signin_blocked(&self, person: &str) -> bool {
+        self.register.is_blocked(person)
+            || self
+                .site
+                .person(person)
+                .is_some_and(|p| self.register.is_key_blocked(p.connection_key.fingerprint().as_str()))
+    }
+
     /// A delegation pledge registers. Authenticated by the sign-in alone; the certificate is what authorises it.
     pub fn register_delegation(
         &mut self,
@@ -639,7 +748,10 @@ impl Core {
         if agent.person != person {
             return no(NotRegisteredReason::NotYours);
         }
-        if self.register.is_blocked(person) {
+        if self.register.is_blocked(person)
+            || self.register.is_key_blocked(fp.as_str())
+            || self.delegation_key_blocked(person)
+        {
             return no(NotRegisteredReason::Blocked);
         }
         let (from, until) = (
@@ -724,9 +836,82 @@ impl Core {
 
     /// An administrator lifts a block; a connected pledge is told.
     /// Lifting permits: refused (with why) while the register cannot be written.
-    pub fn unblock_person(&mut self, person: &str, now: SystemTime) -> Result<Vec<Effect>, String> {
+    pub fn unblock_person(&mut self, person: &str, now: SystemTime) -> Result<Vec<Effect>, StoreError> {
         self.permit(now, |r| r.unblock(person))?;
         Ok(self.standing(person, now).into_iter().collect())
+    }
+
+    /// An administrator blocks one key. In force at once, stored if it can be. What follows depends on the key:
+    /// its person's connected pledge is told in a new standing, or closed if the key is the one it signed in with;
+    /// the requests that wait under an agent key, or under any delegation of the person whose delegation key it is,
+    /// are refused.
+    pub fn block_key(&mut self, fingerprint: &str, now: SystemTime) -> (Vec<Effect>, Stored) {
+        self.register.block_key(fingerprint);
+        let stored = self.store_restriction(now);
+        let mut fx = Vec::new();
+        let owner = self.site.owner_of_key(fingerprint).map(str::to_owned);
+        let hashes: Vec<_> = self
+            .held
+            .iter()
+            .filter(|(_, h)| {
+                h.answer.is_none()
+                    && (h.agent.as_str() == fingerprint
+                        || owner.as_deref().is_some_and(|o| o == h.person && self.delegation_key_blocked(o)))
+            })
+            .map(|(k, _)| *k)
+            .collect();
+        fx.extend(self.refuse_held(hashes, BrokerReason::Delegation, now));
+        if let Some(owner) = owner {
+            let signed_in_with =
+                self.site.person(&owner).is_some_and(|p| p.connection_key.fingerprint().as_str() == fingerprint);
+            if signed_in_with {
+                // "No request is passed to a pledge that signed in with it": the connection ends; what waits, waits.
+                if let Some(link) = self.links.remove(&owner) {
+                    fx.push(Effect::Pledge(link.conn, PledgeOut::Error(ErrorCode::Blocked)));
+                    fx.push(Effect::Pledge(link.conn, PledgeOut::Close));
+                }
+            } else {
+                fx.extend(self.standing(&owner, now));
+            }
+        }
+        (fx, stored)
+    }
+
+    /// An administrator lifts a key's block: permitting, so refused while the register cannot be written.
+    pub fn unblock_key(&mut self, fingerprint: &str, now: SystemTime) -> Result<Vec<Effect>, StoreError> {
+        self.permit(now, |r| r.unblock_key(fingerprint))?;
+        let owner = self.site.owner_of_key(fingerprint).map(str::to_owned);
+        Ok(owner.and_then(|o| self.standing(&o, now).ok()).into_iter().collect())
+    }
+
+    /// An administrator withdraws a delegation: as the person's own withdrawal, and a connected pledge is told in a
+    /// new standing, since `withdrawn` there changed.
+    pub fn admin_withdraw(&mut self, delegation: &Fingerprint, now: SystemTime) -> (Vec<Effect>, Stored) {
+        let Some(person) = self.register.person_of(delegation.as_str()).map(str::to_owned) else {
+            return (Vec::new(), Stored::Yes);
+        };
+        self.register.withdraw(delegation.as_str());
+        let stored = self.store_restriction(now);
+        let hashes: Vec<_> =
+            self.held.iter().filter(|(_, h)| h.answer.is_none() && &h.agent == delegation).map(|(k, _)| *k).collect();
+        let mut fx = self.refuse_held(hashes, BrokerReason::Delegation, now);
+        fx.extend(self.standing(&person, now));
+        (fx, stored)
+    }
+
+    /// What the register and the queue hold, and whether the broker is degraded.
+    #[must_use]
+    pub fn status(&self) -> Status {
+        let (delegations, withdrawn) = self.register.counts();
+        Status {
+            degraded: self.degraded.as_ref().map(|d| d.why.code),
+            pledges: self.links.len(),
+            held: self.held.len(),
+            delegations,
+            withdrawn,
+            blocked_persons: self.register.blocked_persons(),
+            blocked_keys: self.register.blocked_keys(),
+        }
     }
 
     /// At the deadline the broker forgets the request: an unanswered one is answered `expired`, and an answer
@@ -1282,6 +1467,35 @@ mod tests {
         assert_eq!(refusal_of(&fx), Some(BrokerReason::BadRequest));
         let e = &f.log.entries()[0];
         assert_eq!((e.host.as_str(), e.service.as_str(), e.result.as_str()), ("-", "-", "refused:bad-request"));
+    }
+
+    #[test]
+    fn a_failed_write_has_a_code_from_a_closed_list_and_the_text_stays_with_the_broker() {
+        let code = |e: std::io::Error| StoreError::of(&e).code;
+        assert_eq!(code(std::io::Error::from_raw_os_error(30)), "read-only");
+        assert_eq!(code(std::io::Error::from(std::io::ErrorKind::PermissionDenied)), "permission-denied");
+        assert_eq!(code(std::io::Error::from(std::io::ErrorKind::StorageFull)), "no-space");
+        assert_eq!(code(std::io::Error::other("anything else")), "io");
+    }
+
+    #[test]
+    fn blocking_keys_tells_the_owners_pledge_and_the_status_counts_what_is_held() {
+        let mut f = fixture(5);
+        sign_in(&mut f.core, "jan", PLEDGE);
+        f.core.submit(SVC, vetted("jan", AGENT_A, 1, 120), now(0));
+        // in the fixture every person has the same key line, so the first person of the site owns it
+        assert!(f.core.knows_key(AGENT_A) && f.core.knows_delegation(AGENT_A) && f.core.knows_person("jan"));
+        assert!(!f.core.knows_key("SHA256:ZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZ"));
+        let (fx, stored) = f.core.block_key(AGENT_A, now(1));
+        assert_eq!(stored, Stored::Yes);
+        assert_eq!(refusal_of(&fx), Some(BrokerReason::Delegation), "what waits under an agent key is refused");
+        let status = f.core.status();
+        assert_eq!(
+            (status.pledges, status.held, status.delegations, status.degraded, status.blocked_keys),
+            (1, 1, 4, None, vec![AGENT_A.to_owned()])
+        );
+        assert!(f.core.unblock_key(AGENT_A, now(2)).is_ok());
+        assert!(f.core.status().blocked_keys.is_empty());
     }
 
     // --- a register that cannot be written ------------------------------------------------

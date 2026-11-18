@@ -1,6 +1,7 @@
 //! `page`: the broker of the approval system.
 //!
-//! The verbs are declared in [`VERBS`]; `serve` runs the broker, the others do
+//! The verbs are declared in [`VERBS`]; `serve` runs the broker, `init` makes its register, and `block`,
+//! `unblock`, `withdraw` and `status` speak to the running broker (`proposals/admin-socket.md`). The others do
 //! nothing yet. What each will do is in `SPEC.md`.
 
 use std::process::ExitCode;
@@ -19,7 +20,13 @@ const VERBS: &[Verb] = &[
     Verb { name: "init", summary: "the first start: make the empty register; refused if there is one" },
     Verb { name: "load", summary: "take the site project's data: persons, groups, rules, hosts, keys" },
     Verb { name: "delegations", summary: "list the registered delegations; withdraw one" },
-    Verb { name: "block", summary: "block a person or one of their keys; unblock" },
+    Verb { name: "block", summary: "block a person (`page block NAME`) or one key (`page block --key SHA256:...`)" },
+    Verb {
+        name: "unblock",
+        summary: "lift a block, as `block` names it; refused while the register cannot be written",
+    },
+    Verb { name: "withdraw", summary: "withdraw a delegation: `page withdraw SHA256:...`" },
+    Verb { name: "status", summary: "is the broker degraded; what the register and the queue hold" },
     Verb { name: "log", summary: "every request that arrived, and what became of it" },
 ];
 
@@ -39,6 +46,79 @@ fn config_path<'a>(verb: &str, args: &[&'a str]) -> Option<&'a str> {
         _ => {
             eprintln!("usage: page {verb} [--config FILE]");
             None
+        }
+    }
+}
+
+/// `page block|unblock|withdraw|status [--config FILE] [--key FP] [NAME|FP]`: put one command to the running
+/// broker and print what it says. Exit 0 if done and stored (status: not degraded), 1 if refused, not stored or
+/// degraded, 2 for usage, 3 if no broker answers.
+fn admin(verb: &str, args: &[&str]) -> ExitCode {
+    use p_age::admin::{Command, Target, ask, render, socket_path};
+    let usage = || {
+        eprintln!(
+            "usage: page {verb} [--config FILE]{}",
+            match verb {
+                "block" | "unblock" => " (NAME | --key SHA256:...)",
+                "withdraw" => " SHA256:...",
+                _ => "",
+            }
+        );
+        ExitCode::from(2)
+    };
+    let (mut config, mut key, mut rest) = ("/etc/page.json", None, Vec::new());
+    let mut it = args.iter();
+    while let Some(arg) = it.next() {
+        match *arg {
+            "--config" => match it.next() {
+                Some(file) => config = file,
+                None => return usage(),
+            },
+            "--key" => match it.next() {
+                Some(fp) => key = Some(*fp),
+                None => return usage(),
+            },
+            other => rest.push(other),
+        }
+    }
+    let target = |key: Option<&str>, rest: &[&str]| match (key, rest) {
+        (Some(fp), []) => fp.parse().ok().map(Target::Key),
+        (None, [name]) => Some(Target::Person((*name).to_owned())),
+        _ => None,
+    };
+    let command = match verb {
+        "status" if key.is_none() && rest.is_empty() => Some(Command::Status),
+        "block" => target(key, &rest).map(Command::Block),
+        "unblock" => target(key, &rest).map(Command::Unblock),
+        "withdraw" if key.is_none() => match rest.as_slice() {
+            [fp] => fp.parse().ok().map(Command::Withdraw),
+            _ => None,
+        },
+        _ => None,
+    };
+    let Some(command) = command else { return usage() };
+    let config = match p_age::config::Config::read(std::path::Path::new(config)) {
+        Ok(config) => config,
+        Err(e) => {
+            eprintln!("page {verb}: {e}");
+            return ExitCode::from(2);
+        }
+    };
+    match ask(&socket_path(&config.state_dir), &command) {
+        Ok(reply) => {
+            let (text, code) = render(&command, &reply);
+            // What `status` shows is its output whatever the exit code; a refusal, or a change that is not stored,
+            // is said on standard error.
+            if code == 0 || command == Command::Status {
+                println!("{text}")
+            } else {
+                eprintln!("{text}")
+            }
+            ExitCode::from(code)
+        }
+        Err(e) => {
+            eprintln!("page {verb}: {e}");
+            ExitCode::from(3)
         }
     }
 }
@@ -87,6 +167,9 @@ fn run(path: &std::path::Path) -> Result<(), String> {
     let runtime = tokio::runtime::Runtime::new().map_err(|e| e.to_string())?;
     runtime.block_on(async {
         let limits = ConnLimits::new(config.max_connections, config.max_connections_per_address);
+        // The administrator's verbs reach this broker over a socket in the state directory (0600, peer checked).
+        let (admin_listener, broker_uid) = p_age::admin::bind(&config.state_dir).map_err(|e| e.to_string())?;
+        tokio::spawn(p_age::admin::serve(admin_listener, broker.clone(), broker_uid));
         let mut listeners = Vec::new();
         for address in &config.listen {
             let listener =
@@ -115,6 +198,7 @@ fn main() -> ExitCode {
         }
         ["serve", rest @ ..] => serve(rest),
         ["init", rest @ ..] => init(rest),
+        [verb @ ("block" | "unblock" | "withdraw" | "status"), rest @ ..] => admin(verb, rest),
         [verb, ..] if VERBS.iter().any(|known| known.name == *verb) => {
             eprintln!("page {verb}: not implemented yet");
             ExitCode::from(2)
