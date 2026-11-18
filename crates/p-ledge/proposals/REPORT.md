@@ -749,3 +749,31 @@ child processes); I did not run the whole suite under umask 002 myself then, I d
 `Server::start` no longer swallows pledge's words: when a socket does not appear it reports
 whether `pledge serve` ended (and its exit status) or is still running, and everything it
 wrote on stdout and stderr. Tested by a start that fails on a group-writable `config.json`.
+
+## One rule for all three sockets: a peer that cannot be read is dropped
+
+`service.sock` now drops a connection whose peer credentials cannot be read (`serve.rs`,
+`service_peer`), like the other two: no request is handled, nothing is sent (not even an
+`error` line; the connection just ends, so the service sees end of stream or a reset and
+must give its agent `unavailable` and nothing more specific). `service.sock` still takes any
+user that can read the readable credentials, since the door is the file mode and a service
+runs under its own account; the other two also drop another user. The stderr line is
+throttled (`Throttle`): at most one per 10 s per socket, the next one carries the count held
+back ("N more like it in the last 10s were not printed"); never in the record. SPEC section 7
+says it. Tests: the throttle with a clock, `service_peer` on a non-socket (dropped) and a
+socket pair (taken).
+
+What decides the lookup on Linux (`peer.rs:27-41`): `getsockopt(fd, SOL_SOCKET, SO_PEERCRED)`
+on the accepted stream socket, with a `ucred` buffer of the right size. The kernel records the
+peer's pid, uid and gid when the connection is made; there is no permission check, it works
+across accounts and for the same account alike, and it fails only if the fd is not a socket or
+the buffer is wrong. In a user namespace (unprivileged LXC) the uid is translated into the
+reader's namespace (an unmapped one shows as the overflow id, still a success) and a pid from
+another pid namespace reads as 0, still a success; `service.sock` only records them. In the
+owner's Stage A, `probe-svc` to `probe-svc` in one container, it succeeds. Evidence that the same
+call works on that Debian: `agent.sock` and `control.sock` already drop a peer whose lookup fails or
+is another user, and the owner's `real_programs` run there (`ssh-add -l`, `ssh-keygen -Y sign`
+through pledge) passed, so the lookup succeeded on those sockets; a3 passing before did not
+show it on `service.sock` itself, this reading of the code and that evidence is why this
+change should not turn it red. Whole workspace (`cargo test --workspace --offline --features
+p-robe/test-verbs,p-act/pact-tls --no-fail-fast`): 0 failed.

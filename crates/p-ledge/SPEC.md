@@ -309,7 +309,14 @@ socket taking a connection says nothing about the others.
   every SSH client works unchanged. `control.sock` is for pledge's own
   command line and desktop app, checked by code signature. `service.sock`
   takes requests from services on the same machine, in the broker's place;
-  it exists for stage 1 and for a machine without a site.
+  it exists for stage 1 and for a machine without a site. **All three drop a
+  connection whose peer credentials cannot be read**: no request is handled
+  for it, the peer is told nothing (the connection ends; a service gives its
+  agent `unavailable` and nothing more specific), and pledge writes one line
+  on its standard error, at most one per ten seconds per socket with a count
+  of those held back, never a record entry. `agent.sock` and `control.sock`
+  also drop a peer that is another user; `service.sock` takes any user the
+  file mode lets in (a service runs under an account of its own).
 - pledge is started as a job of launchd in the person's session.
 
 ## 8. Platforms
