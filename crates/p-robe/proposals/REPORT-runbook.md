@@ -280,3 +280,27 @@ line `pledge: serving.`, and what the error in the gap looks like.
   stops after the first call (the positive control: a verb through the rule) if that did not run through it, so the refusal
   checks (`sudo -n` says the same when no rule matches as when the rule forbids) cannot pass for the wrong reason.
 - **Runbook:** run the scripts one at a time and read the last line of each (section 4).
+
+## Update: `/etc/probe.json` is read by `p_act::settings`
+
+`config.rs` no longer checks the file itself: `Config` is a `serde` type with `deny_unknown_fields` (and
+defaults), read by `p_act::settings::read` (`parse` for text in memory); my own mode check and parser are gone.
+`serde` is now a direct dependency of p-robe (already in the lock). Changes in behaviour:
+
+1. The file must be owned by **root or the running user** (before: not checked).
+2. The checks are made on the **open file** (before: a `stat`, then a read: a gap).
+3. A member **given twice** at the top is refused (before: the last one won; the test that said so is reversed).
+4. **Trailing text, a byte order mark, non-UTF-8 and a file over 1 MiB** are refused by name (before: trailing text and
+   invalid UTF-8 failed in `serde_json` with other words; a BOM failed as "expected value").
+5. **Messages are serde's and the helper's**: `missing field `person``, `unknown field `x``, `can be written by someone other
+   than its owner (mode 0666)`, `not one JSON object: ...`, instead of `person is needed`, `unknown member x`, `writable by its
+   group or by others`. A value of the wrong kind or out of range is now one generic line (`a value of the wrong kind or out of
+   range at line L column C`) that **does not say which member** (before: `max_waiting: a non-negative whole number`); no value
+   from the file is echoed (tested).
+6. Everything else is unchanged: the 0o022 rule (0640 and 0644 are fine), a missing file is "none" for `setup` and `sys kit` and an
+   error for `probe serve`, a directory is refused, the person's name check (still mine, after reading).
+
+**What the helper lacks:** (a) a missing file is only an `Io` error whose kind I inspect (a `NotFound` helper or an
+`read_optional` would save that); (b) for a wrong-kind value it cannot say which member (serde's path is dropped on purpose: a
+`describe` that kept the field name only for `invalid type` would help a person who has typed `"max_waiting": "many"`);
+(c) nothing about the directory the file is in (the helper says so itself).

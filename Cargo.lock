@@ -719,6 +719,7 @@ dependencies = [
  "hyper-util",
  "libc",
  "p-act",
+ "serde",
  "serde_json",
  "tempfile",
  "tokio",

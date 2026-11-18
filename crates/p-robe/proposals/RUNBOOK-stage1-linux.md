@@ -405,9 +405,9 @@ systemctl daemon-reload`. (Without the timer the certificate ends in 30 days and
 
 ### B3. `/etc/probe.json`
 
-One JSON object, mode 0644 or 0640, owned by root (**a file that its group or
-anyone else can write is refused**, and an unknown member is refused; a missing
-required member is named in the message):
+One JSON object, mode 0644 or 0640, owned by root or by the user that runs the program (**a file that its group or
+anyone else can write is refused**, and so are an unknown member, a member given twice, trailing
+text and a byte order mark; the reading is `p_act::settings`'s, the same for all programs):
 
 ```
 {
@@ -429,8 +429,8 @@ required member is named in the message):
 sys kit` read it too: `setup --if-due` for the key path and the host key, `sys kit` for
 the certificate's path. Passed: `probe serve --config /etc/probe.json` gets as far as
 `probe serve: for alice, pledge reachable`. Did not pass: `probe serve: /etc/probe.json:
-...` with the reason (`writable by its group or by others`, `unknown member ...`,
-`confirmed_key is needed`).
+...` with the reason (`can be written by someone other than its owner`, `owned by user N, who is neither root nor the
+user running this program`, `unknown field ...`, `missing field `confirmed_key``).
 
 ### B4. Start `probe serve` as `probe-svc`
 
