@@ -198,7 +198,7 @@ async fn a_sign_in_that_does_not_verify_is_one_error_whatever_is_wrong() {
     // another connection's nonce
     let mut c = open_pledge(&w).await;
     c.recv().await;
-    c.send_json(signin_message("jan", &w.jan_connection, "bm90LXRoZS1ub25jZQ==", BINDING)).await;
+    c.send_json(signin_message("jan", &w.jan_connection, &STANDARD.encode([1u8; 32]), BINDING)).await;
     assert_eq!(c.recv().await["error"], "signin");
     // another connection's TLS binding
     let mut c = open_pledge(&w).await;
@@ -213,7 +213,7 @@ async fn a_sign_in_that_does_not_verify_is_one_error_whatever_is_wrong() {
     // a sign-in signed in another namespace
     let mut c = open_pledge(&w).await;
     let nonce = c.recv().await["nonce"].as_str().unwrap().to_owned();
-    let doc = p_age::wire::ConnectionDoc::compose("jan", &nonce, &STANDARD.encode(BINDING));
+    let doc = connection_doc("jan", &nonce, BINDING).as_bytes().to_vec();
     let sig = raw_sign(&w.jan_connection, Namespace::Request, &doc);
     c.send_json(serde_json::json!({"schema_version":1,"type":"signin","doc":STANDARD.encode(&doc),"doc_sig":p_act::sign::signature_to_base64(&sig)})).await;
     assert_eq!(c.recv().await["error"], "signin");
@@ -847,7 +847,7 @@ async fn a_withdrawal_of_an_unknown_delegation_and_of_another_persons_cannot_be_
     assert_eq!(shape(&foreign, &jans), shape(&none, &unknown));
     assert_eq!(
         shape(&none, &unknown),
-        "{\"delegation\":\"<fp>\",\"schema_version\":1,\"stored\":true,\"type\":\"withdrawn\"}"
+        "{\"schema_version\":1,\"type\":\"withdrawn\",\"delegation\":\"<fp>\",\"stored\":true}"
     );
     // neither wrote anything: the register is as it was, and (if a write could have failed) not degraded
     if locked {

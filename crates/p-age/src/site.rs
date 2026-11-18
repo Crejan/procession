@@ -6,6 +6,7 @@
 use std::collections::BTreeMap;
 use std::path::Path;
 
+use p_act::broker::{Standing, StandingContent};
 use p_act::sign::{PublicKey, SignError};
 use serde::Deserialize;
 use thiserror::Error;
@@ -13,18 +14,16 @@ use thiserror::Error;
 /// Why the site file was refused.
 #[derive(Debug, Error)]
 pub enum SiteError {
-    #[error("cannot read {path}: {source}")]
-    Read { path: String, source: std::io::Error },
-    #[error("{path} is not a site file: {source}")]
-    Parse { path: String, source: serde_json::Error },
+    #[error(transparent)]
+    Settings(#[from] p_act::settings::SettingsError),
+    #[error("the certificates or groups of `{name}` are not what a standing may carry: {source}")]
+    BadStanding { name: String, source: p_act::ParseError },
     #[error("`{0}` is not a name ([A-Za-z0-9._-]+, at most 64 characters)")]
     BadName(String),
     #[error("{what} of `{name}`: {source}")]
     BadKey { what: &'static str, name: String, source: SignError },
     #[error("`{0}` appears twice")]
     Duplicate(String),
-    #[error(transparent)]
-    Perm(#[from] crate::perm::PermError),
 }
 
 /// A person's name or a host's name: `[A-Za-z0-9._-]+`, at most 64 characters.
@@ -89,21 +88,16 @@ fn key(what: &'static str, name: &str, line: &str) -> Result<PublicKey, SiteErro
 }
 
 impl Site {
-    /// Read the site file (JSON): `{"persons":[{"name","enabled","connection_key","delegation_key"}],"hosts":[{"name","key"}]}`.
+    /// Read the site file: JSON, one object, an unknown member refused, the file refused if anyone but its owner or
+    /// root can write it (`p_act::settings`). `{"persons":[{"name","enabled","connection_key","delegation_key"}],
+    /// "hosts":[{"name","key"}]}`.
     pub fn read(path: &Path) -> Result<Site, SiteError> {
-        let shown = path.display().to_string();
-        crate::perm::check_config_file(path)?;
-        let text = std::fs::read(path).map_err(|source| SiteError::Read { path: shown.clone(), source })?;
-        let file: SiteFile =
-            serde_json::from_slice(&text).map_err(|source| SiteError::Parse { path: shown, source })?;
-        Site::from_file(file)
+        Site::from_file(p_act::settings::read(path)?)
     }
 
-    /// From JSON text, for tests and for `read`.
+    /// From JSON text, for tests.
     pub fn from_json(text: &str) -> Result<Site, SiteError> {
-        let file: SiteFile =
-            serde_json::from_str(text).map_err(|source| SiteError::Parse { path: "<text>".to_owned(), source })?;
-        Site::from_file(file)
+        Site::from_file(p_act::settings::parse(text.as_bytes())?)
     }
 
     fn from_file(file: SiteFile) -> Result<Site, SiteError> {
@@ -112,12 +106,31 @@ impl Site {
             if !valid_name(&p.name) {
                 return Err(SiteError::BadName(p.name));
             }
+            // What is carried to pledge is a set: sorted, each entry once. Whatever a standing may not carry is refused
+            // here, when the file is read, and not when a pledge signs in.
+            let sorted = |mut v: Vec<String>| {
+                v.sort_unstable();
+                v.dedup();
+                v
+            };
+            let (certificates, groups) = (sorted(p.certificates), sorted(p.groups));
+            let probe = StandingContent {
+                to: p.name.clone(),
+                nonce: [0; 32],
+                n: 0,
+                blocked: false,
+                blocked_keys: Vec::new(),
+                withdrawn: Vec::new(),
+                certificates: certificates.clone(),
+                groups: groups.clone(),
+            };
+            Standing::compose(&probe).map_err(|source| SiteError::BadStanding { name: p.name.clone(), source })?;
             let person = Person {
                 enabled: p.enabled,
                 connection_key: key("connection key", &p.name, &p.connection_key)?,
                 delegation_key: key("delegation key", &p.name, &p.delegation_key)?,
-                certificates: p.certificates,
-                groups: p.groups,
+                certificates,
+                groups,
             };
             if site.persons.insert(p.name.clone(), person).is_some() {
                 return Err(SiteError::Duplicate(p.name));

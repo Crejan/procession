@@ -8,10 +8,10 @@ use std::sync::Arc;
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD;
 use common::*;
+use p_act::Document;
 use p_act::exchange::{ClearancePolicy, Message};
 use p_age::net::{Lines, serve_tls};
 use p_age::tls::{EXPORTER_LABEL, client_config, server_config};
-use p_age::wire::ConnectionDoc;
 use rcgen::{BasicConstraints, CertificateParams, IsCa, Issuer, KeyPair};
 use rustls_pki_types::ServerName;
 use tokio::io::{AsyncWriteExt, duplex};
@@ -76,7 +76,7 @@ async fn a_sign_in_made_for_another_tls_connection_is_refused() {
     wr.write_all(b"{\"schema_version\":1,\"type\":\"hello\"}\n").await.unwrap();
     let challenge: serde_json::Value = serde_json::from_slice(&lines.read(None).await.unwrap().unwrap()).unwrap();
     // a binding exported from some other connection (here: made up), correctly signed
-    let doc = ConnectionDoc::compose("jan", challenge["nonce"].as_str().unwrap(), &STANDARD.encode([9u8; 32]));
+    let doc = connection_doc("jan", challenge["nonce"].as_str().unwrap(), [9u8; 32]).as_bytes().to_vec();
     let sig = p_act::sign::sign_connection(&p_act::sign::Signer::plain(&w.jan_connection), &doc).unwrap();
     let line = serde_json::json!({"schema_version":1,"type":"signin","doc":STANDARD.encode(&doc),"doc_sig":p_act::sign::signature_to_base64(&sig)});
     wr.write_all(&[serde_json::to_vec(&line).unwrap(), b"\n".to_vec()].concat()).await.unwrap();

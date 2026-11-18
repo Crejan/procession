@@ -19,10 +19,8 @@ use crate::site::{Site, SiteError};
 /// Why the configuration could not be used.
 #[derive(Debug, Error)]
 pub enum ConfigError {
-    #[error("cannot read {path}: {source}")]
-    Read { path: String, source: std::io::Error },
-    #[error("{path} is not a configuration: {source}")]
-    Parse { path: String, source: serde_json::Error },
+    #[error(transparent)]
+    Settings(#[from] p_act::settings::SettingsError),
     #[error(transparent)]
     Site(#[from] SiteError),
     #[error(transparent)]
@@ -77,13 +75,10 @@ pub struct Config {
 }
 
 impl Config {
+    /// Read the file with `p_act::settings`: one JSON object, no duplicate member, no unknown member, a regular file
+    /// that nobody but its owner (or root) can write. At least one address to listen on.
     pub fn read(path: &Path) -> Result<Config, ConfigError> {
-        let shown = path.display().to_string();
-        // A configuration that someone else can change is refused.
-        crate::perm::check_config_file(path)?;
-        let bytes = std::fs::read(path).map_err(|source| ConfigError::Read { path: shown.clone(), source })?;
-        let config: Config =
-            serde_json::from_slice(&bytes).map_err(|source| ConfigError::Parse { path: shown, source })?;
+        let config: Config = p_act::settings::read(path)?;
         if config.listen.is_empty() {
             return Err(ConfigError::NoAddress);
         }

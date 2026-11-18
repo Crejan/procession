@@ -4,8 +4,7 @@
 //! - [`register`]: the delegations the broker knows.
 //! - [`core`]: the state and rules, without I/O: checks, the queue, the
 //!   clearance, the standing, the log.
-//! - [`wire`]: the messages of the connections that are the broker's own; the
-//!   shared exchange is `p_act::exchange`.
+//! - The messages of the connections are `p_act::exchange` and `p_act::broker`.
 //! - [`net`]: the two connections over any async byte stream; [`tls`]: the
 //!   TLS around them.
 //!
@@ -20,4 +19,3 @@ pub mod perm;
 pub mod register;
 pub mod site;
 pub mod tls;
-pub mod wire;

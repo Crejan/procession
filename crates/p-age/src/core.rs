@@ -12,19 +12,67 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, SystemTime};
 
+use p_act::broker::{DelegationMessage, NotRegisteredReason, Secret32, Signed, Standing, StandingContent, ToPledge};
 use p_act::exchange::{
-    Answer, Approved, BrokerReason, By, ClearanceAnswer, ErrorCode, Outcome, PledgeReason, Refused, Submit,
+    Answer, Approved, BrokerReason, By, Cancel, ClearanceAnswer, ErrorCode, ErrorMessage, Message, Outcome,
+    PledgeReason, Refused, Submit,
 };
 use p_act::limits::{CLOCK_TOLERANCE_SECONDS, MAX_DEADLINE_AHEAD_SECONDS, MAX_DELEGATION_SECONDS};
-use p_act::sign::{self, Agent, Fingerprint, signature_person};
-use p_act::{Clearance, DocumentHash, Timestamp};
+use p_act::sign::{Agent, Fingerprint, signature_person};
+use p_act::{Clearance, Document, DocumentHash, Timestamp};
 
 use crate::crypto::Crypto;
 use crate::log::{LogEntry, LogSink};
 use crate::perm::{self, PermError};
 use crate::register::{Register, Snapshot, Stopped};
 use crate::site::Site;
-use crate::wire::{NotRegistered, PledgeOut, ServiceOut, Standing};
+
+/// What the broker sends to a service on its connection.
+#[derive(Debug, Clone)]
+pub enum ServiceOut {
+    Answer(Answer),
+    Error(ErrorCode),
+    /// Close after what was queued before.
+    Close,
+}
+
+/// What the broker sends to a pledge on its connection.
+#[derive(Debug, Clone)]
+pub enum PledgeOut {
+    Ready,
+    /// The standing's bytes and the broker's signature over them.
+    Notice {
+        doc: Vec<u8>,
+        sig: String,
+    },
+    Submit(Box<Submit>),
+    Cancel(DocumentHash),
+    Registered(Fingerprint),
+    NotRegistered(Fingerprint, NotRegisteredReason),
+    /// The answer to a withdrawal: whether it is stored (`true`) or in force in memory only.
+    Withdrawn(Fingerprint, bool),
+    Error(ErrorCode),
+    /// Close after what was queued before.
+    Close,
+}
+
+impl PledgeOut {
+    /// The message to write, or `None` for `Close`.
+    #[must_use]
+    pub fn to_message(&self) -> Option<ToPledge> {
+        Some(match self {
+            PledgeOut::Ready => ToPledge::Ready,
+            PledgeOut::Notice { doc, sig } => ToPledge::Notice(Signed { doc: doc.clone(), sig: sig.clone() }),
+            PledgeOut::Submit(s) => ToPledge::Exchange(Box::new(Message::Submit((**s).clone()))),
+            PledgeOut::Cancel(h) => ToPledge::Exchange(Box::new(Message::Cancel(Cancel { request: *h }))),
+            PledgeOut::Registered(fp) => ToPledge::Registered(fp.clone()),
+            PledgeOut::NotRegistered(fp, reason) => ToPledge::NotRegistered { delegation: fp.clone(), reason: *reason },
+            PledgeOut::Withdrawn(fp, stored) => ToPledge::Withdrawn { delegation: fp.clone(), stored: *stored },
+            PledgeOut::Error(code) => ToPledge::Exchange(Box::new(Message::Error(ErrorMessage { error: *code }))),
+            PledgeOut::Close => return None,
+        })
+    }
+}
 
 /// Why the register on disk was not used.
 #[derive(Debug, thiserror::Error)]
@@ -171,7 +219,7 @@ struct Held {
 #[derive(Debug)]
 struct Link {
     conn: ConnId,
-    nonce: String,
+    nonce: Secret32,
     /// The counter of the next standing on this connection.
     next_n: u64,
 }
@@ -464,21 +512,22 @@ impl Core {
         let Some(link) = self.links.get_mut(person) else { return Err(()) };
         let n = link.next_n;
         link.next_n += 1;
-        let (conn, nonce) = (link.conn, link.nonce.clone());
+        let (conn, nonce) = (link.conn, link.nonce);
         let known = self.site.person(person);
-        let standing = Standing::new(
-            person,
-            &nonce,
+        let content = StandingContent {
+            to: person.to_owned(),
+            nonce,
             n,
-            self.register.is_blocked(person),
-            Vec::new(),
-            self.register.withdrawn_of(person, now),
-            known.map(|p| p.certificates.clone()).unwrap_or_default(),
-            known.map(|p| p.groups.clone()).unwrap_or_default(),
-        );
-        let bytes = standing.bytes();
-        match self.crypto.sign_standing(&bytes) {
-            Ok(sig) => Ok(Effect::Pledge(conn, PledgeOut::Notice { doc: bytes, sig })),
+            blocked: self.register.is_blocked(person),
+            blocked_keys: Vec::new(),
+            withdrawn: self.register.withdrawn_of(person, now).iter().filter_map(|fp| fp.parse().ok()).collect(),
+            certificates: known.map(|p| p.certificates.clone()).unwrap_or_default(),
+            groups: known.map(|p| p.groups.clone()).unwrap_or_default(),
+        };
+        // `compose` writes every member, the lists sorted and without duplicates, and checks the result.
+        let standing = Standing::compose(&content).map_err(|e| eprintln!("page: cannot write the standing: {e}"))?;
+        match self.crypto.sign_standing(&standing) {
+            Ok(sig) => Ok(Effect::Pledge(conn, PledgeOut::Notice { doc: standing.as_bytes().to_vec(), sig })),
             Err(e) => {
                 eprintln!("page: cannot sign the standing: {e}");
                 Err(())
@@ -487,9 +536,9 @@ impl Core {
     }
 
     /// A pledge signed in: it is told it is ready, then the standing, then every request that waited.
-    pub fn pledge_signed_in(&mut self, person: &str, conn: ConnId, nonce: &str, now: SystemTime) -> Vec<Effect> {
+    pub fn pledge_signed_in(&mut self, person: &str, conn: ConnId, nonce: &Secret32, now: SystemTime) -> Vec<Effect> {
         let mut fx = Vec::new();
-        if let Some(old) = self.links.insert(person.to_owned(), Link { conn, nonce: nonce.to_owned(), next_n: 0 }) {
+        if let Some(old) = self.links.insert(person.to_owned(), Link { conn, nonce: *nonce, next_n: 0 }) {
             fx.push(Effect::Pledge(old.conn, PledgeOut::Error(ErrorCode::Superseded)));
             fx.push(Effect::Pledge(old.conn, PledgeOut::Close));
         }
@@ -574,38 +623,40 @@ impl Core {
     }
 
     /// A delegation pledge registers. Authenticated by the sign-in alone; the certificate is what authorises it.
-    pub fn register_delegation(&mut self, person: &str, conn: ConnId, cert: &str, now: SystemTime) -> Vec<Effect> {
+    pub fn register_delegation(
+        &mut self,
+        person: &str,
+        conn: ConnId,
+        message: &DelegationMessage,
+        now: SystemTime,
+    ) -> Vec<Effect> {
         let reply = |out| vec![Effect::Pledge(conn, out)];
-        let Ok(agent) = sign::agent_certificate(cert) else {
-            // No identifier can be named for a certificate that cannot be read.
-            return vec![
-                Effect::Pledge(conn, PledgeOut::Error(ErrorCode::MalformedLine)),
-                Effect::Pledge(conn, PledgeOut::Close),
-            ];
-        };
+        // The certificate was read under formats section 3.1 when the message was parsed; one that breaks them
+        // never gets here (it has no fingerprint to answer under: `error malformed-line`).
+        let (agent, cert) = (&message.agent, message.certificate.as_str());
         let fp = agent.delegation.clone();
         let no = |why| reply(PledgeOut::NotRegistered(fp.clone(), why));
         if agent.person != person {
-            return no(NotRegistered::NotYours);
+            return no(NotRegisteredReason::NotYours);
         }
         if self.register.is_blocked(person) {
-            return no(NotRegistered::Blocked);
+            return no(NotRegisteredReason::Blocked);
         }
         let (from, until) = (
             i64::try_from(agent.valid_after).unwrap_or(i64::MAX),
             i64::try_from(agent.valid_before).unwrap_or(i64::MAX),
         );
         if until.saturating_sub(from) > MAX_DELEGATION_SECONDS {
-            return no(NotRegistered::TooLong);
+            return no(NotRegisteredReason::TooLong);
         }
         if unix(now) < from || unix(now) >= until {
-            return no(NotRegistered::BadCertificate);
+            return no(NotRegisteredReason::BadCertificate);
         }
         let Some(key) = self.site.person(person).map(|p| p.delegation_key.clone()) else {
-            return no(NotRegistered::NotYours);
+            return no(NotRegisteredReason::NotYours);
         };
         if self.crypto.check_agent_certificate(cert, &key).is_err() {
-            return no(NotRegistered::BadCertificate);
+            return no(NotRegisteredReason::BadCertificate);
         }
         // A certificate that is known changes nothing, so nothing needs writing.
         if self.register.person_of(fp.as_str()).is_none() {
@@ -613,7 +664,7 @@ impl Core {
             if self.permit(now, change).is_err() {
                 // Registering permits: refused while the register cannot be written. `unavailable` says nothing
                 // about why, and the connection stays open.
-                return no(NotRegistered::Unavailable);
+                return no(NotRegisteredReason::Unavailable);
             }
         }
         reply(PledgeOut::Registered(fp))
@@ -736,6 +787,7 @@ mod tests {
     use super::*;
     use crate::crypto::CryptoError;
     use crate::log::MemoryLog;
+    use p_act::broker::ConnectionDocument;
     use p_act::rating::{Damage, Disruption, Exposure, Rating};
     use p_act::sign::{PublicKey, SignError};
     use p_act::{Call, CallContent, CallId, Request, ServiceId};
@@ -745,6 +797,8 @@ mod tests {
     const AGENT_A: &str = "SHA256:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
     const AGENT_B: &str = "SHA256:BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB";
     const NOW: i64 = 1_800_000_000;
+    const NONCE1: [u8; 32] = [1; 32];
+    const NONCE2: [u8; 32] = [2; 32];
 
     fn now(plus: i64) -> SystemTime {
         at(NOW + plus)
@@ -760,7 +814,7 @@ mod tests {
         fn verify_call(&self, _: &Call, _: &str, _: &PublicKey) -> Result<Agent, CryptoError> {
             Err(CryptoError::Sign(SignError::MalformedSignature))
         }
-        fn verify_connection(&self, _: &[u8], _: &str, _: &str, _: &PublicKey) -> Result<(), CryptoError> {
+        fn verify_connection(&self, _: &ConnectionDocument, _: &str, _: &PublicKey) -> Result<(), CryptoError> {
             Ok(())
         }
         fn check_agent_certificate(&self, _: &str, _: &PublicKey) -> Result<Agent, CryptoError> {
@@ -769,7 +823,7 @@ mod tests {
         fn sign_clearance(&self, _: &Clearance) -> Result<String, CryptoError> {
             Ok(SIG.to_owned())
         }
-        fn sign_standing(&self, _: &[u8]) -> Result<String, CryptoError> {
+        fn sign_standing(&self, _: &Standing) -> Result<String, CryptoError> {
             Ok(SIG.to_owned())
         }
     }
@@ -871,7 +925,7 @@ mod tests {
     }
 
     fn sign_in(core: &mut Core, person: &str, conn: ConnId) -> Vec<Effect> {
-        core.pledge_signed_in(person, conn, "nonce-1", now(0))
+        core.pledge_signed_in(person, conn, &NONCE1, now(0))
     }
 
     fn answer(hash: DocumentHash, outcome: Outcome) -> Answer {
@@ -910,7 +964,7 @@ mod tests {
         for v in [a, b, c] {
             f.core.submit(SVC, v, now(0));
         }
-        let fx = f.core.pledge_signed_in("jan", PLEDGE, "n", now(30));
+        let fx = f.core.pledge_signed_in("jan", PLEDGE, &NONCE1, now(30));
         assert_eq!(submits(&fx, PLEDGE), [ha, hc]);
     }
 
@@ -1156,13 +1210,14 @@ mod tests {
     fn a_second_sign_in_of_a_person_supersedes_the_first_and_the_counter_starts_again() {
         let mut f = fixture(5);
         sign_in(&mut f.core, "jan", PLEDGE);
-        let fx = f.core.pledge_signed_in("jan", ConnId(8), "nonce-2", now(1));
+        let fx = f.core.pledge_signed_in("jan", ConnId(8), &NONCE2, now(1));
         assert!(matches!(
             to_pledge(&fx, PLEDGE).as_slice(),
             [PledgeOut::Error(ErrorCode::Superseded), PledgeOut::Close]
         ));
         let standing = notice_json(&to_pledge(&fx, ConnId(8)));
-        assert_eq!((standing["nonce"].as_str(), standing["n"].as_u64()), (Some("nonce-2"), Some(0)));
+        let expected = base64::Engine::encode(&base64::engine::general_purpose::STANDARD, NONCE2);
+        assert_eq!((standing["nonce"].as_str(), standing["n"].as_u64()), (Some(expected.as_str()), Some(0)));
     }
 
     fn notice_json(outs: &[PledgeOut]) -> serde_json::Value {

@@ -12,6 +12,7 @@ use std::time::{Duration, SystemTime};
 
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD;
+use p_act::broker::ConnectionDocument;
 use p_act::exchange::{Answer, Approved, ClearancePolicy, Message, Outcome, Submit};
 use p_act::rating::{Damage, Disruption, Exposure, Rating};
 use p_act::sign::{Namespace, PublicKey, Signer, sign_call, sign_request, signature_to_base64};
@@ -21,7 +22,6 @@ use p_age::crypto::SshCrypto;
 use p_age::log::MemoryLog;
 use p_age::net::{Broker, Clock, Lines, Timeouts, serve_connection};
 use p_age::site::Site;
-use p_age::wire::ConnectionDoc;
 use tempfile::TempDir;
 use tokio::io::{AsyncWriteExt, DuplexStream, ReadHalf, WriteHalf, duplex};
 
@@ -304,11 +304,17 @@ pub async fn open_pledge(w: &World) -> Client {
     open_pledge_on(&w.broker, BINDING, Timeouts::default()).await
 }
 
+/// The connection document for the nonce the broker sent (base64, 32 bytes) and the TLS binding.
+pub fn connection_doc(person: &str, nonce_b64: &str, binding: [u8; 32]) -> ConnectionDocument {
+    let nonce: [u8; 32] = STANDARD.decode(nonce_b64).unwrap().try_into().unwrap();
+    ConnectionDocument::compose(person, &nonce, &binding).unwrap()
+}
+
 /// The sign-in message for `person`, signed with `key`, for the nonce and binding given.
 pub fn signin_message(person: &str, key: &Path, nonce: &str, binding: [u8; 32]) -> serde_json::Value {
-    let doc = ConnectionDoc::compose(person, nonce, &STANDARD.encode(binding));
-    let sig = p_act::sign::sign_connection(&Signer::plain(key), &doc).unwrap();
-    serde_json::json!({"schema_version":1,"type":"signin","doc":STANDARD.encode(&doc),"doc_sig":signature_to_base64(&sig)})
+    let doc = connection_doc(person, nonce, binding);
+    let sig = doc.sign(&Signer::plain(key)).unwrap();
+    serde_json::json!({"schema_version":1,"type":"signin","doc":STANDARD.encode(doc.as_bytes()),"doc_sig":signature_to_base64(&sig)})
 }
 
 impl Client {

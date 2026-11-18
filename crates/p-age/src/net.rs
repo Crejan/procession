@@ -12,23 +12,33 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Duration, Instant, SystemTime};
 
-use base64::Engine as _;
-use base64::engine::general_purpose::STANDARD;
-use p_act::exchange::{ErrorCode, LineBuffer, Message};
+use p_act::broker::{ConnectionDocument, First, FromPledge, FromService, Secret32, ToPledge, first_kind};
+use p_act::exchange::{ClearancePolicy, ErrorCode, ErrorMessage, ExchangeError, LineBuffer, Message};
 use ring::rand::{SecureRandom, SystemRandom};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::net::TcpListener;
 use tokio::sync::{OwnedSemaphorePermit, Semaphore, mpsc};
 use tokio_rustls::TlsAcceptor;
 
-use crate::core::{ConnId, Core, Effect, Stored, vet};
+use crate::core::{ConnId, Core, Effect, PledgeOut, ServiceOut, Stored, vet};
 use crate::crypto::Crypto;
 use crate::site::Site;
 use crate::tls;
-use crate::wire::{
-    ConnectionDoc, First, ParseFailure, PledgeIn, PledgeOut, ServiceIn, ServiceOut, challenge_line, first_kind,
-    parse_pledge_line, parse_service_line, pledge_line, service_line,
-};
+
+/// The line for a message to a pledge. `None` for `Close`.
+fn pledge_line(out: &PledgeOut) -> Option<Vec<u8>> {
+    out.to_message()?.encode().ok()
+}
+
+/// The line for a message to a service. `None` for `Close`, or if the answer cannot be written.
+fn service_line(out: &ServiceOut) -> Option<Vec<u8>> {
+    let policy = ClearancePolicy::Required;
+    match out {
+        ServiceOut::Answer(a) => Message::Answer(a.clone()).encode(policy).ok(),
+        ServiceOut::Error(code) => Message::Error(ErrorMessage { error: *code }).encode(policy).ok(),
+        ServiceOut::Close => None,
+    }
+}
 
 /// The waits of the connections. The defaults are the document's; tests shorten them.
 #[derive(Debug, Clone, Copy)]
@@ -317,19 +327,19 @@ where
                         break;
                     }
                 };
-                match parse_service_line(&line) {
-                    Err(ParseFailure::Close(code)) => {
-                        if let Some(code) = code { send_service_error(&mut wr, code).await; }
-                        break;
-                    }
-                    Err(ParseFailure::BadRequest(hash)) => {
+                match FromService::parse(&line) {
+                    Err(ExchangeError::BadRequest { hash, .. }) => {
                         submitted = true;
                         broker.with_core(move |c, now| ((), c.refuse_unparsed(conn, hash, now))).await;
                     }
-                    Ok(ServiceIn::Ack { request }) => {
+                    Err(e) => {
+                        if let Some(code) = e.code() { send_service_error(&mut wr, code).await; }
+                        break;
+                    }
+                    Ok(FromService::Ack(request)) => {
                         broker.with_core(move |c, now| ((), c.ack(conn, request, now))).await;
                     }
-                    Ok(ServiceIn::Exchange(message)) => match *message {
+                    Ok(FromService::Exchange(message)) => match *message {
                         Message::Cancel(c) => {
                             broker.with_core(move |core, now| ((), core.cancel(conn, c.request, now))).await;
                         }
@@ -415,10 +425,10 @@ where
     }
 }
 
-fn random_b64() -> Option<String> {
+fn random_nonce() -> Option<Secret32> {
     let mut bytes = [0u8; 32];
     SystemRandom::new().fill(&mut bytes).ok()?;
-    Some(STANDARD.encode(bytes))
+    Some(bytes)
 }
 
 /// One pledge connection (section 5), after its `hello`. `binding` is what both ends exported from the TLS
@@ -428,18 +438,19 @@ where
     R: AsyncRead + Unpin,
     W: AsyncWrite + Unpin,
 {
-    let Some(nonce) = random_b64() else { return };
-    if !write_line(&mut wr, &challenge_line(&nonce)).await {
+    let Some(nonce) = random_nonce() else { return };
+    let Ok(challenge) = ToPledge::Challenge(nonce).encode() else { return };
+    if !write_line(&mut wr, &challenge).await {
         return;
     }
-    let Some(person) = sign_in(&broker, &mut lines, &mut wr, &nonce, &STANDARD.encode(binding)).await else {
+    let Some(person) = sign_in(&broker, &mut lines, &mut wr, &nonce, &binding).await else {
         let _ = wr.shutdown().await;
         return;
     };
     let conn = broker.new_conn();
     let mut rx = broker.attach(conn);
-    let (p, n) = (person.clone(), nonce.clone());
-    broker.with_core(move |c, now| ((), c.pledge_signed_in(&p, conn, &n, now))).await;
+    let p = person.clone();
+    broker.with_core(move |c, now| ((), c.pledge_signed_in(&p, conn, &nonce, now))).await;
     loop {
         tokio::select! {
             read = lines.read(Some(broker.timeouts.pledge_silence)) => {
@@ -451,25 +462,21 @@ where
                         break;
                     }
                 };
-                match parse_pledge_line(&line) {
-                    Err(ParseFailure::Close(code)) => {
-                        if let Some(code) = code { send_pledge_error(&mut wr, code).await; }
+                match FromPledge::parse(&line) {
+                    Err(e) => {
+                        if let Some(code) = e.code() { send_pledge_error(&mut wr, code).await; }
                         break;
                     }
-                    Err(ParseFailure::BadRequest(_)) => {
-                        send_pledge_error(&mut wr, ErrorCode::MalformedLine).await;
-                        break;
-                    }
-                    Ok(PledgeIn::Ping) => {}
-                    Ok(PledgeIn::Delegation { cert }) => {
+                    Ok(FromPledge::Ping) => {}
+                    Ok(FromPledge::Delegation(message)) => {
                         let p = person.clone();
-                        broker.with_core(move |c, now| ((), c.register_delegation(&p, conn, &cert, now))).await;
+                        broker.with_core(move |c, now| ((), c.register_delegation(&p, conn, &message, now))).await;
                     }
-                    Ok(PledgeIn::Withdraw { delegation }) => {
+                    Ok(FromPledge::Withdraw(delegation)) => {
                         let p = person.clone();
                         broker.with_core(move |c, now| ((), c.withdraw(&p, conn, &delegation, now))).await;
                     }
-                    Ok(PledgeIn::Exchange(message)) => match *message {
+                    Ok(FromPledge::Exchange(message)) => match *message {
                         Message::Answer(answer) => {
                             let p = person.clone();
                             broker.with_core(move |c, now| ((), c.pledge_answer(&p, answer, now))).await;
@@ -482,7 +489,7 @@ where
                         }
                     },
                     // pledge signs in once.
-                    Ok(PledgeIn::Signin { .. }) => {
+                    Ok(FromPledge::Signin(_)) => {
                         send_pledge_error(&mut wr, ErrorCode::UnknownType).await;
                         break;
                     }
@@ -511,8 +518,8 @@ async fn sign_in<R, W>(
     broker: &Arc<Broker>,
     lines: &mut Lines<R>,
     wr: &mut W,
-    nonce: &str,
-    binding_b64: &str,
+    nonce: &Secret32,
+    binding: &Secret32,
 ) -> Option<String>
 where
     R: AsyncRead + Unpin,
@@ -528,12 +535,15 @@ where
             return None;
         }
     };
-    let (doc, sig) = match parse_pledge_line(&line) {
-        Ok(PledgeIn::Signin { doc, doc_sig }) => (doc, doc_sig),
-        // A line that is not JSON at all is told so; what is JSON but is not a sign-in is `signin`, whether or not
-        // it is a message the broker knows, so that the vocabulary of the protocol is not probed before sign-in.
-        Err(ParseFailure::Close(Some(code))) if code != ErrorCode::UnknownType => {
-            send_pledge_error(wr, code).await;
+    let signed = match FromPledge::parse(&line) {
+        Ok(FromPledge::Signin(signed)) => signed,
+        // A line that is too long, or of a version not spoken, is told so; everything else that is not a sign-in is
+        // `signin`, whether or not it is a message the broker knows or one that is well formed, so that nothing
+        // about the protocol is probed before sign-in.
+        Err(e) if matches!(e.code(), Some(ErrorCode::LineTooLong | ErrorCode::UnsupportedVersion)) => {
+            if let Some(code) = e.code() {
+                send_pledge_error(wr, code).await;
+            }
             return None;
         }
         _ => {
@@ -541,15 +551,17 @@ where
             return None;
         }
     };
+    let (nonce, binding) = (*nonce, *binding);
     let verified = async {
-        let parsed = ConnectionDoc::parse(&doc)?;
-        if parsed.nonce != nonce || parsed.tls != binding_b64 {
+        let doc = ConnectionDocument::parse_unverified(signed.doc).ok()?;
+        if !doc.is_for(&nonce, &binding) {
             return None;
         }
-        let person = broker.site.person(&parsed.person).filter(|p| p.enabled)?;
-        let (crypto, key, name) = (Arc::clone(&broker.crypto), person.connection_key.clone(), parsed.person.clone());
-        let ok = broker.offload(move || crypto.verify_connection(&doc, &sig, &name, &key).is_ok()).await?;
-        ok.then_some(parsed.person)
+        let person = broker.site.person(doc.person()).filter(|p| p.enabled)?;
+        let (crypto, key, sig) = (Arc::clone(&broker.crypto), person.connection_key.clone(), signed.sig);
+        let name = doc.person().to_owned();
+        let ok = broker.offload(move || crypto.verify_connection(&doc, &sig, &key).is_ok()).await?;
+        ok.then_some(name)
     }
     .await;
     let Some(person) = verified else {
