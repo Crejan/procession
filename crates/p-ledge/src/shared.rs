@@ -356,8 +356,10 @@ impl Shared {
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
             Err(e) => return Err(Error::io(format!("reading {}", self.programs_file.display()))(e)),
         };
-        let file: ProgramsFile = serde_json::from_slice(&bytes)
-            .map_err(|e| Error::Corrupt { path: self.programs_file.clone(), problem: e.to_string() })?;
+        let file: ProgramsFile = serde_json::from_slice(&bytes).map_err(|e| Error::Corrupt {
+            path: self.programs_file.clone(),
+            problem: crate::outside::json_problem(&e),
+        })?;
         let mut policy = self.policy.lock().map_err(|_| Error::Refused("poisoned".into()))?;
         // Everything read back is checked before any of it counts: a file with a name that breaks the rule, or a
         // standing that is not one of the two, is refused whole, like a damaged one. Nothing of it is repeated.

@@ -319,6 +319,7 @@ fn status(shared: &Shared) -> Value {
         "protects_nothing": "keys are in files and the person is identified by the program's path",
         "keys": shared.keys.read().map_or(0, |keys| keys.len()),
         "programs": shared.policy.lock().map_or(0, |policy| policy.programs().count()),
+        "broker_as_of": shared.broker_state.as_of(),
     })
 }
 

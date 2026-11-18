@@ -458,6 +458,10 @@ fn agents_verb(mut args: Vec<String>) -> Done {
                     );
                 }
             }
+            // What pledge keeps of the broker's word (restrictions, groups) is as old as that standing; shown, never decided on.
+            if let Some(at) = data["broker_as_of"].as_str() {
+                println!("broker restrictions as of {}", outside::text(at));
+            }
             Ok(0)
         }
         (Some("withdraw"), Some(id), None) => {

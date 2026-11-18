@@ -75,7 +75,7 @@ impl Answers {
                 for (number, line) in text.lines().enumerate() {
                     let entry: Line = serde_json::from_str(line).map_err(|e| Error::Corrupt {
                         path: path.clone(),
-                        problem: format!("line {}: {e}", number + 1),
+                        problem: format!("line {}: {}", number + 1, crate::outside::json_problem(&e)),
                     })?;
                     match entry {
                         Line::Used { call, request, expires } if expires > now => {

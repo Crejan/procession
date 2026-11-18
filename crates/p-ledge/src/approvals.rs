@@ -38,6 +38,9 @@ use crate::mute::Muter;
 use crate::shared::{KeyInfo, Shared};
 
 /// The namespace of an approval.
+/// The one line a dialog shows when the service says the result can carry text written by others: always the same.
+pub const HOST_TEXT_LINE: &str = "The result may contain text written by others on that host.";
+
 pub const APPROVAL_NAMESPACE: &str = "approval-v1@procession";
 /// A request whose submitter goes away at or after its deadline, or within this many seconds
 /// before it, is recorded `expired` and not `cancelled`: a service that gives up at its own deadline
@@ -184,6 +187,8 @@ struct Facts {
     clamped: bool,
     peer: Option<crate::peer::Seen>,
     via_broker: bool,
+    /// Whether the action's result can carry text that is not the service's (signed by the service).
+    host_text: Option<bool>,
     /// Pledge's own exact reason for a refusal, for the person and the record; the agent hears the coarse class.
     why: Option<&'static str>,
 }
@@ -329,6 +334,9 @@ fn description(facts: &Facts, request: &Request) -> Description {
     fields.push(("damage", words.1));
     fields.push(("disruption", words.2));
     fields.push(("deadline", request.call().deadline().to_string()));
+    if request.host_text() {
+        fields.push(("note", HOST_TEXT_LINE.to_owned()));
+    }
     Description { title: "an agent asks for this to be carried out".into(), fields }
 }
 
@@ -347,6 +355,7 @@ fn process(
     let now = shared.now();
     let deadline = call.deadline();
     facts.call = Some(call.id().to_string());
+    facts.host_text = Some(request.host_text());
     facts.deadline = Some(deadline);
     facts.service = Some((call.service().host.clone(), call.service().name.clone()));
 
@@ -621,6 +630,7 @@ fn entry(hash: &str, ending: &Ending, facts: &Facts) -> Value {
     }
     put("peer", facts.peer.as_ref().map(peer_json));
     put("via", facts.via_broker.then(|| Value::from("broker")));
+    put("host_text", facts.host_text.map(Value::from));
     put("why", facts.why.map(Value::from));
     Value::Object(entry)
 }

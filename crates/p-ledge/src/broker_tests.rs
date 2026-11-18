@@ -105,6 +105,7 @@ impl W {
         let n = self.n;
         self.n += 1;
         StandingContent {
+            at: p_act::Timestamp::now().expect("clock"),
             to: "jan".into(),
             nonce: NONCE,
             n,
@@ -710,4 +711,51 @@ fn not_ready_ends_the_right_to_issue_not_the_restrictions_and_is_told_once() {
     fresh.sign_in();
     fresh.feed(&ToPledge::NotReady).expect("not ready");
     assert!(fresh.link.is_ready() && !fresh.link.can_issue());
+}
+
+#[test]
+fn the_standings_at_is_shown_as_of_and_never_decides_anything() {
+    let mut w = W::new();
+    w.sign_in();
+    // An old, a future and an ordinary `at`: each standing is accepted exactly as before.
+    for (n, at) in [1_i64, 4_000_000_000, p_act::Timestamp::now().expect("clock").unix()].into_iter().enumerate() {
+        let mut content = w.content();
+        content.at = p_act::Timestamp::from_unix(at).expect("time");
+        content.blocked = n % 2 == 0;
+        w.send_standing(&content);
+        assert!(w.link.can_issue());
+        assert_eq!(
+            w.lab.rig.shared.broker_state.is_blocked(),
+            n % 2 == 0,
+            "the restrictions are the standing's, not its age's"
+        );
+        assert_eq!(w.lab.rig.shared.broker_state.as_of(), Some(content.at.to_string()));
+    }
+    assert!(w.events("standing-ignored").is_empty());
+    // Shown: `pledge agents list` and `status` carry it; it survives a restart with the restrictions.
+    let listed = crate::agents::list(&w.lab.rig.shared);
+    assert!(listed["broker_as_of"].is_string());
+    w.lab.rig.restart();
+    assert!(w.lab.rig.shared.broker_state.as_of().is_some());
+}
+
+#[test]
+fn a_request_whose_result_may_carry_text_of_others_shows_one_fixed_line_and_the_record_keeps_the_member() {
+    let mut w = W::new();
+    let agent = w.agent();
+    w.ready();
+    for host_text in [false, true] {
+        let (call, call_sig) = w.lab.call(&agent, &["h"], 120);
+        let (request, sig) =
+            w.lab.request_with_host_text(&call, &call_sig, crate::approvals_tests::INTERNAL, "svc", host_text);
+        w.lab.rig.dialogs.push(yes());
+        w.lab.rig.dialogs.push(yes());
+        let answer = w.lab.connect().ask(&request, &sig);
+        approval(&answer);
+        let shown = w.lab.rig.shown().join("\n");
+        assert_eq!(shown.contains(crate::approvals::HOST_TEXT_LINE), host_text, "{shown}");
+        let entry = w.lab.entries().into_iter().rev().find(|e| e["type"] == "request").expect("entry");
+        assert_eq!(entry["host_text"], host_text);
+        assert_eq!(entry["result"], "approved", "it decides nothing: approved either way");
+    }
 }

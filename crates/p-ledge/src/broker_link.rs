@@ -552,6 +552,7 @@ impl Session {
                 certificates: &content.certificates,
                 groups: &content.groups,
                 now,
+                at: Some(&content.at.to_string()),
             },
             &verify,
         ) {

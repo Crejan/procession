@@ -125,3 +125,15 @@ fn errors_and_logs_carry_outside_text_only_escaped_and_bounded() {
         assert!(shown.chars().count() <= 203, "bounded: {}", shown.chars().count());
     }
 }
+
+#[test]
+fn a_json_problem_names_the_place_and_never_repeats_what_the_file_said() {
+    for probe in PROBES {
+        let text = format!("{{\"{probe}\": \"{probe}\", \"programs\": 5}}");
+        let error = serde_json::from_str::<std::collections::BTreeMap<String, String>>(&text).expect_err("wrong type");
+        let problem = crate::outside::json_problem(&error);
+        assert_clean(&problem, "problem");
+        assert!(!problem.contains("a") || problem.starts_with("it "), "{problem}");
+        assert!(!problem.contains("programs"), "{problem}");
+    }
+}

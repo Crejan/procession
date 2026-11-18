@@ -166,7 +166,12 @@ impl Config {
         let config: Self = match p_act::settings::read_optional(path) {
             Ok(Some(config)) => config,
             Ok(None) => return Ok(Self::default()),
-            Err(e) => return Err(Error::Corrupt { path: path.to_owned(), problem: e.to_string() }),
+            Err(e) => {
+                return Err(Error::Corrupt {
+                    path: path.to_owned(),
+                    problem: crate::outside::bounded(&e.to_string(), 200),
+                });
+            }
         };
         config.check().map_err(|problem| Error::Corrupt { path: path.to_owned(), problem })?;
         Ok(config)
@@ -183,7 +188,8 @@ impl Config {
             if !is_name(&host.host) {
                 return Err(format!("host {:?} is not a name", host.host));
             }
-            PublicKey::parse(&host.key).map_err(|e| format!("the key of host {}: {e}", host.host))?;
+            PublicKey::parse(&host.key)
+                .map_err(|e| format!("the key of host {}: {e}", crate::outside::bounded(&host.host, 64)))?;
         }
         for service in &self.services {
             if !is_name(&service.host) || service.name.is_empty() {
