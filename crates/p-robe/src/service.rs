@@ -20,7 +20,7 @@ use crate::outcome::{self, Outcome, Why};
 use crate::pledge::{PledgeLink, Waited};
 use crate::rate::{self, Mode};
 use crate::rules::{ARG_MAX, check_argument};
-use crate::runner::Runner;
+use crate::runner::{RunError, Runner};
 use crate::store::{StoreError, UsedStore};
 use crate::table::{self, Availability};
 use base64::Engine as _;
@@ -310,16 +310,9 @@ impl Service {
     fn run(&self, within: p_act::rating::Rating, call_id: &str, until: i64, action: &str, params: &[String]) -> Ended {
         let _one_at_a_time = self.run_lock.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         match self.runner.run(within, call_id, until, action, params) {
-            Err(why) => unavailable(format!("run:{why}")),
-            Ok(out) if out.timed_out => unavailable("run-limit"),
-            Ok(out) => match out.rc {
-                crate::dispatch::RC_REFUSED => (Outcome::Refused(Why::NotAllowed), "dispatcher-refused".into()),
-                crate::dispatch::RC_UNAVAILABLE => unavailable("dispatcher-unavailable"),
-                crate::dispatch::RC_BUSY => (Outcome::Refused(Why::TryLater), "dispatcher-busy".into()),
-                // Could not start before the deadline: nothing ran, and the call is over: expired, not try-later.
-                crate::dispatch::RC_EXPIRED => (Outcome::Expired, "dispatcher-deadline".into()),
-                rc => (Outcome::Done { rc, answer: out.stdout }, "ran".into()),
-            },
+            Err(RunError::NotStarted(why)) => unavailable(format!("run:{why}")),
+            Err(RunError::Lost(why)) => (Outcome::Failed, format!("run-lost:{why}")),
+            Ok(out) => crate::outcome::dispatcher(&out),
         }
     }
 }

@@ -57,7 +57,11 @@ pub fn build(config: &Config) -> Result<Service, String> {
         signer,
         store,
         PledgeLink { socket: config.pledge_socket.clone(), uid },
-        Box::new(SudoRunner { sudo: PathBuf::from("/usr/bin/sudo"), probe: config.probe.clone() }),
+        Box::new(SudoRunner {
+            sudo: PathBuf::from("/usr/bin/sudo"),
+            probe: config.probe.clone(),
+            limit: crate::runner::RUN_LIMIT,
+        }),
         log,
     ))
 }
