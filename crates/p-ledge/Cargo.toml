@@ -30,3 +30,13 @@ serde_json = "1"
 # Peer credentials of a socket, flock, isatty, proc_pidpath.
 libc = "0.2"
 thiserror = "2"
+# The connection to the broker: TLS 1.3 with the ring provider, blocking, no runtime (proposals/broker-connection.md).
+rustls = { version = "0.23.46", default-features = false, features = ["ring", "std"] }
+rustls-pki-types = { version = "1.15", features = ["std"] }
+
+[dev-dependencies]
+# The tests of the connection to the broker run against p-age's own code over real TLS (Unix sockets, no TCP).
+p-age = { path = "../p-age" }
+tokio = { version = "1.54", default-features = false, features = ["rt-multi-thread", "net", "io-util", "time", "sync", "macros"] }
+tokio-rustls = { version = "0.26.6", default-features = false, features = ["ring"] }
+rcgen = { version = "0.14", default-features = false, features = ["ring", "pem"] }

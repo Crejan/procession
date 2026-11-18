@@ -154,6 +154,11 @@ pub enum Code {
     PresenceDenied,
     /// No terminal, no key holder, or the record could not be written.
     Unavailable,
+    /// A broker is configured and cannot be reached, or did not answer, or could not take it now: nothing was
+    /// issued; try again.
+    BrokerUnavailable,
+    /// The broker refused to register the delegation.
+    BrokerRefused,
 }
 
 impl Code {
@@ -168,6 +173,8 @@ impl Code {
             Self::Refused => "refused",
             Self::PresenceDenied => "presence-denied",
             Self::Unavailable => "unavailable",
+            Self::BrokerUnavailable => "broker-unavailable",
+            Self::BrokerRefused => "broker-refused",
         }
     }
 }
@@ -397,7 +404,7 @@ fn keys_create(shared: &Shared, args: CreateArgs) -> Result<Value, Code> {
                 ),
             )
         }
-        purpose @ ("confirmed" | "automatic" | "delegation") => {
+        purpose @ ("confirmed" | "automatic" | "delegation" | "connection") => {
             if args.program.is_some() || args.user.is_some() || args.host_key.is_some() {
                 return Err(Code::BadArguments);
             }
@@ -407,6 +414,7 @@ fn keys_create(shared: &Shared, args: CreateArgs) -> Result<Value, Code> {
             let what = match purpose {
                 "confirmed" => "approvals the person was asked for",
                 "automatic" => "approvals in mode automatic",
+                "connection" => "signing in to the broker",
                 _ => "an agent's certificate",
             };
             (

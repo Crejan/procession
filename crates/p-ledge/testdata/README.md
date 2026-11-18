@@ -15,3 +15,6 @@ throwaway: keys that guard nothing, made for the tests of `src/agent`.
 - `host_rsa.pem`: the private half of a 2048-bit RSA key (PKCS#8), the only way
   the tests can sign with RSA. `host_rsa-cert.pub` is a *user* certificate for
   it, principal `alice`, signed by `ca_ed`.
+- `tls_root.pem`: a throwaway self-signed P-256 X.509 root (made with `openssl req -x509`),
+  `tls_root_key.pub` the SSH form of its public key (same key material), `other_key.pub` an
+  unrelated P-256 key. Used by the `broker` configuration tests.
