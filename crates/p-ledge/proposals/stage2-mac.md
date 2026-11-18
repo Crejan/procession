@@ -758,10 +758,10 @@ them.
 | 9 | A request while no presence check is possible | decided | It waits until its deadline and ends `expired`; the record says why it could not be asked (locked, sensor locked out) |
 | 10 | What the Touch ID prompt says | decided, subject to check 5 | As recommended: service, host and action; user and host for a login; person, groups and validity for a delegation; never a parameter or the agent's claim |
 | 11 | A first Mac stage with `Terminal` and real keys | decided | Accepted, for the owner only |
-| 12 | One Mac app or two | with the owner | The designer recommends two apps from one Swift code base; preserve's app then gets on `control.sock` exactly `keys.create` for a bound key and `keys.list`, by a rule per command and peer |
+| 12 | One Mac app or two | decided, by the owner | Two Mac apps, from one Swift code base. preserve's app is admitted on pledge's `control.sock` for exactly `keys.create` of a bound key and `keys.list`, by a rule per command and peer |
 | 13 | Take Atticus's SwiftUI front end at all | decided | Yes, with the condition as written: it becomes preserve's Mac front end only after the logic still in its views and view models has moved into the daemon and the socket protocol offers what section 8.5 lists. The three bypasses and the prune marker (section 8.2) are the list of what goes behind the protocol first. Nothing is copied yet |
 | 14 | "Cancel by closing" in p-reserve's protocol | decided | Closing a connection cancels only what was asked as bound to it: browsing, a preview or dump for display, subscriptions. A backup run, a prune, a check and a restore are the daemon's jobs with an identifier: they go on when the connection that started them closes, are cancelled only by an explicit message naming the identifier, and a later connection can list running jobs and attach to their events |
-| 15 | The licence of what is taken from Atticus | with the owner | No view is copied before the owner has said under which terms |
+| 15 | The licence of what is taken from Atticus | decided, by the owner | Atticus is his own, so its views may be taken into procession, and what results there is under `MIT OR Apache-2.0` like the rest; the shared Swift package states that licence. Atticus itself stays as it is and under its own licence: this covers taking code from it into procession, nothing else. **This is not a go for copying.** Copying views still waits on the condition of question 13 (the logic into the daemon first, the protocol meeting section 8.5) and, for anything that touches keys, on hand checks 1 to 5 |
 | 16 | Where the dialog for a request lives | decided | As recommended: a small program in pledge's bundle that `pledge serve` starts itself, holding no key and deciding nothing. The app's window may show the same question as a second place; the answer never depends on the app |
 
 Two of these decisions add to what the sections above say:
@@ -1061,10 +1061,15 @@ components in `Components.swift`, the error alert) and little content.
 
 Two more things that are not code:
 
-- Atticus's `LICENSE` begins "Copyright (c) 2026 C-IT-WORK GmbH. All rights
-  reserved … proprietary". `crates/p-ledge/Cargo.toml` says `MIT OR
-  Apache-2.0`. Taking the views across is the owner's decision as the
-  rights holder, and has to be made (question 15).
+- The licence (question 15, decided by the owner on 2026-11-18).
+  Atticus's `LICENSE` begins "Copyright (c) 2026 C-IT-WORK GmbH. All rights
+  reserved … proprietary"; `crates/p-ledge/Cargo.toml` says `MIT OR
+  Apache-2.0`. Atticus is the owner's own, so its views may be taken into
+  procession, and what results there is under `MIT OR Apache-2.0`; the
+  shared Swift package states that licence. Atticus itself stays under its
+  own. This settles the terms and is not a go: copying waits on the
+  condition of question 13 and, for anything that touches keys, on hand
+  checks 1 to 5.
 - The views' texts are English keys with a German table
   (`Resources/de.lproj`), and some German is written into the views
   directly (`"Letztes Backup: …"` in `MenuBarPopover.swift`, `"Protokoll"`
@@ -1076,7 +1081,7 @@ Two more things that are not code:
 `crates/p-reserve/SPEC.md` lists it as open and says that setup "stays one
 flow in the desktop app although two programs are behind it".
 
-*Recommendation:* **two apps from one code base.** A Swift package with
+**Decided by the owner on 2026-11-18: two apps from one code base.** A Swift package with
 what both need (the socket client, the components, the window and menu bar
 frame), and two targets:
 
@@ -1096,8 +1101,8 @@ Why not one:
   (`control-sock.md`, section 2). One identity that may do everything, from
   starting agents to pruning backups, is the wider key. With two apps the
   socket can admit preserve's app for two commands only. That needs a rule
-  per command and peer in `control.sock`, which is not there today
-  (question 12).
+  per command and peer in `control.sock`, which is not there today and
+  is part of this decision.
 - A person who approves requests and keeps no backup on that Mac needs
   pledge alone; p-reserve works with a key file where there is no pledge.
 
