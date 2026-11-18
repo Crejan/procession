@@ -15,6 +15,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
+use crate::register::Actor;
 use p_act::peer::{self, Policy, Throttle};
 use p_act::sign::Fingerprint;
 use serde::{Deserialize, Serialize};
@@ -335,8 +336,26 @@ fn done(stored: Stored) -> Reply {
     })
 }
 
-/// Carry out one command on the running broker.
+/// Carry out one command on the running broker, for a caller that is this process's own user (a test's, or the
+/// broker's own).
 pub async fn execute(broker: &Arc<Broker>, command: Command) -> Reply {
+    execute_as(broker, command, p_act::peer::own_uid()).await
+}
+
+/// Carry out one command for the administrator whose user id the peer lookup read. A block or a withdrawal records
+/// that uid and nothing else about the caller (not `SUDO_USER`, nothing the caller could set); through `sudo` it is
+/// 0. The account's name is looked up **after** the answer is made, on a thread of its own, and added if it comes.
+pub async fn execute_as(broker: &Arc<Broker>, command: Command, uid: u32) -> Reply {
+    let by = || Actor::Administrator { uid, account: None };
+    let records = matches!(command, Command::Block(_) | Command::Withdraw(_));
+    let reply = execute_command(broker, command, by).await;
+    if records && matches!(reply, Reply::Done(_)) {
+        broker.name_administrator_later(uid);
+    }
+    reply
+}
+
+async fn execute_command(broker: &Arc<Broker>, command: Command, by: impl Fn() -> Actor) -> Reply {
     let refused = |r| Reply::Refused(r, None);
     match command {
         Command::Status => match broker.with_core(|c, now| (c.status(now), Vec::new())).await {
@@ -348,14 +367,14 @@ pub async fn execute(broker: &Arc<Broker>, command: Command) -> Reply {
             if !broker.with_core(move |c, _| (c.knows_person(&name), Vec::new())).await.unwrap_or(false) {
                 return refused(Refusal::UnknownPerson);
             }
-            done(broker.block_person(p).await)
+            done(broker.block_person(p, by()).await)
         }
         Command::Block(Target::Key(k)) => {
             let fp = k.to_string();
             if !broker.with_core(move |c, _| (c.knows_key(&fp), Vec::new())).await.unwrap_or(false) {
                 return refused(Refusal::UnknownKey);
             }
-            done(broker.block_key(k.to_string()).await)
+            done(broker.block_key(k.to_string(), by()).await)
         }
         Command::Unblock(Target::Person(p)) => {
             let name = p.clone();
@@ -384,7 +403,7 @@ pub async fn execute(broker: &Arc<Broker>, command: Command) -> Reply {
             if !broker.with_core(move |c, _| (c.knows_delegation(&fp), Vec::new())).await.unwrap_or(false) {
                 return refused(Refusal::UnknownDelegation);
             }
-            done(broker.admin_withdraw(d).await)
+            done(broker.admin_withdraw(d, by()).await)
         }
     }
 }
@@ -423,7 +442,12 @@ pub const POLICY: Policy<'static> = Policy::OwnUserOrRoot;
 /// whose credentials cannot be read, or who is not admitted, is dropped and told nothing; the refusal is one
 /// throttled line on `sink`.
 pub fn admit_peer<S: AsRawFd>(socket: &S, throttle: &mut Throttle, sink: &mut dyn FnMut(&str)) -> bool {
-    peer::accept(socket, &POLICY, "admin socket", throttle, sink).is_some()
+    admitted_uid(socket, throttle, sink).is_some()
+}
+
+/// As [`admit_peer`], and the admitted peer's user id.
+pub fn admitted_uid<S: AsRawFd>(socket: &S, throttle: &mut Throttle, sink: &mut dyn FnMut(&str)) -> Option<u32> {
+    peer::accept(socket, &POLICY, "admin socket", throttle, sink).map(|p| p.uid())
 }
 
 /// Serve commands for ever.
@@ -434,21 +458,21 @@ pub async fn serve(listener: UnixListener, broker: Arc<Broker>) {
             tokio::time::sleep(Duration::from_millis(100)).await;
             continue;
         };
-        if !admit_peer(&stream, &mut throttle, &mut |line| eprintln!("{line}")) {
+        let Some(uid) = admitted_uid(&stream, &mut throttle, &mut |line| eprintln!("{line}")) else {
             continue;
-        }
+        };
         let broker = Arc::clone(&broker);
-        tokio::spawn(serve_one(stream, broker));
+        tokio::spawn(serve_one(stream, broker, uid));
     }
 }
 
 /// One command, one answer, and the end.
-pub async fn serve_one(stream: UnixStream, broker: Arc<Broker>) {
+pub async fn serve_one(stream: UnixStream, broker: Arc<Broker>, uid: u32) {
     let (rd, mut wr) = tokio::io::split(stream);
     let mut lines = Lines::with_limit(rd, WAIT, MAX_COMMAND_BYTES);
     let reply = match lines.read(Some(WAIT)).await {
         Ok(Some(line)) => match Command::parse(&line) {
-            Some(command) => execute(&broker, command).await,
+            Some(command) => execute_as(&broker, command, uid).await,
             None => Reply::Refused(Refusal::Malformed, None),
         },
         _ => return,

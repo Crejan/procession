@@ -25,9 +25,10 @@ use crate::certs::{self, BrokerCertificate, BrokerCertificateFailure, Certificat
 use crate::crypto::Crypto;
 use crate::log::{LogEntry, LogSink};
 use crate::perm::{self, PermError};
+use crate::register::{Actor, Mark, Registration};
 use crate::register::{Register, Snapshot, Stopped};
 use crate::site::Site;
-use crate::util::shown_error;
+use crate::util::{shown, shown_error};
 
 /// What the broker sends to a service on its connection.
 #[derive(Debug, Clone)]
@@ -249,7 +250,7 @@ fn at(secs: i64) -> SystemTime {
     SystemTime::UNIX_EPOCH + Duration::from_secs(u64::try_from(secs).unwrap_or(0))
 }
 
-fn stamp(t: SystemTime) -> Timestamp {
+pub(crate) fn stamp(t: SystemTime) -> Timestamp {
     // Clamped into the years `Timestamp` supports (0000 to 9999), so the conversion cannot fail.
     Timestamp::from_unix(unix(t).clamp(0, 253_402_300_799)).expect("clamped into the supported years")
 }
@@ -737,6 +738,7 @@ impl Core {
             to: person.to_owned(),
             nonce,
             n,
+            at: stamp(now),
             blocked: self.register.is_blocked(person),
             blocked_keys: known
                 .map(|p| p.key_fingerprints())
@@ -906,7 +908,8 @@ impl Core {
             eprintln!("page: no clearance: the broker has no valid certificate");
             return Err(());
         }
-        let clearance = Clearance::compose(hash, stamp(now)).map_err(drop)?;
+        let clearance =
+            Clearance::compose(hash, p_act::clearance::approval_hash(approval), stamp(now)).map_err(drop)?;
         let sig = self
             .crypto
             .sign_clearance(&clearance)
@@ -1004,7 +1007,14 @@ impl Core {
         }
         // A certificate that is known changes nothing, so nothing needs writing.
         if self.register.person_of(fp.as_str()).is_none() {
-            let change = |r: &mut Register| r.register(fp.as_str(), person, at(until));
+            // What the register keeps beside the fingerprint is read back under the same rule, so it is made fit to be:
+            // the label is free text of the certificate, shown escaped and bounded.
+            let details = Registration {
+                groups: agent.groups.iter().filter(|g| crate::register::valid_account(g)).cloned().collect(),
+                label: shown(&agent.key_id),
+                registered: Some(now),
+            };
+            let change = |r: &mut Register| r.register(fp.as_str(), person, at(until), details);
             if self.permit(now, change).is_err() {
                 // Registering permits: refused while the register cannot be written. `unavailable` says nothing
                 // about why, and the connection stays open.
@@ -1029,7 +1039,7 @@ impl Core {
             }
             Some(_) => {}
         }
-        self.register.withdraw(delegation.as_str());
+        self.register.withdraw(delegation.as_str(), Mark::new(now, Actor::Pledge { person: person.to_owned() }));
         // In force whether or not it is stored.
         let stored = self.store_restriction(now) == Stored::Yes;
         let hashes: Vec<_> =
@@ -1056,14 +1066,22 @@ impl Core {
     }
 
     /// An administrator blocks a person: what waits for them is refused, and a connected pledge is told.
-    pub fn block_person(&mut self, person: &str, now: SystemTime) -> (Vec<Effect>, Stored) {
-        self.register.block(person);
+    pub fn block_person(&mut self, person: &str, by: Actor, now: SystemTime) -> (Vec<Effect>, Stored) {
+        self.register.block(person, Mark::new(now, by));
         let stored = self.store_restriction(now);
         let hashes: Vec<_> =
             self.held.iter().filter(|(_, h)| h.answer.is_none() && h.person == person).map(|(k, _)| *k).collect();
         let mut fx = self.refuse_held(hashes, BrokerReason::Person, now);
         fx.extend(self.standing(person, now));
         (fx, stored)
+    }
+
+    /// The account's name for an administrator's uid, found after the verb was answered: added to the marks that have
+    /// none, and stored. A name that cannot be stored now is stored with the next write; nothing is decided by it.
+    pub fn name_administrator(&mut self, uid: u32, name: &str, now: SystemTime) {
+        if self.register.name_administrator(uid, name) {
+            let _ = self.try_store(now);
+        }
     }
 
     /// An administrator lifts a block; a connected pledge is told.
@@ -1077,8 +1095,8 @@ impl Core {
     /// its person's connected pledge is told in a new standing, or closed if the key is the one it signed in with;
     /// the requests that wait under an agent key, or under any delegation of the person whose delegation key it is,
     /// are refused.
-    pub fn block_key(&mut self, fingerprint: &str, now: SystemTime) -> (Vec<Effect>, Stored) {
-        self.register.block_key(fingerprint);
+    pub fn block_key(&mut self, fingerprint: &str, by: Actor, now: SystemTime) -> (Vec<Effect>, Stored) {
+        self.register.block_key(fingerprint, Mark::new(now, by));
         let stored = self.store_restriction(now);
         let mut fx = Vec::new();
         let owner = self.site.owner_of_key(fingerprint).map(str::to_owned);
@@ -1121,11 +1139,11 @@ impl Core {
 
     /// An administrator withdraws a delegation: as the person's own withdrawal, and a connected pledge is told in a
     /// new standing, since `withdrawn` there changed.
-    pub fn admin_withdraw(&mut self, delegation: &Fingerprint, now: SystemTime) -> (Vec<Effect>, Stored) {
+    pub fn admin_withdraw(&mut self, delegation: &Fingerprint, by: Actor, now: SystemTime) -> (Vec<Effect>, Stored) {
         let Some(person) = self.register.person_of(delegation.as_str()).map(str::to_owned) else {
             return (Vec::new(), Stored::Yes);
         };
-        self.register.withdraw(delegation.as_str());
+        self.register.withdraw(delegation.as_str(), Mark::new(now, by));
         let stored = self.store_restriction(now);
         let hashes: Vec<_> =
             self.held.iter().filter(|(_, h)| h.answer.is_none() && &h.agent == delegation).map(|(k, _)| *k).collect();
@@ -1249,6 +1267,10 @@ mod tests {
     }
 
     /// Signatures that always succeed: the rules of `core` are tested here, the signatures in `tests/`.
+    fn admin() -> Actor {
+        Actor::Administrator { uid: 0, account: None }
+    }
+
     #[derive(Default)]
     struct Fake {
         keygen: Option<String>,
@@ -1336,10 +1358,10 @@ mod tests {
         let mut register = Register::default();
         let until = now(8 * 3600);
         for (fp, person) in [(AGENT_A, "jan"), (AGENT_B, "jan")] {
-            register.register(fp, person, until);
+            register.register(fp, person, until, Registration::default());
         }
-        register.register("SHA256:CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC", "off", until);
-        register.register("SHA256:DDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDD", "eva", until);
+        register.register("SHA256:CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC", "off", until, Registration::default());
+        register.register("SHA256:DDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDD", "eva", until, Registration::default());
         let core = Core::new(
             site(),
             Settings { waiting_per_agent: max_waiting },
@@ -1375,7 +1397,7 @@ mod tests {
         };
         let call = Call::compose(&content).unwrap();
         let rating = Rating::new(Exposure::Internal, Damage::None, Disruption::None);
-        let request = Request::compose(&call, SIG, rating).unwrap();
+        let request = Request::compose(&call, SIG, rating, false).unwrap();
         Vetted { submit: Submit::new(request, SIG).unwrap(), agent: agent(person, fp) }
     }
 
@@ -1472,7 +1494,7 @@ mod tests {
         for (v, reason) in cases {
             assert_eq!(refusal_of(&f.core.submit(SVC, v, now(0))), Some(reason));
         }
-        f.core.block_person("eva", now(0));
+        f.core.block_person("eva", admin(), now(0));
         let v = vetted("eva", "SHA256:DDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDD", 4, 120);
         assert_eq!(refusal_of(&f.core.submit(SVC, v, now(0))), Some(BrokerReason::Person));
         assert_eq!(f.core.held_count(), 0);
@@ -1755,7 +1777,7 @@ mod tests {
         let v = vetted("jan", AGENT_A, 1, 120);
         let hash = v.submit.hash();
         f.core.submit(SVC, v, now(0));
-        let (fx, stored) = f.core.block_person("jan", now(1));
+        let (fx, stored) = f.core.block_person("jan", admin(), now(1));
         assert_eq!(stored, Stored::Yes);
         assert_eq!(refusal_of(&fx), Some(BrokerReason::Person));
         let pledge = to_pledge(&fx, PLEDGE);
@@ -1820,7 +1842,7 @@ mod tests {
         f.core.submit(SVC, vetted("jan", AGENT_A, 1, 120), now(0));
         assert!(f.core.knows_key(AGENT_A) && f.core.knows_delegation(AGENT_A) && f.core.knows_person("jan"));
         assert!(!f.core.knows_key("SHA256:ZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZ"));
-        let (fx, stored) = f.core.block_key(AGENT_A, now(1));
+        let (fx, stored) = f.core.block_key(AGENT_A, admin(), now(1));
         assert_eq!(stored, Stored::Yes);
         assert_eq!(refusal_of(&fx), Some(BrokerReason::Delegation), "what waits under an agent key is refused");
         let status = f.core.status(now(0));
@@ -1875,7 +1897,7 @@ mod tests {
         if !disk.lock() {
             return;
         }
-        let (fx, stored) = f.core.block_person("jan", now(1));
+        let (fx, stored) = f.core.block_person("jan", admin(), now(1));
         assert!(matches!(stored, Stored::No(_)), "{stored:?}");
         assert_eq!(refusal_of(&fx), Some(BrokerReason::Person), "in force at once");
         assert!(f.core.is_blocked("jan"));
@@ -1921,7 +1943,7 @@ mod tests {
     fn lifting_a_block_is_refused_while_the_register_cannot_be_written_and_the_block_stays() {
         let disk = Disk::new();
         let mut f = fixture_on(&disk);
-        let (_, stored) = f.core.block_person("jan", now(0));
+        let (_, stored) = f.core.block_person("jan", admin(), now(0));
         assert_eq!(stored, Stored::Yes);
         if !disk.lock() {
             return;
@@ -1942,7 +1964,7 @@ mod tests {
         if !disk.lock() {
             return;
         }
-        f.core.block_person("jan", now(0));
+        f.core.block_person("jan", admin(), now(0));
         assert!(f.core.degraded().is_some());
         disk.unlock();
         f.core.sweep(now(30));
@@ -1960,10 +1982,10 @@ mod tests {
         if !disk.lock() {
             return;
         }
-        f.core.block_person("jan", now(0));
+        f.core.block_person("jan", admin(), now(0));
         assert!(f.core.degraded().is_some());
         disk.unlock();
-        let (_, stored) = f.core.block_person("eva", now(1));
+        let (_, stored) = f.core.block_person("eva", admin(), now(1));
         assert_eq!(stored, Stored::Yes);
         assert_eq!(f.core.degraded(), None);
         let on_disk = Core::read_state(&disk.path()).unwrap();
@@ -1977,7 +1999,7 @@ mod tests {
         let path = dir.path().join("register.json");
         let mut f = fixture(5);
         f.core.state_path = Some(path.clone());
-        f.core.block_person("eva", now(0));
+        f.core.block_person("eva", admin(), now(0));
         f.core.withdraw("jan", PLEDGE, &AGENT_A.parse().unwrap(), now(0));
         let register = Core::read_state(&path).unwrap();
         assert!(register.is_blocked("eva"));

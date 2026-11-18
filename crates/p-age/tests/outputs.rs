@@ -102,8 +102,14 @@ fn a_register_with_an_entry_that_breaks_the_rule_is_refused_whole_and_its_errors
     let path = dir.path().join("register.json");
     let fp = "SHA256:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
     for (text, why) in [
-        (serde_json::json!({"v": 1, "delegations": [], "blocked": [NASTY]}), "a bad name in blocked"),
-        (serde_json::json!({"v": 1, "delegations": [], "blocked": [], "blocked_keys": [NASTY]}), "a bad fingerprint"),
+        (
+            serde_json::json!({"v": 1, "delegations": [], "blocked": [{"name": NASTY, "at": 1, "by": {"kind": "administrator", "uid": 0}}]}),
+            "a bad name in blocked",
+        ),
+        (
+            serde_json::json!({"v": 1, "delegations": [], "blocked": [], "blocked_keys": [{"name": NASTY, "at": 1, "by": {"kind": "pledge", "person": "jan"}}]}),
+            "a bad fingerprint",
+        ),
         (
             serde_json::json!({"v": 1, "delegations": [{"fingerprint": fp, "person": NASTY, "until": 1, "withdrawn": false}], "blocked": []}),
             "a bad person in a delegation",

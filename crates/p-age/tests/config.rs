@@ -218,14 +218,18 @@ fn the_register_on_disk_is_private_versioned_and_never_replaced_by_an_empty_one(
     std::fs::write(&path, "{ not json").unwrap();
     mode(&path, 0o600);
     assert!(matches!(Core::read_state(&path), Err(StateError::Parse { .. })));
-    std::fs::write(&path, r#"{"v":2,"delegations":[],"blocked":["jan"]}"#).unwrap();
+    std::fs::write(&path, r#"{"v":2,"delegations":[],"blocked":[]}"#).unwrap();
     assert!(matches!(Core::read_state(&path), Err(StateError::Version { v: 2, .. })));
     std::fs::write(&path, r#"{"delegations":[],"blocked":[]}"#).unwrap();
     assert!(Core::read_state(&path).is_err(), "no version member");
     std::fs::write(&path, r#"{"v":1,"delegations":[],"blocked":["jan"],"extra":1}"#).unwrap();
     assert!(Core::read_state(&path).is_err(), "unknown member");
     // one that others can read or write is refused, and so is a directory open to others
-    std::fs::write(&path, r#"{"v":1,"delegations":[],"blocked":["jan"]}"#).unwrap();
+    std::fs::write(
+        &path,
+        r#"{"v":1,"delegations":[],"blocked":[{"name":"jan","at":5,"by":{"kind":"administrator","uid":0}}]}"#,
+    )
+    .unwrap();
     assert!(Core::read_state(&path).unwrap().is_blocked("jan"));
     mode(&path, 0o644);
     assert!(matches!(Core::read_state(&path), Err(StateError::Perm(_))));

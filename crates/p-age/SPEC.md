@@ -221,11 +221,14 @@ rule is made here.
   damaged file are the same doubt, and an empty register in their place
   would drop blocks without a word. The first start is explicit: `page init`
   creates the empty register and refuses if one exists.
-  At `v` 1 (the draft; it freezes with stage 2) each delegation also records
+  The clearance names the approval it cleared (`approval`, the hash of the
+  armoured signature as pledge made it) and the standing says when the broker
+  made it (`at`, the broker's clock, UTC to the second, shown and never decided
+  on). At `v` 1 (the draft; it freezes with stage 2) each delegation also records
   its groups (from the certificate's extension), the key's label and when it was
   registered; each block and each withdrawal records when it was made and by
-  whom: `{"by":"pledge","person":...}` for the person's own pledge, or
-  `{"by":"administrator","uid":N,"account":"name"}` for the administrator whose
+  whom: `"by":{"kind":"pledge","person":...}` for the person's own pledge, or
+  `"by":{"kind":"administrator","uid":N,"account":"name"}` for the administrator whose
   user `p_act::peer` read on `admin.sock`. The **uid** is what the kernel said
   and is the record; the **account** name is the name the system gave that uid
   at that moment, for a reader (it can change later, so it is never used to
