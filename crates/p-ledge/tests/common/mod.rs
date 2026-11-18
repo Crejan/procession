@@ -83,13 +83,21 @@ impl Server {
         thread::spawn(move || {
             BufReader::new(stderr).lines().map_while(Result::ok).for_each(|l| drop(sender.send(format!("err: {l}"))))
         });
-        let server = Self { child, stdin, lines, state, sockets, _dir: dir };
+        let mut server = Self { child, stdin, lines, state, sockets, _dir: dir };
         let deadline = Instant::now() + Duration::from_secs(10);
         // Ready means all three sockets are bound: `pledge serve` binds them one after the other, and a
         // command that runs between the first and the last finds "not running".
         for socket in ["agent.sock", "control.sock", "service.sock"] {
             while std::os::unix::net::UnixStream::connect(server.sockets.join(socket)).is_err() {
-                assert!(Instant::now() < deadline, "pledge serve did not bind {socket}");
+                // If pledge serve has already ended, say how and say everything it wrote.
+                let ended = server.child.try_wait().expect("try_wait");
+                if ended.is_some() || Instant::now() >= deadline {
+                    thread::sleep(Duration::from_millis(100));
+                    let written: Vec<String> = server.lines.try_iter().collect();
+                    let how = ended
+                        .map_or_else(|| "still running after 10 s".to_owned(), |status| format!("ended with {status}"));
+                    panic!("pledge serve did not bind {socket}: {how}; it wrote:\n{}", written.join("\n"));
+                }
                 thread::sleep(Duration::from_millis(50));
             }
         }
