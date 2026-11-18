@@ -183,19 +183,29 @@ fn a_blocked_program_stays_blocked_and_a_second_pledge_serve_is_refused() {
     assert!(history.iter().any(|e| e["event"] == "program-blocked"), "and the block itself is an event");
 }
 
+/// Says that the sshd login test did not run. With `PLEDGE_REQUIRE_SSHD=1` in the
+/// environment, not running it is a failure, so that a pass means it ran.
+fn skipped(why: &str) {
+    eprintln!("SKIPPED ssh login test: {why}");
+    assert!(
+        std::env::var_os("PLEDGE_REQUIRE_SSHD").is_none(),
+        "PLEDGE_REQUIRE_SSHD is set, and the sshd login test could not run: {why}"
+    );
+}
+
 /// A login with the real `ssh` against a local `sshd`. It needs to bind a TCP
 /// port and an `sshd` binary; where it cannot, it says so and does nothing.
 #[test]
 fn ssh_logs_in_through_pledge_to_a_local_sshd_or_is_skipped() {
     let Ok(probe) = TcpListener::bind("127.0.0.1:0") else {
-        eprintln!("SKIPPED ssh login test: binding a local TCP port is not allowed here, so no sshd can run");
+        skipped("binding a local TCP port is not allowed here, so no sshd can run");
         return;
     };
     let port = probe.local_addr().expect("addr").port();
     drop(probe);
     let sshd = ["/usr/sbin/sshd", "/usr/bin/sshd"].into_iter().find(|p| Path::new(p).exists());
     let Some(sshd) = sshd else {
-        eprintln!("SKIPPED ssh login test: no sshd found");
+        skipped("no sshd found");
         return;
     };
     let dir = Dir::new("sshd");

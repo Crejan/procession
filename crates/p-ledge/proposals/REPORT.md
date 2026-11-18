@@ -593,3 +593,16 @@ runs). I did not reproduce the failure before the fix myself.
 4. `Call::showable()` from p-act replaces my 2000-character sum; the person's name
    stays checked by pledge.
 Unit tests 20 runs in a loop: 0 failures.
+
+## Hello and JSON settings
+
+1. The connection to the broker (step 6) is not built; nothing to do now. When it
+   is, `hello` (`{"schema_version":1,"type":"hello"}`, within 10 s) is the first
+   message, then `challenge`.
+2. `config.json` had: one object (now explicit: serde would also read an array),
+   unknown members refused. Added: refused if anyone but its owner or root can write
+   it (no group or other write bit; owner this user or root). Tests for modes and
+   for arrays, strings, two objects, comments.
+3. The sshd test prints `SKIPPED ...` (stderr, visible only with `--nocapture`) and
+   passes when it cannot bind a TCP port on 127.0.0.1 or finds no sshd. With
+   `PLEDGE_REQUIRE_SSHD=1` the same conditions fail the test, so a pass then means it ran.
