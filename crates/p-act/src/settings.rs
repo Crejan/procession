@@ -38,9 +38,9 @@ pub enum SettingsError {
     Io { path: String, source: std::io::Error },
     #[error("{0} is not a regular file")]
     NotARegularFile(String),
-    #[error("{path} can be written by someone other than its owner (mode {mode:04o})")]
+    #[error("{path} can be written by someone other than its owner (mode {mode:04o}); a settings file must not be writable by its group or by others: run `chmod 600 {}`", shell_quote(.path))]
     WritableByOthers { path: String, mode: u32 },
-    #[error("{path} is owned by user {uid}, who is neither root nor the user running this program")]
+    #[error("{path} is owned by user {uid}, who is neither root nor the user running this program; a settings file must be owned by root or by the user that runs the program: as root, run `chown <that user> {}`", shell_quote(.path))]
     WrongOwner { path: String, uid: u32 },
     #[error("{0} is larger than the limit")]
     TooLarge(String),
@@ -52,6 +52,21 @@ pub enum SettingsError {
     NotUtf8,
     #[error("{0}")]
     Invalid(String),
+}
+
+/// `path` as one word for a shell, for the remedy in a message: left alone if it has only safe characters, else in
+/// single quotes. It is the caller's own argument, never a value from the file.
+fn shell_quote(path: &str) -> String {
+    if !path.is_empty()
+        && path.bytes().all(|b| {
+            b.is_ascii_alphanumeric()
+                || matches!(b, b'/' | b'.' | b'_' | b'-' | b'+' | b',' | b':' | b'@' | b'%' | b'=')
+        })
+    {
+        path.to_owned()
+    } else {
+        format!("'{}'", path.replace('\'', "'\\''"))
+    }
 }
 
 /// Whether a file with this owner and mode may be trusted by a program running as `euid`: owned by root
@@ -319,5 +334,35 @@ mod tests {
         std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o700)).unwrap();
         // (As root the directory is searchable anyway.)
         assert!(matches!(r, Err(SettingsError::Io { .. })) || effective_uid() == 0, "{r:?}");
+    }
+
+    #[test]
+    fn the_refusals_say_what_to_do() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = write(dir.path(), "s.json", br#"{"listen":"hunter2-secret"}"#, 0o664);
+        let text = read::<Strict>(&p).unwrap_err().to_string();
+        let path = p.display().to_string();
+        assert!(text.contains("can be written by someone other than its owner"), "{text}");
+        assert!(text.contains("must not be writable by its group or by others"), "{text}");
+        assert!(text.contains(&format!("run `chmod 600 {path}`")), "{text}");
+        assert!(text.contains("0664") && !text.contains("hunter2"), "{text}");
+        // The owner's case, with the words of before kept in it.
+        let text = check_owner_and_mode("/etc/prog/s.json", 1001, 0o600, 1000).unwrap_err().to_string();
+        assert!(
+            text.contains("is owned by user 1001, who is neither root nor the user running this program"),
+            "{text}"
+        );
+        assert!(
+            text.contains("must be owned by root or by the user that runs the program")
+                && text.contains("chown <that user> /etc/prog/s.json"),
+            "{text}"
+        );
+        // The path is one word for a shell, whatever it holds.
+        let text = check_owner_and_mode("/tmp/it's here/s.json", 0, 0o666, 1000).unwrap_err().to_string();
+        assert!(text.contains(r#"chmod 600 '/tmp/it'\''s here/s.json'"#), "{text}");
+        assert_eq!(shell_quote("/etc/a-b_c.d/s.json"), "/etc/a-b_c.d/s.json");
+        assert_eq!(shell_quote(""), "''");
+        assert_eq!(shell_quote("a b"), "'a b'");
+        assert_eq!(shell_quote("$(x)"), "'$(x)'");
     }
 }
