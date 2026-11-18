@@ -42,7 +42,7 @@ cargo --version; rustc --version
 cargo install --list 2>/dev/null | grep -A0 -E '^rustic' || true
 
 if [ "$MODE" = build ]; then
-  cd "$HERE"; cargo build --release; grep -A1 -E 'name = "rustic_(core|backend)"' Cargo.lock; exit 0
+  cd "$HERE"; cargo build --release --locked; grep -A1 -E 'name = "rustic_(core|backend)"' Cargo.lock; exit 0
 fi
 
 SFTP=/usr/libexec/sftp-server; [ -x "$SFTP" ] || SFTP=/usr/lib/openssh/sftp-server
@@ -102,7 +102,7 @@ kill "$AGENT"; AGENT=""; unset SSH_AUTH_SOCK SSH_AGENT_PID
 fi
 
 echo "== C: build (visible; a first release build of rustic_core takes minutes)"
-cd "$HERE"; cargo build --release
+cd "$HERE"; cargo build --release --locked
 pin_known_hosts
 echo "== C: run (progress lines print before and after each step; Ctrl-C cleans up)"
 TRIAL_ENDPOINT="ssh://$USER@127.0.0.1:$PORT" TRIAL_ROOT="$W/repo" TRIAL_KEY="$W/id" \
