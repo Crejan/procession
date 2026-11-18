@@ -59,7 +59,9 @@ fn bundle(dir: &Path, validity: &str) -> (Vec<u8>, String) {
 fn run(args: &[&str], stdin: &[u8]) -> (i32, String, String) {
     let mut child =
         pact().args(args).stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped()).spawn().unwrap();
-    child.stdin.take().unwrap().write_all(stdin).unwrap();
+    // `pact` may end before it reads (a usage error, a refused option): the write then fails with `Broken pipe`, and
+    // the exit status and the messages are what the tests judge.
+    let _ = child.stdin.take().unwrap().write_all(stdin);
     let out = child.wait_with_output().unwrap();
     (out.status.code().unwrap(), String::from_utf8(out.stdout).unwrap(), String::from_utf8(out.stderr).unwrap())
 }
@@ -159,7 +161,7 @@ fn serve_speaks_mcp_on_its_socket_and_stdio_is_a_shim_to_it() {
         .stderr(Stdio::piped())
         .spawn()
         .unwrap();
-    server.stdin.take().unwrap().write_all(&good).unwrap();
+    let _ = server.stdin.take().unwrap().write_all(&good); // if the server ended, `wait_for_socket` says why
     wait_for_socket(&socket, &mut server);
     assert_eq!(std::fs::metadata(&socket).unwrap().permissions().mode() & 0o777, 0o600);
 
@@ -353,7 +355,7 @@ fn serve_admits_the_running_user_only_and_says_so_and_drops_other_clients_in_sil
             .stderr(Stdio::piped())
             .spawn()
             .unwrap();
-        server.stdin.take().unwrap().write_all(&good).unwrap();
+        let _ = server.stdin.take().unwrap().write_all(&good); // if the server ended, `wait_for_socket` says why
         wait_for_socket(socket, &mut server);
         server
     };

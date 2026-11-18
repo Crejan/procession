@@ -1022,7 +1022,8 @@ fn the_site_ca_lines_as_written_are_accepted_by_ssh_keygen_itself() {
             .stderr(Stdio::null())
             .spawn()
             .unwrap();
-        std::io::Write::write_all(&mut child.stdin.take().unwrap(), data).unwrap();
+        // `ssh-keygen` may refuse before it reads (`Broken pipe` here): its exit status is the verdict.
+        let _ = std::io::Write::write_all(&mut child.stdin.take().unwrap(), data);
         assert_eq!(child.wait().unwrap().success(), ok, "{key} {namespace} {id}");
     }
 }
