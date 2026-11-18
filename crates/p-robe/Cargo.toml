@@ -34,12 +34,19 @@ tokio = { version = "1", features = ["rt-multi-thread", "net", "time", "sync", "
 
 [dev-dependencies]
 tempfile = "3"
+# In-memory streams for the HTTP tests.
+tokio = { version = "1", features = ["io-util", "rt-multi-thread", "net", "time", "macros"] }
 # `pact`'s own parser, composer and in-process signer, for the stage-1 cross run.
 p-act = { path = "../p-act", version = "0.0.0", features = ["pact"] }
 
 [[test]]
 name = "stage1"
 path = "tests/stage1.rs"
+required-features = ["test-verbs"]
+
+[[test]]
+name = "stage1_http"
+path = "tests/stage1_http.rs"
 required-features = ["test-verbs"]
 
 [[test]]
