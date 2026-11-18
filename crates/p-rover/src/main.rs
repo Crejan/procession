@@ -6,7 +6,7 @@ use std::process::ExitCode;
 use std::time::Duration;
 
 use clap::{Args, Parser, Subcommand, ValueEnum};
-use p_rover::observe::{irq, procs, sched};
+use p_rover::observe::{cmdline, irq, procs, sched};
 use p_rover::{Config, Env, Error, Report, render};
 use p_roc::{CpuSet, Root};
 
@@ -77,6 +77,8 @@ enum Cmd {
         #[arg(long, default_value_t = sched::DEFAULT_MAX)]
         max: usize,
     },
+    /// Live kernel command line against the declared one, kernel flavour, sysctls (cost: light).
+    Cmdline,
     /// IRQ affinity, /proc/interrupts delta, timer ticks (cost: light).
     Irq {
         /// Sampling window, 1s to 60s.
@@ -108,6 +110,7 @@ fn run(cli: &Cli) -> Result<Report, Error> {
         Cmd::Sched { cpus, duration, max } => {
             sched::run(&env, &sched::Args { cpus: cpus.clone(), duration: *duration, max: *max })
         }
+        Cmd::Cmdline => cmdline::run(&env),
         Cmd::Irq { duration, top } => irq::run(&env, &irq::Args { duration: *duration, top: *top }),
     }
 }

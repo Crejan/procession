@@ -1,5 +1,6 @@
 //! The observe subcommands: each reads, none changes anything.
 
+pub mod cmdline;
 pub mod irq;
 pub mod procs;
 pub mod sched;

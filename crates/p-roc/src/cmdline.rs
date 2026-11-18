@@ -76,6 +76,52 @@ impl Cmdline {
     }
 }
 
+/// Whether `key` is one that matters to a realtime host: CPU isolation, tick
+/// and RCU offload, IRQ placement, C- and P-states, timers, mitigations,
+/// watchdogs, huge pages, the console.
+#[must_use]
+pub fn is_rt_key(key: &str) -> bool {
+    const KEYS: [&str; 16] = [
+        "isolcpus",
+        "nohz_full",
+        "rcu_nocbs",
+        "rcu_nocb_poll",
+        "irqaffinity",
+        "kthread_cpus",
+        "threadirqs",
+        "skew_tick",
+        "tsc",
+        "nosmt",
+        "idle",
+        "mitigations",
+        "nmi_watchdog",
+        "hugepages",
+        "transparent_hugepage",
+        "console",
+    ];
+    KEYS.contains(&key) || key.ends_with(".max_cstate") || key.ends_with("_pstate")
+}
+
+impl Cmdline {
+    /// The realtime-relevant keys present, in command line order, last
+    /// occurrence of each; the value is `None` for a bare key.
+    #[must_use]
+    pub fn rt_keys(&self) -> Vec<(&str, Option<&str>)> {
+        let mut out: Vec<(&str, Option<&str>)> = Vec::new();
+        for t in &self.tokens {
+            let (k, v) = t.split_once('=').map_or((t.as_str(), None), |(k, v)| (k, Some(v)));
+            if !is_rt_key(k) {
+                continue;
+            }
+            match out.iter_mut().find(|(x, _)| *x == k) {
+                Some(slot) => slot.1 = v,
+                None => out.push((k, v)),
+            }
+        }
+        out
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -90,5 +136,10 @@ mod tests {
         assert_eq!(c.cpu_list("nohz_full").unwrap().unwrap().to_string(), "2-3");
         assert_eq!(c.cpu_list("isolcpus").unwrap().unwrap().to_string(), "4"); // last wins
         assert!(Cmdline::parse("isolcpus=2-").cpu_list("isolcpus").is_err());
+        let c = Cmdline::parse("quiet intel_pstate=disable processor.max_cstate=1 tsc=reliable tsc=nowatchdog threadirqs");
+        assert_eq!(
+            c.rt_keys(),
+            [("intel_pstate", Some("disable")), ("processor.max_cstate", Some("1")), ("tsc", Some("nowatchdog")), ("threadirqs", None)]
+        );
     }
 }
