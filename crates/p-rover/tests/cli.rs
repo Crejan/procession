@@ -8,11 +8,16 @@ use common::fixtures;
 
 fn prover(args: &[&str]) -> Output {
     let host = fixtures().join("host1");
+    // A copy of the config with a fixed mode: the reader refuses one that others can write.
+    let cfg_dir = tempfile::tempdir().unwrap();
+    let cfg = cfg_dir.path().join("config.toml");
+    std::fs::copy(host.join("config.toml"), &cfg).unwrap();
+    std::fs::set_permissions(&cfg, std::os::unix::fs::PermissionsExt::from_mode(0o644)).unwrap();
     let mut c = Command::new(env!("CARGO_BIN_EXE_prover"));
     c.args(["--proc-root", host.join("proc").to_str().unwrap()])
         .args(["--sys-root", host.join("sys").to_str().unwrap()])
         .args(["--boot-root", host.join("boot").to_str().unwrap()])
-        .args(["--config", host.join("config.toml").to_str().unwrap()])
+        .args(["--config", cfg.to_str().unwrap()])
         .args(args);
     c.output().unwrap()
 }

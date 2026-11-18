@@ -38,6 +38,11 @@ impl Host {
     pub fn new(name: &str) -> Self {
         let dir = tempfile::tempdir().unwrap();
         copy_dir(&fixtures().join(name), dir.path());
+        // The settings reader refuses a file others can write; do not lean on the umask of the checkout.
+        let cfg = dir.path().join("config.toml");
+        if cfg.exists() {
+            fs::set_permissions(&cfg, std::os::unix::fs::PermissionsExt::from_mode(0o644)).unwrap();
+        }
         Self { dir }
     }
 
