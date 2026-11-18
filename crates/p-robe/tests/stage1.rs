@@ -8,7 +8,7 @@
 //! sudo. Everything is real except the HTTP between `pact` and `probe`, sudo,
 //! and the person.
 //!
-//! Needs `ssh-keygen`, a built `pledge` (`cargo build --workspace --features p-robe/test-verbs`)
+//! Needs `ssh-keygen`, a built `pledge` (`cargo build --workspace --features p-robe/test-verbs,p-act/pact`)
 //! and a directory where Unix sockets can be bound (`/tmp/claude/` in the sandbox this was written in).
 
 #![allow(unused_imports)]

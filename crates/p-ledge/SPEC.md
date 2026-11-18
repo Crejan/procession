@@ -219,7 +219,16 @@ delegations pledge issued and when each last asked; pledge cannot know
 whether an agent still runs.
 
 Withdrawing: pledge stops signing for that delegation at once and tells the
-broker. A withdrawal or block an administrator made at the broker reaches
+broker. The broker's answer says whether it stored the withdrawal. pledge
+writes that into the record with the withdrawal; while it is in force but
+not stored, pledge sends it again at every sign-in and at most once a minute
+on a standing connection, until the broker says stored. The person is asked
+nothing; `pledge agents list` and `pledge history` show it as a state of the
+withdrawal, not as an alarm. A registration the broker answers with
+`not-registered`, `unavailable` means the agent is not started: the
+delegation is not delivered, the person is told that the broker could not
+take it and that they can try again, and pledge does not try again by
+itself. A withdrawal or block an administrator made at the broker reaches
 pledge over its connection and has the same effect.
 
 **The broker.** pledge connects to the broker over TLS, checks the broker's

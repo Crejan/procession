@@ -120,7 +120,9 @@ impl PledgeLink {
                     outcome => return Waited::Answer(outcome),
                 },
                 Ok(Some(Message::Answer(_) | Message::Cancel(_))) => note("a message for a request not held: ignored"),
+                // What a service does not expect from pledge ends the exchange, as any other breach of it.
                 Ok(Some(Message::Submit(_))) => return Waited::Broken("pledge sent a submit".into()),
+                Ok(Some(Message::Hello)) => return Waited::Broken("pledge sent a hello".into()),
                 Ok(Some(Message::Error(e))) => return Waited::Broken(format!("pledge sent error {}", e.error.wire())),
                 Ok(None) => return Waited::Broken("pledge closed the connection".into()),
                 Err(e) => return Waited::Broken(format!("bad line from pledge: {e}")),

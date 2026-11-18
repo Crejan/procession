@@ -121,6 +121,11 @@ pub fn serve(shared: &Arc<Shared>, stream: UnixStream, peer: Option<(u32, Option
                 eprintln!("pledge: an answer from a service for {}: ignored", answer.request)
             }
             Ok(Some(Message::Error(_))) => break,
+            // `hello` is a pledge's first message to the broker; a service never sends it here.
+            Ok(Some(Message::Hello)) => {
+                send_error(&writer, ErrorCode::UnknownType);
+                break;
+            }
             Err(ExchangeError::BadRequest { hash, .. }) => approvals::refuse_malformed(shared, hash, &responder),
             Err(error) => {
                 if let Some(code) = error.code() {

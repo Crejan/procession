@@ -550,7 +550,10 @@ The registration is authenticated by the sign-in and by nothing else; there is n
 second signature. The answer is
 `{"schema_version":1,"type":"registered","delegation":"SHA256:..."}` or
 `{"schema_version":1,"type":"not-registered","delegation":"SHA256:...","reason":"..."}`
-(reasons, a closed list: `bad-certificate`, `too-long`, `not-yours`, `blocked`).
+(reasons, a closed list: `bad-certificate`, `too-long`, `not-yours`, `blocked`,
+`unavailable`). `unavailable` says that the broker could not take the
+registration now and nothing about why; the connection stays open, the
+delegation is not registered, and pledge does not try again by itself.
 
 A certificate that breaks `approval-formats.md` section 3.1 in its form has no
 fingerprint to answer under, so the answer to it is `error` `malformed-line`.
@@ -566,7 +569,19 @@ does not take into the register.
 The broker ends the delegation if it is this person's. It stops passing on
 requests under it, and the requests of it that are waiting are answered `refused`,
 `delegation`. A withdrawal only restricts, which is why the sign-in is enough to
-take it.
+take it. The broker answers
+
+```json
+{"schema_version":1,"type":"withdrawn","delegation":"SHA256:Qm3...","stored":true}
+```
+
+`stored` is `false` when the withdrawal is in force in the broker's memory but
+could not be written to its register (`crates/p-age/SPEC.md`). pledge writes
+that into its record with the withdrawal, and sends the withdrawal again at
+every sign-in, and at most once a minute on a standing connection, until the
+answer says `true`. A withdrawal changes nothing the second time, so repeating
+it is safe. The person is asked nothing: pledge itself refuses every request
+under a withdrawn delegation, whatever the broker remembers.
 
 **Keeping the connection.** pledge sends `{"schema_version":1,"type":"ping"}`
 every 30 s while it sends nothing else; the broker closes a connection that was
@@ -611,7 +626,7 @@ In the manner of `approval-formats.md` section 7. `<person>`, `<service>`,
 | `notice` (`doc`, `doc_sig`: the standing) | the broker's key, certified by the site CA | `broker-v1@procession` | pledge | `broker` | the site CA's key |
 | a certificate in the standing | the site CA | (a certificate) | pledge | its own key and `<person>:confirmed` / `:automatic` | the site CA's key |
 | `delegation`'s `cert` (a certificate, not a signature) | the person's delegation key | (a certificate) | the broker, with `p-act` | the person, as its only principal | the person's delegation key, site project |
-| the messages themselves, and `answer` without approval (`declined`, `refused`, `expired`), `cancel`, `withdraw`, `ping`, `ack`, `registered`, `not-registered`, `hello`, `challenge`, `ready`, `error` | nobody | none | nobody | none | TLS and, on pledge's connection, the sign-in |
+| the messages themselves, and `answer` without approval (`declined`, `refused`, `expired`), `cancel`, `withdraw`, `ping`, `ack`, `registered`, `not-registered`, `withdrawn`, `hello`, `challenge`, `ready`, `error` | nobody | none | nobody | none | TLS and, on pledge's connection, the sign-in |
 
 Allowed-signers lines (`namespaces` are what keeps one document from
 verifying as another):

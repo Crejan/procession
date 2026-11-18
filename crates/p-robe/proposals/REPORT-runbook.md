@@ -192,3 +192,20 @@ and the certificate lapses. Now:
   `Content-Type: application/json`, `MCP-Protocol-Version: 2025-06-18`, no `Origin`), of reading the SSE response as
   it arrives (not after it ends) with the 45 s idle timeout, and that the head arrives at acceptance. If a failure shows
   at the seam of `ureq`'s chunked decoding and this stream, that is the first place to look.
+
+## Update: p-act's client merged; `Hello`
+
+- `Message::Hello` (new in p-act's exchange) is handled in `pledge.rs` as any message a service does not
+  expect from pledge: the exchange ends (`Waited::Broken`, the call is `unavailable`). `c7369ab`.
+  (`p-ledge` and `p-age` have their own exhaustive matches on it; not mine.)
+- **`tests/stage1_http.rs` against `pact::http::HttpTransport`:** it compiles, and what it uses fits: `pact call TOOL
+  ARGS < bundle` (the same `cli`), the result printed as the MCP result (`content`, which the test's `told` reads), the
+  bundle's `http://127.0.0.1:PORT/mcp` (http on loopback is allowed), the headers `Accept: application/json,
+  text/event-stream`, `Content-Type: application/json`, `MCP-Protocol-Version: 2025-06-18`, no `Origin` (as the MCP layer
+  requires), no redirects, a 45 s per-read timeout, an SSE response read until the answer to its request id. One change in the
+  commands: `pact` is built only with p-act's `pact` feature, so the build line is now `cargo build --workspace --features
+  p-robe/test-verbs,p-act/pact` everywhere (runbook, tests' messages). Stage B (B5) now says the client is merged and
+  names `pact-tls` for stage 2. **Not shown by anyone:** `ureq`'s chunked decoding handing the stream over piece by piece;
+  p-act's socket tests and mine both skip or never ran over TCP.
+- The dropped-answer invariant (`0c9ca11`) stands: tested with a valid approval of another request's bytes under another
+  hash, dropped and logged; the wait goes on; only the real answer is acted on, once.
