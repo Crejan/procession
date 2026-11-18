@@ -25,6 +25,7 @@
 use crate::call::Call;
 use crate::clearance::Clearance;
 use crate::error::ParseError;
+use crate::error::shown;
 use crate::hash::Document;
 use crate::request::Request;
 use crate::sshsig::SshsigSigner;
@@ -105,33 +106,36 @@ impl Namespace {
 pub enum SignError {
     #[error("signature is not an armoured SSH signature")]
     MalformedSignature,
-    #[error("`{0}` is not a public key line")]
+    #[error("not a public key line")]
     MalformedPublicKey(String),
     #[error("the signing key is not certified")]
     NotCertified,
-    #[error("certificate of key type `{0}` is not supported")]
+    #[error("certificate of key type `{}` is not supported", shown(.0, 64))]
     UnsupportedKeyType(String),
     #[error("the agent's certificate names {found} principals, not exactly one")]
     PrincipalCount { found: usize },
-    #[error("`{0}` is not a usable name for a person")]
+    #[error("`{}` is not a usable name for a person", shown(.0, 64))]
     BadPrincipal(String),
-    #[error("an agent's key must be Ed25519, this one is `{0}`")]
+    #[error("an agent's key must be Ed25519, this one is `{}`", shown(.0, 64))]
     AgentKeyNotEd25519(String),
     #[error("an agent's certificate must be a user certificate")]
     NotUserCertificate,
-    #[error("the agent's certificate has the critical option `{0}`")]
+    #[error("the agent's certificate has the critical option `{}`", shown(.0, 128))]
     CriticalOption(String),
     #[error(
-        "the certificate has the extension `{0}`; certificates the site CA issues carry none (issue them with `-O clear`)"
+        "the certificate has the extension `{}`; certificates the site CA issues carry none (issue them with `-O clear`)",
+        shown(.0, 128)
     )]
     SiteCertificateExtension(String),
-    #[error("the agent's certificate has the extension `{0}`, only `groups@procession` is allowed")]
+    #[error("the agent's certificate has the extension `{}`, only `groups@procession` is allowed", shown(.0, 128))]
     UnknownExtension(String),
     #[error("the agent's certificate has a bad `groups@procession`: {0}")]
     BadGroups(&'static str),
-    #[error("`{0}` is not a fingerprint like SHA256:<43 base64 characters>")]
+    #[error("not a fingerprint like SHA256:<43 base64 characters>")]
     MalformedFingerprint(String),
-    #[error("the certificate's principal `{0}` is not `broker`")]
+    #[error("the clearance names another approval than the one held")]
+    ClearanceNamesAnotherApproval,
+    #[error("the certificate's principal `{}` is not `broker`", shown(.0, 64))]
     NotBrokerName(String),
     #[error("there is no ssh-keygen to trust: {0}")]
     Keygen(#[from] crate::keygen::KeygenError),
@@ -145,17 +149,17 @@ pub enum SignError {
     CertificateNotYetValid,
     #[error("the certificate has expired")]
     CertificateExpired,
-    #[error("`{0}` is not an approval key's name, `<person>:confirmed` or `<person>:automatic`")]
+    #[error("`{}` is not an approval key's name, `<person>:confirmed` or `<person>:automatic`", shown(.0, 64))]
     NotAnApprovalName(String),
-    #[error("`{0}` is a name the site CA must never certify for a person")]
+    #[error("`{}` is a name the site CA must never certify for a person", shown(.0, 64))]
     ReservedName(String),
     #[error("a signer's raw signature is refused: {0}")]
     RawSignature(&'static str),
-    #[error("the key holder failed: {0}")]
+    #[error("the key holder failed: {}", shown(.0, 256))]
     Holder(String),
     #[error("the signature carries a certificate, and a plain key was expected")]
     UnexpectedCertificate,
-    #[error("ssh-keygen did not accept the certificate: {0}")]
+    #[error("ssh-keygen did not accept the certificate (its own words are in `SignError::log_detail`)")]
     CertificateNotVerified(String),
     #[error("ssh-keygen printed no signing key for the certificate")]
     NoIssuer,
@@ -171,12 +175,34 @@ pub enum SignError {
     AutomaticNotAcceptable,
     #[error("cannot run ssh-keygen: {0}")]
     Run(#[from] io::Error),
-    #[error("ssh-keygen failed ({status}): {stderr}")]
+    #[error("ssh-keygen failed ({})", shown(status, 64))]
     Tool { status: String, stderr: String },
-    #[error("signature rejected: {stderr}")]
+    #[error("signature rejected by ssh-keygen (its own words are in `SignError::log_detail`)")]
     Rejected { stderr: String },
     #[error(transparent)]
     Document(#[from] ParseError),
+}
+
+/// The longest text of a child program's standard error that [`SignError::log_detail`] returns, in characters.
+pub const MAX_LOG_DETAIL_CHARS: usize = 512;
+
+impl SignError {
+    /// What the program that was run said (its standard error, or for a rejected signature what it printed), **escaped
+    /// and cut to [`MAX_LOG_DETAIL_CHARS`] characters**, for a log and for nobody else: it is not in `Display`, which
+    /// carries a class and the exit status only, so a caller that prints the error forwards nothing the program wrote.
+    #[must_use]
+    pub fn log_detail(&self) -> Option<String> {
+        match self {
+            SignError::Tool { stderr, .. }
+            | SignError::Rejected { stderr }
+            | SignError::CertificateNotVerified(stderr)
+                if !stderr.is_empty() =>
+            {
+                Some(shown(stderr, MAX_LOG_DETAIL_CHARS))
+            }
+            _ => None,
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -864,13 +890,23 @@ pub fn sign_clearance(signer: &(impl SshsigSigner + ?Sized), clearance: &Clearan
     signer.sign(Namespace::Clearance, clearance.as_bytes())
 }
 
-/// Verify a clearance against the site CA, under the name `broker`. Whether it
-/// is fresh, and whether it covers the request at hand ([`Clearance::covers`]),
-/// is the caller's to check.
-pub fn verify_clearance(clearance: &Clearance, sig: &str, site_ca: &PublicKey) -> Result<(), SignError> {
+/// Verify a clearance against the site CA, under the name `broker`, and that it names exactly `approval`, the armoured
+/// signature the service holds ([`Clearance::names_approval`]): a clearance says what it cleared, one approval by one
+/// key, and another is [`SignError::ClearanceNamesAnotherApproval`]. Whether it is fresh, and whether it covers the
+/// request at hand ([`Clearance::covers`]), is the caller's to check.
+pub fn verify_clearance(
+    clearance: &Clearance,
+    sig: &str,
+    site_ca: &PublicKey,
+    approval: &str,
+) -> Result<(), SignError> {
     let allowed = ca_line("broker", &[Namespace::Clearance], site_ca);
     verify(Namespace::Clearance, &allowed, "broker", sig, clearance.as_bytes())?;
-    site_certificate_in(sig)
+    site_certificate_in(sig)?;
+    if !clearance.names_approval(approval) {
+        return Err(SignError::ClearanceNamesAnotherApproval);
+    }
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------
@@ -1010,7 +1046,7 @@ impl ApprovalCertificate {
 /// The names the site CA must never certify for a person (formats section 7).
 const RESERVED_PERSONS: [&str; 2] = ["broker", "hosts"];
 
-fn shown(s: &str) -> String {
+fn cut(s: &str) -> String {
     s.chars().take(64).collect()
 }
 
@@ -1057,10 +1093,10 @@ pub fn verify_approval_certificate_for(
 /// certificates might honour it.
 fn no_option_or_extension(cert: &Certificate) -> Result<(), SignError> {
     if let Some((name, _)) = cert.critical_options.first() {
-        return Err(SignError::CriticalOption(shown(name)));
+        return Err(SignError::CriticalOption(cut(name)));
     }
     if let Some((name, _)) = cert.extensions.first() {
-        return Err(SignError::SiteCertificateExtension(shown(name)));
+        return Err(SignError::SiteCertificateExtension(cut(name)));
     }
     Ok(())
 }
@@ -1149,7 +1185,7 @@ pub fn verify_broker_certificate(
 pub fn check_broker_certificate(line: &str, site_ca: &PublicKey) -> Result<BrokerCertificate, SignError> {
     let (cert, principal) = site_certificate_shape(line)?;
     if principal != "broker" {
-        return Err(SignError::NotBrokerName(shown(&principal)));
+        return Err(SignError::NotBrokerName(cut(&principal)));
     }
     issued_by(line, site_ca)?;
     Ok(BrokerCertificate {
@@ -1167,10 +1203,10 @@ pub fn check_approval_certificate(line: &str, site_ca: &PublicKey) -> Result<App
     let (person, kind) = match principal.rsplit_once(':') {
         Some((person, "confirmed")) => (person, ApprovalKind::Confirmed),
         Some((person, "automatic")) => (person, ApprovalKind::Automatic),
-        _ => return Err(SignError::NotAnApprovalName(shown(&principal))),
+        _ => return Err(SignError::NotAnApprovalName(cut(&principal))),
     };
     if !text::is_name(person) {
-        return Err(SignError::NotAnApprovalName(shown(&principal)));
+        return Err(SignError::NotAnApprovalName(cut(&principal)));
     }
     if RESERVED_PERSONS.contains(&person) {
         return Err(SignError::ReservedName(person.to_owned()));

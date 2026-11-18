@@ -1,5 +1,11 @@
 use thiserror::Error;
 
+/// A string from outside, as it may appear in a message: escaped (`p_ermit::text::escape`) and cut to `max` characters. An
+/// error's `Display` never prints a value from a document, only names, and those through this.
+pub(crate) fn shown(s: &str, max: usize) -> String {
+    p_ermit::text::escape_clipped(s, max).text
+}
+
 /// Why a document was refused. Each cause has its own variant; nothing is
 /// cleaned up or ignored.
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
@@ -12,33 +18,33 @@ pub enum ParseError {
     ByteOrderMark,
     #[error("document contains a line break")]
     LineBreak,
-    #[error("document is not one JSON object: {0}")]
+    #[error("document is not one JSON object: {}", shown(.0, 128))]
     NotJson(String),
-    #[error("member `{0}` appears twice")]
+    #[error("member `{}` appears twice", shown(.0, 64))]
     DuplicateMember(String),
-    #[error("unknown member `{0}`")]
+    #[error("unknown member `{}`", shown(.0, 64))]
     UnknownMember(String),
     #[error("member `{0}` is missing")]
     MissingMember(&'static str),
-    #[error("member `{member}` is not {expected}")]
+    #[error("member `{}` is not {expected}", shown(member, 64))]
     WrongType { member: String, expected: &'static str },
-    #[error("version {0} is not known")]
+    #[error("version {} is not known", shown(.0, 16))]
     UnsupportedVersion(String),
-    #[error("type is `{found}`, expected `{expected}`")]
+    #[error("type is `{}`, expected `{expected}`", shown(found, 32))]
     WrongDocumentType { expected: &'static str, found: String },
-    #[error("member `{0}` contains a control character")]
+    #[error("member `{}` contains a control character", shown(.0, 64))]
     ControlCharacter(String),
-    #[error("member `{0}` contains a bidirectional mark")]
+    #[error("member `{}` contains a bidirectional mark", shown(.0, 64))]
     BidiMark(String),
-    #[error("`{0}` is not a version 4 UUID in lower case with hyphens")]
+    #[error("an id is not a version 4 UUID in lower case with hyphens")]
     MalformedUuid(String),
-    #[error("`{0}` is not a UTC time to the second, like 2026-11-11T15:04:05Z")]
+    #[error("a time is not a UTC time to the second, like 2026-11-11T15:04:05Z")]
     MalformedTime(String),
-    #[error("`{0}` is not a valid host name")]
+    #[error("a host is not a valid host name")]
     MalformedHost(String),
-    #[error("`{0}` is not a valid service name ([a-z][a-z0-9-]*)")]
+    #[error("a service name is not a valid one ([a-z][a-z0-9-]*)")]
     MalformedServiceName(String),
-    #[error("`{0}` is not an action: lower-case words separated by single spaces")]
+    #[error("an action is not lower-case words separated by single spaces")]
     MalformedAction(String),
     #[error("more than {limit} parameters")]
     TooManyParams { limit: usize },
@@ -48,13 +54,13 @@ pub enum ParseError {
     ClaimTooLong { limit: usize },
     #[error("`{0}` is not standard padded base64")]
     MalformedBase64(&'static str),
-    #[error("`{value}` is not a value of rating member `{member}`")]
+    #[error("rating member `{member}` has a value that is not one of its values")]
     MalformedRating { member: &'static str, value: String },
-    #[error("`{0}` is not a hash, like sha256:<64 lower-case hex digits>")]
+    #[error("a hash is not like sha256:<64 lower-case hex digits>")]
     MalformedHash(String),
     #[error("member `{member}` is not {expected} bytes of base64")]
     BadLength { member: &'static str, expected: usize },
-    #[error("`{0}` is not a key fingerprint like SHA256:<43 base64 characters>")]
+    #[error("a fingerprint is not like SHA256:<43 base64 characters>")]
     MalformedFingerprint(String),
     #[error("member `{0}` is not a certificate line")]
     MalformedCertificateLine(&'static str),

@@ -2933,6 +2933,7 @@ dependencies = [
  "base64",
  "p-act",
  "p-age",
+ "p-ermit",
  "rcgen",
  "ring",
  "rustls",
@@ -2963,6 +2964,7 @@ dependencies = [
  "libc",
  "p-act",
  "p-age",
+ "p-ermit",
  "ring",
  "rustls",
  "rustls-pki-types",
@@ -2997,6 +2999,7 @@ dependencies = [
  "rustic_core",
  "serde",
  "serde_json",
+ "sha2 0.10.9",
  "tempfile",
  "thiserror",
 ]

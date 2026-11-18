@@ -387,8 +387,7 @@ object `{"type":"outcome","outcome":...,"id":...,"reason":...}`
   adds to its outcome (a reason, a code, a detail, further texts) is not passed
   on. `isError` is true. Until the service's wire form is merged, `pact` accepts
   the outcome word `failed` with no other member;
-- passes the answer of a verb (`done`) on as the further text contents,
-  unchanged, up to 1 MiB: that is the data the model asked for;
+- passes the answer of a verb (`done`) on, **escaped**, up to 1 MiB (below): that is the data the model asked for;
 - makes its own outcomes for what happens on its side, with the same shape:
   - `unavailable` (no reason): nothing was sent, or the connection was refused,
     the TLS check failed, the service answered `5xx` without `Retry-After`, a
@@ -406,6 +405,35 @@ object `{"type":"outcome","outcome":...,"id":...,"reason":...}`
     `invalid` comes only from a service;
 - on `notifications/cancelled` from the model, closes the connection to the
   service (which is the service's cancel) and answers nothing further.
+
+**Two shapes of the service's answer, and one of `pact`'s.** (1) **As data** (the shape to keep): the result's
+`structuredContent` is `{"outcome":...,"id":...,"rc":...,"records":[{...},...]}`. The outcome and the identifier are judged
+as above; `rc` is required for `done`; `records` is an array of objects (absent is empty), at most 1 MiB **counted as the
+JSON text of the array as the service wrote it, before escaping**, nested at most 32 deep; a `records` that is not an array
+of objects is `unknown`. Anything else in the object is not passed on, and the records of a `declined`, `refused`,
+`failed` and the rest are not the model's business. (2) **As text** (the older shape, read when there is no
+`structuredContent`): the first text is the outcome line and the texts after it are the answer. **When `structuredContent`
+is there it alone is read: a broken one is `unknown`, never read as text.** `pact` builds what it passes on **from the
+validated fields, not by copying**: for shape (1) the result has `structuredContent` `{outcome, id, rc, records}` with
+every string at any depth, **object keys included**, through `p_ermit::text::escape` (a control character or a
+bidirectional mark is `\u{202e}`, a byte that is not UTF-8 `\x{ff}`, a backslash `\\`), and **one text block that is
+the outcome line with the number of records and never a record** (host text must not reach a model by the route that is
+not framed, so `pact` does not flatten structured content into text); for shape (2) the result has the outcome line and the
+answer's texts, each through `escape` as a whole (so a newline or a tab in a text is `\u{a}`, `\u{9}`, and a backslash is
+doubled: a JSON text answer with escapes in it comes back changed, which is one more reason to move to shape (1)). If
+`pact` escapes something the service had not cleaned (a count of control characters, bidirectional marks and invalid bytes,
+never their content), it logs it once for the call: the service is at fault. **Shape (2) goes when the service has moved to
+shape (1)**: in the commit that follows p-robe's move, before stage 1 is declared done (the freeze of the exchange and of
+the call in `_meta`); until then both are read.
+
+**Tool descriptions are the service's text and pass through.** The catalogue (section 5) takes a tool's `description`,
+`title` and the descriptions in its schema from the service and gives them to the model unchanged, **after** checking that
+each is one line, at most 600 characters (a title 100), with no control or bidirectional character; a tool that fails is
+dropped, never cut. The schema itself is rebuilt from validated pieces (only `params`, `claim`, `wait_seconds`; no
+`$ref`, `oneOf`, `default`, ...). Nothing frames a description for the model: a sentence a service puts in it (a rating
+first, a warning that a result carries host text) arrives as part of that description, and so does anything else the
+service writes there within those bounds. `pact` does not know that a tool is marked and adds no sentence of its own to a
+description or to a `done` result.
 
 No HTTP status, header, error body, TLS message or system error text reaches
 the model, only the words above. Detail goes to standard error (the sandbox's

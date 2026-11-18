@@ -23,6 +23,7 @@ use p_act::sign::{ApprovalKind, PublicKey};
 
 use crate::crypto::Crypto;
 use crate::site::Site;
+use crate::util::{shown, shown_error};
 
 /// Only files named like this are read; a plain `*.pub` beside them is not a certificate and is not opened.
 pub const SUFFIX: &str = "-cert.pub";
@@ -103,30 +104,32 @@ fn kind_name(kind: ApprovalKind) -> &'static str {
 /// Read and check every `*-cert.pub` in the directory, at `now`.
 pub fn load(input: &CertificateInput, site: &Site, crypto: &dyn Crypto, now: SystemTime) -> Loaded {
     let mut loaded = Loaded::default();
-    let shown = input.directory.display().to_string();
+    let dir_text = input.directory.display().to_string();
     // The directory first: a directory that fails the rule is refused whole.
     let directory_ok = fs::symlink_metadata(&input.directory).map_err(|e| e.to_string()).and_then(|m| {
         if m.is_dir() {
-            check_owner_and_mode(&shown, m.uid(), m.mode(), own_uid()).map_err(|e| e.to_string())
+            check_owner_and_mode(&dir_text, m.uid(), m.mode(), own_uid()).map_err(|e| e.to_string())
         } else {
-            Err(format!("{shown} is not a directory"))
+            Err(format!("{dir_text} is not a directory"))
         }
     });
     if let Err(why) = directory_ok {
-        loaded.directory_refused = Some(why);
+        loaded.directory_refused = Some(shown(&why));
         return loaded;
     }
     let listing = match list(&input.directory) {
         Ok(l) => l,
         Err(e) => {
-            loaded.directory_refused = Some(format!("cannot read {shown}: {e}"));
+            loaded.directory_refused = Some(shown(&format!("cannot read {dir_text}: {e}")));
             return loaded;
         }
     };
     let now_secs = u64::try_from(unix(now)).unwrap_or(0);
     for (name, ..) in &listing {
         let refuse = |loaded: &mut Loaded, reason: String| {
-            loaded.not_carried.push(NotCarried { file: name.clone(), reason });
+            // Both are outside data: the file's name (any bytes the file system allows) and the reason (which may quote the
+            // certificate). Stored escaped and bounded, so that nothing downstream can print them raw.
+            loaded.not_carried.push(NotCarried { file: shown(name), reason: shown(&reason) });
         };
         let path = input.directory.join(name);
         // A link is not a file of ours: the rule is about the file, not about what a link points at.
@@ -137,14 +140,14 @@ pub fn load(input: &CertificateInput, site: &Site, crypto: &dyn Crypto, now: Sys
                 continue;
             }
             Err(e) => {
-                refuse(&mut loaded, e.to_string());
+                refuse(&mut loaded, shown_error(&e));
                 continue;
             }
         }
         let bytes = match read_checked(&path, MAX_FILE_BYTES) {
             Ok(b) => b,
             Err(e) => {
-                refuse(&mut loaded, e.to_string());
+                refuse(&mut loaded, shown_error(&e));
                 continue;
             }
         };
@@ -160,7 +163,7 @@ pub fn load(input: &CertificateInput, site: &Site, crypto: &dyn Crypto, now: Sys
         let cert = match crypto.check_approval_certificate(line, &input.site_ca) {
             Ok(c) => c,
             Err(e) => {
-                refuse(&mut loaded, e.to_string());
+                refuse(&mut loaded, shown_error(&e));
                 continue;
             }
         };

@@ -534,10 +534,18 @@ fn process(
 
 /// What was read about the connecting process, as the record holds it: `uid` always, `pid` and
 /// `program` when they could be read (the program only if it can be shown as it is).
-fn peer_json(seen: &crate::peer::Seen) -> Value {
+pub(crate) fn peer_json(seen: &crate::peer::Seen) -> Value {
     let mut peer = json!({"uid": seen.uid, "pid": seen.pid});
-    if let Some(program) = seen.program.as_deref().filter(|p| is_clean(p)) {
-        peer["program"] = program.into();
+    // The kernel gives bytes: the path is written escaped and cut to 200 characters, never left out for what is in it.
+    if let Some(program) = seen.program.as_deref() {
+        let shown = p_ermit::text::escape_clipped(program, 200);
+        peer["program"] = shown.text.into();
+        if shown.flagged > 0 {
+            peer["escaped"] = true.into();
+        }
+        if shown.clipped {
+            peer["clipped"] = true.into();
+        }
     }
     peer
 }

@@ -119,7 +119,8 @@ fn keygen(args: &[&std::ffi::OsStr], env_agent: Option<&Path>) -> Result<(), Iss
     if output.status.success() {
         Ok(())
     } else {
-        Err(IssueError::Tool(String::from_utf8_lossy(&output.stderr).trim().to_owned()))
+        // ssh-keygen's own words: escaped and bounded, for a log; never a notice to the person.
+        Err(IssueError::Tool(crate::outside::bounded(String::from_utf8_lossy(&output.stderr).trim(), 200)))
     }
 }
 

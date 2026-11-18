@@ -34,6 +34,7 @@ pub mod error;
 pub mod holder;
 pub mod issue;
 pub mod mute;
+pub mod outside;
 pub mod paths;
 pub mod peer;
 pub mod policy;
@@ -49,5 +50,7 @@ mod approvals_tests;
 mod broker_tests;
 #[cfg(test)]
 mod broker_tls_tests;
+#[cfg(test)]
+mod outside_tests;
 #[cfg(test)]
 mod testing;
