@@ -46,14 +46,23 @@ what the broker says to a pledge in its own name. A service's
 allowed-signers lines never list either. `hosts-v1@procession` is section
 6.1.
 
-**The freeze.** These formats are a draft until stage 1 is declared done:
-Stage A and Stage B passed on Linux, and recorded. Up to that point a change
-to a signed document changes the draft and keeps `v` at 1, because no reader
-exists outside one commit of this workspace. From the moment stage 1 is
-declared done the formats are frozen at `v` 1: from then a member added to a
-signed document, or any change an old reader would misread, is a new number
-in `v` and a new namespace, without exception. The broker's register and its
-site file freeze at the same point. A reader refuses a `v` it does not know.
+**The freeze.** A form is a draft until the stage that first runs it across
+real parts is declared done (`approvals.md`, section 8; a stage is declared
+done when its runs on Linux have passed and are recorded). Until then a
+change to it changes the draft and keeps `v` at 1, because no reader exists
+outside one commit of this workspace. From then it is frozen at `v` 1: a
+member added to a signed document, or any change an old reader would
+misread, is a new number in `v` and a new namespace, without exception. A
+reader refuses a `v` it does not know.
+
+- With stage 1: the call, the request, the approval (the signature over the
+  request), the agent's certificate and the bundle, the exchange on
+  `service.sock`, the call in MCP `_meta`, pledge's record.
+- With stage 2: the clearance, the connection document, the standing, the
+  messages on both of the broker's connections, the broker's register, the
+  broker's own and the persons' certificates as far as stage 2 uses them.
+- With stage 3: the broker's site file in its target form (what `page load`
+  reads), the list of hosts' keys, the certificates the site CA issues.
 
 ## 2. Common rules
 
@@ -213,7 +222,7 @@ connections) and recorded, and a service acts on none of them.
 The broker saying a request passed its checks. Signed by the broker.
 
 ```json
-{"v":1,"type":"clearance","request":"sha256:9c2f...e1","at":"2026-11-11T15:04:41Z"}
+{"v":1,"type":"clearance","request":"sha256:9c2f...e1","approval":"sha256:41ab...07","at":"2026-11-11T15:04:41Z"}
 ```
 
 | Member | Type | Meaning |
@@ -221,6 +230,7 @@ The broker saying a request passed its checks. Signed by the broker.
 | `v` | number | `1` |
 | `type` | string | `"clearance"` |
 | `request` | string | the hash of the request's bytes |
+| `approval` | string | the hash of the approval's bytes: the armoured signature as pledge made it. A clearance says exactly what it cleared: one approval by one key. A service checks that the approval it holds is the one the clearance names, so an approval by another key of the same person for the same request (the automatic one where the confirmed one was cleared, or one by a key blocked since) can never be paired with it, by whatever path it arrives |
 | `at` | string | when the broker issued it: when the approval came back |
 
 A service accepts a clearance for 60 seconds after `at`.
