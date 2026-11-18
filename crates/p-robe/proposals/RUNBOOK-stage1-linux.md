@@ -270,7 +270,7 @@ B2. The group `pledge-svc` lets the service's account reach `service.sock`:
 `groupadd pledge-svc; usermod -aG pledge-svc alice; usermod -aG pledge-svc
 probe-svc` (undo: `userdel`/`groupdel` the other way). Log out and in so that
 alice's membership counts; pledge makes the directory 0710 and the socket 0660
-with that group. Make the three keys, answering the dialogs it prints:
+with that group. **Only after the `pledge: serving.` line (see below)** make the three keys, answering the dialogs it prints:
 `pledge keys create delegation`, `... confirmed`, `... automatic`. Then
 `pledge keys list --format json` shows the public key lines; write the confirmed
 one to `/etc/probe/alice-confirmed.pub` and the automatic one to
