@@ -7,6 +7,7 @@ use p_act::broker::{
 };
 use p_act::exchange::{ErrorCode, ExchangeError};
 use p_act::rating::{Damage, Disruption, Exposure, Rating};
+use p_act::sign::{ApprovalCertificate, verify_approval_certificate};
 use p_act::sign::{
     ApprovalKind, ApprovalTrust, Fingerprint, Namespace, PublicKey, SignError, Signer, agent_certificate,
     is_reserved_namespace, request_person, sign_approval, sign_call, sign_clearance, sign_request, signature_agent,
@@ -1664,5 +1665,247 @@ fn a_delegation_message_carries_a_certificate_read_with_the_rules_of_section_3_1
         let e = FromPledge::parse(wire.as_bytes()).unwrap_err();
         assert!(matches!(e, ExchangeError::BadCertificate(_)), "{principals} {options:?}");
         assert_eq!(e.code(), Some(ErrorCode::MalformedLine));
+    }
+}
+
+// ---------------------------------------------------------------------------
+// An approval key's certificate, against the site CA
+// ---------------------------------------------------------------------------
+
+fn at(s: &str) -> Timestamp {
+    s.parse().unwrap()
+}
+
+/// A key of the given type, certified by `ca` for `principals` (comma-separated), as the CA's issuer writes it
+/// (`-O clear`), with the options given; the certificate line and the key's public part.
+fn approval_cert(
+    keys: &Keys,
+    ca: &Path,
+    name: &str,
+    p256: bool,
+    principals: &str,
+    validity: &str,
+    options: &[&str],
+) -> (String, PublicKey) {
+    let key = if p256 { keys.ecdsa_key(name) } else { keys.key(name) };
+    let mut args = vec!["-q", "-s", ca.to_str().unwrap(), "-I", name, "-n", principals, "-V", validity, "-O", "clear"];
+    for o in options {
+        args.extend(["-O", o]);
+    }
+    let pub_file = format!("{}.pub", key.display());
+    args.push(&pub_file);
+    keys.keygen(&args);
+    let line = std::fs::read_to_string(format!("{}-cert.pub", key.display())).unwrap().trim_end().to_owned();
+    (line, keys.public(&key))
+}
+
+#[test]
+fn an_approval_certificate_verifies_against_the_site_ca_for_every_key_combination() {
+    let keys = Keys::new();
+    let now = at("2026-11-11T15:00:00Z");
+    for (ca_label, ca) in [("ed25519 ca", keys.key("ca-e")), ("p256 ca", keys.ecdsa_key("ca-p"))] {
+        let ca_pub = keys.public(&ca);
+        for (key_label, p256) in [("ed25519 key", false), ("p256 key", true)] {
+            for (suffix, kind) in [("confirmed", ApprovalKind::Confirmed), ("automatic", ApprovalKind::Automatic)] {
+                let name = format!("{ca_label}-{key_label}-{suffix}").replace(' ', "-");
+                let (line, key) = approval_cert(&keys, &ca, &name, p256, &format!("alice:{suffix}"), VALID, &[]);
+                let cert: ApprovalCertificate =
+                    verify_approval_certificate(&line, &ca_pub, now).unwrap_or_else(|e| panic!("{name}: {e}"));
+                assert_eq!((cert.person.as_str(), cert.kind), ("alice", kind), "{name}");
+                assert!(cert.certifies(&key), "{name}");
+                assert!(!cert.certifies(&ca_pub), "{name}: the CA's own key is not what it certifies");
+                assert_eq!(cert.key_id, name);
+                assert_eq!((cert.valid_after, cert.valid_before), (1_577_836_800, 4_070_908_800));
+                // A comment after the base64 is not signed and changes nothing; another CA does not vouch for it.
+                assert!(verify_approval_certificate(&format!("{line} a comment"), &ca_pub, now).is_ok(), "{name}");
+                let other_ca = keys.public(&keys.key(&format!("other-{name}")));
+                assert!(
+                    matches!(verify_approval_certificate(&line, &other_ca, now), Err(SignError::WrongIssuer)),
+                    "{name}"
+                );
+                let other_p256 = keys.public(&keys.ecdsa_key(&format!("other-p-{name}")));
+                assert!(
+                    matches!(verify_approval_certificate(&line, &other_p256, now), Err(SignError::WrongIssuer)),
+                    "{name}"
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn an_approval_certificate_is_judged_at_the_time_the_caller_gives() {
+    let keys = Keys::new();
+    let ca = keys.key("ca");
+    let ca_pub = keys.public(&ca);
+    let (line, _) = approval_cert(&keys, &ca, "k", true, "alice:confirmed", "20200101Z:20200102Z", &[]);
+    // From its start (inclusive) to its end (exclusive).
+    assert!(matches!(
+        verify_approval_certificate(&line, &ca_pub, at("2019-12-31T23:59:59Z")),
+        Err(SignError::CertificateNotYetValid)
+    ));
+    assert!(verify_approval_certificate(&line, &ca_pub, at("2020-01-01T00:00:00Z")).is_ok());
+    assert!(verify_approval_certificate(&line, &ca_pub, at("2020-01-01T23:59:59Z")).is_ok());
+    assert!(matches!(
+        verify_approval_certificate(&line, &ca_pub, at("2020-01-02T00:00:00Z")),
+        Err(SignError::CertificateExpired)
+    ));
+    assert!(matches!(
+        verify_approval_certificate(&line, &ca_pub, at("2026-11-11T15:00:00Z")),
+        Err(SignError::CertificateExpired)
+    ));
+    // A time before 1970 is not a time that makes a certificate valid.
+    assert!(matches!(
+        verify_approval_certificate(&line, &ca_pub, at("0001-01-01T00:00:00Z")),
+        Err(SignError::CertificateNotYetValid)
+    ));
+    // "Forever".
+    let (forever, _) = approval_cert(&keys, &ca, "forever", false, "alice:automatic", "always:forever", &[]);
+    assert!(verify_approval_certificate(&forever, &ca_pub, at("9999-12-31T23:59:59Z")).is_ok());
+}
+
+#[test]
+fn only_an_approval_keys_name_is_accepted() {
+    let keys = Keys::new();
+    let ca = keys.key("ca");
+    let ca_pub = keys.public(&ca);
+    let now = at("2026-11-11T15:00:00Z");
+    for (principals, label) in [
+        ("alice", "a person without the ending"),
+        ("alice:other", "another ending"),
+        ("alice:Confirmed", "another case"),
+        ("alice:", "an empty ending"),
+        (":confirmed", "no person"),
+        ("alice:confirmed:automatic", "two endings"),
+        ("al ice:confirmed", "a space"),
+        ("al*ce:confirmed", "a pattern"),
+        ("alice@host:confirmed", "an at sign"),
+        ("broker", "the broker's name"),
+        ("hosts", "the hosts name"),
+        ("probe@a.example", "a service's name"),
+    ] {
+        let (line, _) =
+            approval_cert(&keys, &ca, &format!("n-{}", label.replace(' ', "-")), true, principals, VALID, &[]);
+        assert!(
+            matches!(verify_approval_certificate(&line, &ca_pub, now), Err(SignError::NotAnApprovalName(_))),
+            "{label}: {:?}",
+            verify_approval_certificate(&line, &ca_pub, now)
+        );
+    }
+    for reserved in ["broker:confirmed", "broker:automatic", "hosts:confirmed"] {
+        let (line, _) = approval_cert(&keys, &ca, &reserved.replace(':', "-"), true, reserved, VALID, &[]);
+        assert!(
+            matches!(verify_approval_certificate(&line, &ca_pub, now), Err(SignError::ReservedName(_))),
+            "{reserved}"
+        );
+    }
+    let (two, _) = approval_cert(&keys, &ca, "two", true, "alice:confirmed,alice:automatic", VALID, &[]);
+    assert!(matches!(verify_approval_certificate(&two, &ca_pub, now), Err(SignError::PrincipalCount { found: 2 })));
+    let long = approval_cert(&keys, &ca, "long", true, &format!("{}:confirmed", "a".repeat(65)), VALID, &[]).0;
+    assert!(matches!(verify_approval_certificate(&long, &ca_pub, now), Err(SignError::NotAnApprovalName(_))));
+}
+
+#[test]
+fn an_approval_certificate_with_anything_else_is_refused() {
+    let keys = Keys::new();
+    let ca = keys.key("ca");
+    let ca_pub = keys.public(&ca);
+    let now = at("2026-11-11T15:00:00Z");
+    // A critical option, a host certificate, an RSA key, an RSA issuer.
+    let (restricted, _) =
+        approval_cert(&keys, &ca, "restricted", true, "alice:confirmed", VALID, &["force-command=/bin/true"]);
+    assert!(
+        matches!(verify_approval_certificate(&restricted, &ca_pub, now), Err(SignError::CriticalOption(n)) if n == "force-command")
+    );
+    let host = keys.ecdsa_key("host-key");
+    keys.keygen(&[
+        "-q",
+        "-s",
+        ca.to_str().unwrap(),
+        "-I",
+        "h",
+        "-h",
+        "-n",
+        "alice:confirmed",
+        "-V",
+        VALID,
+        pub_file(&host).to_str().unwrap(),
+    ]);
+    let host_line = std::fs::read_to_string(format!("{}-cert.pub", host.display())).unwrap();
+    assert!(matches!(
+        verify_approval_certificate(host_line.trim_end(), &ca_pub, now),
+        Err(SignError::NotUserCertificate)
+    ));
+    let rsa = keys.path("rsa");
+    keys.keygen(&["-q", "-t", "rsa", "-b", "2048", "-N", "", "-C", "", "-f", rsa.to_str().unwrap()]);
+    keys.keygen(&[
+        "-q",
+        "-s",
+        ca.to_str().unwrap(),
+        "-I",
+        "r",
+        "-n",
+        "alice:confirmed",
+        "-V",
+        VALID,
+        pub_file(&rsa).to_str().unwrap(),
+    ]);
+    let rsa_line = std::fs::read_to_string(format!("{}-cert.pub", rsa.display())).unwrap();
+    assert!(
+        matches!(verify_approval_certificate(rsa_line.trim_end(), &ca_pub, now), Err(SignError::UnsupportedKeyType(t)) if t == "ssh-rsa-cert-v01@openssh.com")
+    );
+    let (by_rsa, _) = approval_cert(&keys, &rsa, "by-rsa", true, "alice:confirmed", VALID, &[]);
+    assert!(
+        matches!(verify_approval_certificate(&by_rsa, &ca_pub, now), Err(SignError::UnsupportedKeyType(t)) if t == "ssh-rsa")
+    );
+    // Default extensions (no `-O clear`) are not judged: the documents say nothing of them for approval keys.
+    let key = keys.ecdsa_key("with-extensions");
+    keys.keygen(&[
+        "-q",
+        "-s",
+        ca.to_str().unwrap(),
+        "-I",
+        "x",
+        "-n",
+        "alice:confirmed",
+        "-V",
+        VALID,
+        pub_file(&key).to_str().unwrap(),
+    ]);
+    let line = std::fs::read_to_string(format!("{}-cert.pub", key.display())).unwrap();
+    assert!(verify_approval_certificate(line.trim_end(), &ca_pub, now).is_ok());
+    // An agent's certificate is not an approval key's, and the reverse.
+    let (agent, _) = cert_line_and_sig(&keys, &ca, "alice", &[]);
+    assert!(matches!(verify_approval_certificate(&agent, &ca_pub, now), Err(SignError::NotAnApprovalName(_))));
+    let (approval, _) = approval_cert(&keys, &ca, "approval", false, "alice:confirmed", VALID, &[]);
+    assert!(signature_agent_line_is_refused(&approval));
+    // Not a certificate line.
+    for bad in ["", "garbage", &format!("{approval}\n"), &format!("{approval}\x07"), "ssh-ed25519 AAAA"] {
+        assert!(verify_approval_certificate(bad, &ca_pub, now).is_err(), "{bad:?}");
+    }
+}
+
+fn signature_agent_line_is_refused(line: &str) -> bool {
+    agent_certificate(line).is_err()
+}
+
+#[test]
+fn a_tampered_approval_certificate_is_never_accepted() {
+    use base64::Engine as _;
+    let keys = Keys::new();
+    let now = at("2026-11-11T15:00:00Z");
+    for (label, ca, p256) in [("ed25519 ca", keys.key("ca-e"), true), ("p256 ca", keys.ecdsa_key("ca-p"), false)] {
+        let ca_pub = keys.public(&ca);
+        let (line, _) =
+            approval_cert(&keys, &ca, &format!("t-{}", label.replace(' ', "-")), p256, "alice:confirmed", VALID, &[]);
+        assert!(verify_approval_certificate(&line, &ca_pub, now).is_ok());
+        let blob = base64::engine::general_purpose::STANDARD.decode(line.split(' ').nth(1).unwrap()).unwrap();
+        let mut accepted = vec![];
+        for i in 0..blob.len() {
+            if verify_approval_certificate(&flipped(&line, i), &ca_pub, now).is_ok() {
+                accepted.push(i);
+            }
+        }
+        assert!(accepted.is_empty(), "{label}: a flipped bit in byte(s) {accepted:?} was accepted");
     }
 }

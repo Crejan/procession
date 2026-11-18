@@ -22,12 +22,13 @@ pub struct Answer<'a> {
     cap: usize,
     written: usize,
     full: bool,
+    lost: bool,
 }
 
 impl<'a> Answer<'a> {
     /// An answer of at most `cap` bytes.
     pub fn new(out: &'a mut dyn Write, cap: usize) -> Self {
-        Self { out, cap, written: 0, full: false }
+        Self { out, cap, written: 0, full: false, lost: false }
     }
 
     /// Writes one record. When it would not fit, writes a final `truncated`
@@ -42,12 +43,13 @@ impl<'a> Answer<'a> {
         let line = record.line();
         if self.written + line.len() + 1 + TRUNCATED_ROOM > self.cap {
             let note = Record::new("truncated").num("limit_bytes", self.cap as u64).line();
-            let _ = writeln!(self.out, "{note}");
+            self.lost |= writeln!(self.out, "{note}").is_err();
             self.full = true;
             return Err(Full);
         }
         if writeln!(self.out, "{line}").is_err() {
             self.full = true;
+            self.lost = true;
             return Err(Full);
         }
         self.written += line.len() + 1;
@@ -58,6 +60,12 @@ impl<'a> Answer<'a> {
     #[must_use]
     pub fn truncated(&self) -> bool {
         self.full
+    }
+
+    /// Whether the reader went away: the answer did not get out, and not even as a clean cut.
+    #[must_use]
+    pub fn lost(&self) -> bool {
+        self.lost
     }
 
     /// Bytes written.

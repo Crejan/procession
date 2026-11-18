@@ -788,6 +788,7 @@ version = "0.0.0"
 dependencies = [
  "base64",
  "libc",
+ "p-ermit",
  "rcgen",
  "ring",
  "rustls",
@@ -796,7 +797,6 @@ dependencies = [
  "serde_json",
  "tempfile",
  "thiserror",
- "toml",
  "ureq",
 ]
 
@@ -816,6 +816,16 @@ dependencies = [
  "thiserror",
  "tokio",
  "tokio-rustls",
+]
+
+[[package]]
+name = "p-ermit"
+version = "0.1.0"
+dependencies = [
+ "libc",
+ "serde",
+ "tempfile",
+ "toml",
 ]
 
 [[package]]

@@ -175,10 +175,14 @@ code never becomes the dispatcher's**; it travels in the output, as `rc`:
 | 4, any other code, a signal, a timeout | **failed** | no tool lines; one `error` record with a `code` (`tool-refused` for 4: the row and the tool disagree about the arguments; `tool-failed`, `tool-killed`, `tool-timeout`), then the trailer with `result` `failed` |
 | not one JSON object, over the limit, the wrong `subcommand` or `schema_version`, a record of a reserved type | **failed** | no tool lines; one `error` record (`not-an-object`, `object-too-large`, `wrong-object`, `reserved-type`), trailer `result` `failed` |
 
-A failed call never ends with half an output. *Proposal, to confirm:* the dispatcher's
-exit code for a failed call is a new one, **2**, distinct from the four above, so that the
-service (which reads only the exit code and the lines) tells the agent `unavailable` and logs the
-`code` as the exact reason; it is not a verb's own code.
+A failed call never ends with half an output. The dispatcher's exit code for a verb that was
+started and did not produce a usable result is **70** (decided; not 2): a tool code outside the row's
+result codes, a signal, a timeout, a bad or too large object, a reserved record type. The `done` audit
+line carries `rc=70` and `cause=` (today `verb-code:N` and `answer-lost`; `tool-killed`, `tool-timeout`,
+`not-an-object`, `object-too-large`, `wrong-object`, `reserved-type` with `prover`). The service tells the
+agent `failed` (not `unavailable`: that is only for a verb that certainly did not start) and logs the cause
+under the call's identifier. A verb of this program, until `prover` rows exist, is on the same rule: a code
+other than 0 is 70.
 
 The first table (`src/main.rs`); the ratings are proposals:
 

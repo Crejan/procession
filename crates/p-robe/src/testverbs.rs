@@ -22,7 +22,7 @@ const READ_PARAMS: &[Param] = &[Param {
     }),
 }];
 
-/// `test echo`, `test peak` and `test read`.
+/// `test echo`, `test fail`, `test peak` and `test read`.
 pub const VERBS: &[Verb] = &[
     Verb {
         noun: "test",
@@ -41,6 +41,15 @@ pub const VERBS: &[Verb] = &[
         args: Args::Some,
         summary: "TEST BUILD: answers with its arguments; rated harmless",
         availability: Availability::Ready(echo),
+    },
+    Verb {
+        noun: "test",
+        verb: "fail",
+        runs: "probe",
+        rating: Rating::HARMLESS,
+        args: Args::Some,
+        summary: "TEST BUILD: starts, writes its header and exits with the code of its first argument (2 if none); rated harmless",
+        availability: Availability::Ready(fail),
     },
     Verb {
         noun: "test",
@@ -67,6 +76,12 @@ fn answer_with(verb: &str, env: &Env, args: &[String], answer: &mut Answer<'_>) 
     answer.record(&header("test", verb, &kit::hostname(), &clock::now()))?;
     answer.record(&Record::new("echo").str("identity", &env.identity).strs("args", args))?;
     Ok(0)
+}
+
+/// Does what a verb that was started and gave no usable result does: a code other than 0.
+fn fail(_env: &Env, args: &[String], answer: &mut Answer<'_>) -> Result<u8, Full> {
+    answer.record(&header("test", "fail", &kit::hostname(), &clock::now()))?;
+    Ok(args.first().and_then(|code| code.parse().ok()).unwrap_or(2))
 }
 
 /// Reads from the descriptor the dispatcher opened, never from the name.

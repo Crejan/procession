@@ -69,6 +69,7 @@ impl Site2 {
             json!({"key": public, "verified_on": "2026-11-10"})
         };
         let site = json!({
+            "v": 1,
             "persons": [{"name": "jan", "enabled": true, "groups": ["ops"], "certificates": certificates,
                          "keys": {"confirmed": key("confirmed"), "automatic": key("automatic"),
                                   "delegation": {"key": delegation_key, "verified_on": "2026-11-10"},

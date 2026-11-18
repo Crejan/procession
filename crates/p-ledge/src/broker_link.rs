@@ -24,8 +24,9 @@ use std::time::{Duration, Instant};
 
 use p_act::Document;
 use p_act::broker::{ConnectionDocument, FromPledge, NotRegisteredReason, Secret32, Signed, Standing, ToPledge};
+use p_act::broker::{TLS_EXPORTER_CONTEXT, TLS_EXPORTER_LABEL, TLS_EXPORTER_LENGTH};
 use p_act::exchange::{Answer, ClearancePolicy, ExchangeError, LineBuffer, Message, PledgeReason};
-use p_act::limits::{PING_INTERVAL_SECONDS, SIGNIN_SECONDS, TLS_EXPORTER_LABEL};
+use p_act::limits::{PING_INTERVAL_SECONDS, SIGNIN_SECONDS};
 use p_act::sign::{Fingerprint, Namespace, PublicKey};
 use rustls::pki_types::{CertificateDer, ServerName};
 use rustls::{ClientConfig, ClientConnection, RootCertStore, StreamOwned};
@@ -146,10 +147,10 @@ impl<W: Wire> TlsTransport<W> {
 
 impl<W: Wire> Transport for TlsTransport<W> {
     fn binding(&mut self) -> io::Result<Secret32> {
-        let mut out = [0_u8; 32];
+        let mut out = [0_u8; TLS_EXPORTER_LENGTH];
         self.stream
             .conn
-            .export_keying_material(&mut out, TLS_EXPORTER_LABEL.as_bytes(), None)
+            .export_keying_material(&mut out, TLS_EXPORTER_LABEL, TLS_EXPORTER_CONTEXT)
             .map_err(io::Error::other)?;
         Ok(out)
     }
@@ -316,6 +317,9 @@ pub enum End {
     Io(io::Error),
     /// The broker said `error` with this code, or said something that is not allowed here.
     Protocol(String),
+    /// The broker refused the sign-in because the connection key or the person is blocked (`error blocked`
+    /// before `ready`): not a fault to retry in a loop.
+    Blocked,
     /// The link was stopped.
     Stopped,
 }
@@ -421,6 +425,11 @@ impl Session {
                 self.registration(&delegation, Registration::NotRegistered(reason))
             }
             (ToPledge::Withdrawn { delegation, stored }, Phase::Ready) => self.withdrawn(delegation.as_str(), stored),
+            // `error blocked` before `ready` is the broker refusing the sign-in.
+            (ToPledge::Exchange(message), Phase::AwaitReady) if matches!(&*message, Message::Error(e) if e.error == p_act::exchange::ErrorCode::Blocked) =>
+            {
+                return Err(End::Blocked);
+            }
             (ToPledge::Exchange(message), Phase::Ready) => self.exchange(*message)?,
             (other, phase) => {
                 return Err(End::Protocol(format!("unexpected {:?} in {phase:?}", std::mem::discriminant(&other))));
@@ -459,6 +468,9 @@ impl Session {
             }
             Message::Cancel(cancel) => self.shared.approvals.cancel(&cancel.request, self.responder_id, self.now()),
             Message::Error(error) => {
+                if error.error == p_act::exchange::ErrorCode::Blocked && self.phase != Phase::Ready {
+                    return Err(End::Blocked);
+                }
                 return Err(End::Protocol(format!("the broker sent error {}", error.error.wire())));
             }
             Message::Answer(_) | Message::Hello => {
@@ -645,6 +657,9 @@ impl Transport for Box<dyn DynTransport> {
     }
 }
 
+/// How long after a refused sign-in (blocked) pledge waits before it tries again.
+const BLOCKED_RETRY: Duration = Duration::from_secs(600);
+
 /// Starts the link: a supervisor thread that connects with `connect` (which returns a ready transport, the
 /// handshake done), runs a session, and reconnects with [`backoff`]. Returns the handle.
 pub fn start(
@@ -657,6 +672,7 @@ pub fn start(
     let (shared, thread_link, cfg) = (Arc::clone(shared), Arc::clone(&link), Arc::new(cfg));
     thread::spawn(move || {
         let mut delay = Duration::from_secs(1);
+        let mut refused_before = false;
         while !thread_link.stop.load(Ordering::SeqCst) {
             let mut signed_in = false;
             match connect() {
@@ -669,7 +685,21 @@ pub fn start(
                                 Session::new(Arc::clone(&shared), Arc::clone(&thread_link), Arc::clone(&cfg), binding);
                             let result = session.run(&mut transport, &rx);
                             signed_in = session.signed_in;
-                            if let Err(end) = result {
+                            if matches!(result, Err(End::Blocked)) {
+                                // Told once to the person (record and stderr); asked again only rarely, never in a loop.
+                                if !refused_before {
+                                    shared.event(
+                                        "broker-signin-refused",
+                                        json!({"why": "the broker refused the sign-in: the connection key or the person is blocked"}),
+                                    );
+                                    eprintln!(
+                                        "pledge: the broker refused the sign-in: the connection key or the person is blocked; trying again every {} minutes",
+                                        BLOCKED_RETRY.as_secs() / 60
+                                    );
+                                }
+                                refused_before = true;
+                                delay = BLOCKED_RETRY;
+                            } else if let Err(end) = result {
                                 shared.event(
                                     "broker-connection-ended",
                                     json!({"why": format!("{end:?}").chars().take(100).collect::<String>()}),
@@ -681,7 +711,12 @@ pub fn start(
                 }
                 Err(e) => eprintln!("pledge: cannot reach the broker: {e}"),
             }
-            delay = backoff(delay, signed_in, jitter());
+            if signed_in {
+                refused_before = false;
+            }
+            if delay != BLOCKED_RETRY || signed_in {
+                delay = backoff(delay, signed_in, jitter());
+            }
             let until = Instant::now() + delay;
             while Instant::now() < until && !thread_link.stop.load(Ordering::SeqCst) {
                 thread::sleep(Duration::from_millis(100));

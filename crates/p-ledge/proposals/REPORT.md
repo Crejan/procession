@@ -829,3 +829,26 @@ needs a key file, so pledge signs through its key holder and builds the SSHSIG i
 (`sign_connection_document`; `sshsig.rs` stays until the signer seam is merged).
 `cargo clippy -p p-act --features pact` stops on a `collapsible_if` in `pact/mcp.rs:172`
 (p-ledge itself is clean with `--no-deps`).
+
+## Integration follow-ups: peer, seam, blocked keys
+
+- **`p_act::peer`** replaces `peer.rs`/`Throttle` of pledge (what stays is `peer::Seen`, the record's shape).
+  Behaviour unchanged: all three sockets drop an unreadable peer; `agent.sock` and `control.sock` also another
+  user (`Policy::OwnUser`); `service.sock` takes any readable user (`AnyReadable`); log lines are word for word
+  (label `pledge`). One difference of no consequence: the program path is now read for every admitted peer
+  (also on `control.sock`), where it was read only on `agent.sock`. `p-robe` stage 1 passed unchanged.
+- **The signer seam** (`p_act::sshsig`): pledge's key holder is a `KeyHolder` (`seam.rs`) behind `HolderSigner`;
+  approvals, the connection document and the certificate probe go through it; `sshsig.rs` is deleted. The holder
+  still answers with an SSH signature blob; `seam.rs` reads it into a `RawSignature` and `p-act` writes the file.
+  **Which writer each recorded run used:** every run recorded up to this commit (the owner's Stage A, the Linux
+  Debian run, the macOS sshd run) used pledge's own `sshsig.rs`; runs from this commit on use `p-act`'s. For an
+  Ed25519 key the bytes are the same: pinned by `seam::tests::for_an_ed25519_key_the_approval_is_byte_for_byte_…`
+  against a copy of the old writer. ECDSA signatures are random, so only verification (`ssh-keygen -Y verify`)
+  can be pinned for them, and is by the existing tests.
+- **Blocked keys** (designer): a blocked approval key is not signed with; the agent hears `blocked`, the record's
+  `request` entry carries `why` with pledge's own exact reason (which key, blocked by the broker) and
+  `pledge history` prints it. A blocked delegation key issues nothing (`agents.start` is `refused`, event
+  `issuing-refused`, a line on stderr) and nothing under its delegations is signed. A sign-in the broker
+  refuses with `error blocked` is its own ending (`End::Blocked`): event `broker-signin-refused` and a line on
+  stderr once, then a retry every 10 minutes, not the 1 s to 60 s backoff.
+- `control-sock.md` section 8: the note on `stage2-mac.md` 8.5 (no protocol change).

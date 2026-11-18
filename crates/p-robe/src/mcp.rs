@@ -462,6 +462,11 @@ mod tests {
             "{\"type\":\"outcome\",\"outcome\":\"refused\",\"reason\":\"try-later\",\"id\":\"i\"}"
         );
         assert_eq!(refused["content"].as_array().unwrap().len(), 1);
+        // A call that was carried out and did not complete: an error, no code, no result.
+        let failed = tool_result(&Outcome::Failed, "i");
+        assert_eq!(failed["isError"], true);
+        assert_eq!(failed["content"][0]["text"], "{\"type\":\"outcome\",\"outcome\":\"failed\",\"id\":\"i\"}");
+        assert_eq!(failed["content"].as_array().unwrap().len(), 1);
         assert_eq!(
             tool_result(&Outcome::Declined, "i")["content"][0]["text"],
             "{\"type\":\"outcome\",\"outcome\":\"declined\",\"id\":\"i\"}"

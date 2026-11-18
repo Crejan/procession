@@ -404,6 +404,13 @@ pub enum ToPledge {
         delegation: Fingerprint,
         stored: bool,
     },
+    /// A signed document the broker only carries (stage 3: the list of hosts' keys), byte for byte, with the
+    /// namespace it was signed in. The broker's own signature is not on it; whoever reads it verifies it
+    /// themselves, and ignores one whose namespace they do not know. Parsed so that it is not a protocol error.
+    Carried {
+        namespace: String,
+        signed: Signed,
+    },
     /// `submit`, `cancel`, `error` of the shared exchange.
     Exchange(Box<Message>),
 }
@@ -462,6 +469,15 @@ struct Head<'a> {
 struct WithSigned<'a> {
     #[serde(flatten)]
     head: Head<'a>,
+    doc: String,
+    doc_sig: String,
+}
+
+#[derive(Serialize)]
+struct CarriedWire<'a> {
+    #[serde(flatten)]
+    head: Head<'a>,
+    namespace: &'a str,
     doc: String,
     doc_sig: String,
 }
@@ -563,8 +579,10 @@ impl FromService {
 impl ToPledge {
     /// Parse a line from the broker.
     pub fn parse(line: &[u8]) -> Result<ToPledge, ExchangeError> {
-        let Some((kind, mut o)) =
-            broker_object(line, &["challenge", "ready", "notice", "registered", "not-registered", "withdrawn"])?
+        let Some((kind, mut o)) = broker_object(
+            line,
+            &["challenge", "ready", "notice", "registered", "not-registered", "withdrawn", "carried"],
+        )?
         else {
             return Ok(ToPledge::Exchange(Box::new(Message::parse(line, ClearancePolicy::Refused)?)));
         };
@@ -572,6 +590,15 @@ impl ToPledge {
             "challenge" => ToPledge::Challenge(decode32("nonce", &o.take_string("nonce")?)?),
             "ready" => ToPledge::Ready,
             "notice" => ToPledge::Notice(take_signed(&mut o)?),
+            "carried" => {
+                let namespace = o.take_string("namespace")?;
+                // A namespace is printable ASCII without spaces, as SSHSIG writes them; which ones are known is the reader's.
+                if namespace.is_empty() || namespace.len() > 64 || !namespace.bytes().all(|b| (0x21..0x7f).contains(&b))
+                {
+                    return Err(ExchangeError::Malformed(ParseError::MalformedName("namespace")));
+                }
+                ToPledge::Carried { namespace, signed: take_signed(&mut o)? }
+            }
             "registered" => ToPledge::Registered(take_fingerprint(&mut o, "delegation")?),
             "withdrawn" => {
                 let delegation = take_fingerprint(&mut o, "delegation")?;
@@ -595,6 +622,17 @@ impl ToPledge {
             ToPledge::Challenge(n) => line(&WithText { nonce: Some(STANDARD.encode(n)), ..text_message("challenge") }),
             ToPledge::Ready => line(&head("ready")),
             ToPledge::Notice(s) => signed_line("notice", s),
+            ToPledge::Carried { namespace, signed } => {
+                if !looks_armoured(&signed.sig) {
+                    return Err(EncodeError::NotArmoured("doc_sig"));
+                }
+                line(&CarriedWire {
+                    head: head("carried"),
+                    namespace,
+                    doc: STANDARD.encode(&signed.doc),
+                    doc_sig: signature_to_base64(&signed.sig),
+                })
+            }
             ToPledge::Registered(fp) => {
                 line(&WithText { delegation: Some(fp.to_string()), ..text_message("registered") })
             }
@@ -1387,5 +1425,64 @@ mod tests {
         }
         assert_eq!(TLS_CRYPTO_PROVIDER, "ring");
         assert_eq!(TLS_EXPORTER_LABEL, crate::limits::TLS_EXPORTER_LABEL.as_bytes());
+    }
+
+    #[test]
+    fn a_carried_document_is_parsed_and_its_bytes_kept() {
+        let doc = br#"{"v":1,"type":"hosts"}"#.to_vec();
+        let m = ToPledge::Carried {
+            namespace: "hosts-v1@procession".into(),
+            signed: Signed { doc: doc.clone(), sig: SIG.into() },
+        };
+        let line = m.encode().unwrap();
+        assert_eq!(
+            line,
+            format!(
+                "{{\"schema_version\":1,\"type\":\"carried\",\"namespace\":\"hosts-v1@procession\",\"doc\":\"{}\",\"doc_sig\":\"{}\"}}\n",
+                STANDARD.encode(&doc),
+                signature_to_base64(SIG)
+            )
+            .into_bytes()
+        );
+        let ToPledge::Carried { namespace, signed } = ToPledge::parse(&line[..line.len() - 1]).unwrap() else {
+            panic!()
+        };
+        assert_eq!((namespace.as_str(), signed.doc, signed.sig.as_str()), ("hosts-v1@procession", doc, SIG));
+        // A namespace its reader does not know is still parsed (the reader ignores it).
+        let other = String::from_utf8(line.clone()).unwrap().replace("hosts-v1@procession", "future-v9@procession");
+        assert!(
+            matches!(ToPledge::parse(other.trim_end().as_bytes()), Ok(ToPledge::Carried { namespace, .. }) if namespace == "future-v9@procession")
+        );
+        // Refusals: members, namespace shape, base64, signature, strings.
+        let text = String::from_utf8(line).unwrap();
+        let text = text.trim_end();
+        let swap = |from: &str, to: &str| text.replacen(from, to, 1).into_bytes();
+        assert_eq!(
+            ToPledge::parse(&swap(r#","namespace":"hosts-v1@procession""#, "")),
+            Err(ExchangeError::Malformed(ParseError::MissingMember("namespace")))
+        );
+        assert_eq!(
+            ToPledge::parse(&swap(r#""doc_sig""#, r#""x":1,"doc_sig""#)),
+            Err(ExchangeError::Malformed(ParseError::UnknownMember("x".into())))
+        );
+        for bad in ["", "a b", "a\\u0000b", "a\\u202eb", &"a".repeat(65), "é"] {
+            assert!(ToPledge::parse(&swap("hosts-v1@procession", bad)).is_err(), "{bad:?}");
+        }
+        assert_eq!(ToPledge::parse(&swap(&STANDARD.encode(m_doc()), "!!!")), Err(ExchangeError::BadBase64("doc")));
+        assert!(matches!(
+            ToPledge::parse(&swap(&signature_to_base64(SIG), &STANDARD.encode("plain"))),
+            Err(ExchangeError::BadSignature("doc_sig"))
+        ));
+        // It is the broker's message: a pledge does not send it, a service does not read it.
+        assert_eq!(FromPledge::parse(text.as_bytes()), Err(ExchangeError::UnknownType));
+        assert_eq!(FromService::parse(text.as_bytes()), Err(ExchangeError::UnknownType));
+        assert!(matches!(
+            ToPledge::Carried { namespace: "x".into(), signed: Signed { doc: vec![], sig: "no".into() } }.encode(),
+            Err(EncodeError::NotArmoured(_))
+        ));
+    }
+
+    fn m_doc() -> Vec<u8> {
+        br#"{"v":1,"type":"hosts"}"#.to_vec()
     }
 }
