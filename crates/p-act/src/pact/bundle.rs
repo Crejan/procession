@@ -11,6 +11,7 @@ use super::sshsig::{CallSigner, ed25519_blob};
 use super::{Service, Settings};
 use crate::call::Call;
 use crate::error::ParseError;
+use crate::error::shown;
 use crate::object::Object;
 use crate::sign::{Agent, Fingerprint, Reader, SignError, agent_from_certificate, certificate_from_blob};
 use crate::text;
@@ -35,7 +36,7 @@ const MAX_URL: usize = 2048;
 pub enum BundleError {
     #[error("the bundle is larger than {MAX_BYTES} bytes")]
     TooLarge,
-    #[error("cannot read the bundle: {0}")]
+    #[error("cannot read the bundle: {}", shown(.0, 128))]
     Io(String),
     #[error("the bundle is not UTF-8")]
     NotUtf8,
@@ -49,13 +50,13 @@ pub enum BundleError {
     NoServices,
     #[error("configuration: more than {MAX_SERVICES} services")]
     TooManyServices,
-    #[error("configuration: `{0}` is not a host name")]
+    #[error("configuration: `{}` is not a host name", shown(.0, 64))]
     BadHost(String),
-    #[error("configuration: `{0}` is not a service name")]
+    #[error("configuration: `{}` is not a service name", shown(.0, 64))]
     BadServiceName(String),
-    #[error("configuration: the service {name} on {host} appears twice")]
+    #[error("configuration: the service {} on {} appears twice", shown(name, 64), shown(host, 64))]
     DuplicateService { host: String, name: String },
-    #[error("configuration: the url of {name} on {host} is not allowed: {why}")]
+    #[error("configuration: the url of {} on {} is not allowed: {why}", shown(name, 64), shown(host, 64))]
     BadUrl { host: String, name: String, why: &'static str },
     #[error("configuration: deadline_seconds must be 1 to 600")]
     BadDeadline,
@@ -65,7 +66,7 @@ pub enum BundleError {
     KeyMalformed,
     #[error("the key is encrypted; a key with a passphrase cannot be used")]
     KeyEncrypted,
-    #[error("an agent's key must be Ed25519, this one is `{0}`")]
+    #[error("an agent's key must be Ed25519, this one is `{}`", shown(.0, 64))]
     KeyType(String),
     #[error("the key is not a valid Ed25519 key")]
     KeyRejected,

@@ -62,6 +62,13 @@ not published (`publish = false`).
   with a length bound where an operator needs to see it. The stderr of a
   program that was run is never forwarded to anyone but a log, escaped and
   bounded.
+- Tests. A test never asserts on the result of an operation on a socket or
+  pipe whose other end the test's subject may already have closed (a write,
+  a flush, a shutdown, setting a timeout), unless that result is the thing
+  under test. A test that cannot run where it is run says SKIPPED and has a
+  strict mode in which that is a failure. A test's files and directories
+  get their modes explicitly, never from the umask. No test waits a fixed
+  time for another process to be ready; it waits for the thing itself.
 - A `health` or `status` verb meant for a monitor documents its exit codes
   in a table in the program's SPEC and never uses one code for two meanings.
 - Machine output: `--format json` with `schema_version`, one record type per

@@ -285,31 +285,44 @@ impl Reply {
                 let reason = Refusal::from_wire(&w.reason?)?;
                 Some(Reply::Refused(reason, w.why.as_deref().map(known_why)))
             }
-            "status" => Some(Reply::Status(Box::new(Status {
-                degraded: if w.degraded? { Some(known_why(w.why.as_deref().unwrap_or("io"))) } else { None },
-                pledges: w.pledges?,
-                held: w.held?,
-                delegations: w.delegations?,
-                withdrawn: w.withdrawn?,
-                blocked_persons: w.blocked_persons?,
-                blocked_keys: w.blocked_keys?,
-                keygen_unusable: w.keygen_unusable,
-                broker_certificate: BrokerCertificateStatus {
-                    path: w.broker_certificate_path?,
-                    valid: w.broker_certificate_valid?,
-                    days_left: w.broker_certificate_days,
-                    failure: w.broker_certificate_failure.as_deref().map(known_failure),
-                },
-                certificates: match w.certificates_carried {
-                    None => None,
-                    Some(carried) => Some(CertificateStatus {
-                        carried,
-                        not_carried: w.certificates_not_carried?,
-                        directory_refused: w.certificates_directory_refused?,
-                        uncovered: w.uncovered?,
-                    }),
-                },
-            }))),
+            "status" => {
+                // What the socket sends is read as strictly as everything else: a list that breaks the rule is not
+                // printed, the answer is refused whole (the verb says it got no answer).
+                let clean = |l: &Option<Vec<String>>| l.iter().flatten().all(|x| crate::util::is_clean(x));
+                let names = w.blocked_persons.iter().flatten().all(|n| crate::site::valid_name(n));
+                let keys = w.blocked_keys.iter().flatten().all(|k| k.parse::<Fingerprint>().is_ok());
+                let texts = [&w.keygen_unusable, &w.broker_certificate_path, &w.broker_certificate_failure]
+                    .iter()
+                    .all(|t| t.as_deref().is_none_or(crate::util::is_clean));
+                if !(names && keys && clean(&w.uncovered) && texts) {
+                    return None;
+                }
+                Some(Reply::Status(Box::new(Status {
+                    degraded: if w.degraded? { Some(known_why(w.why.as_deref().unwrap_or("io"))) } else { None },
+                    pledges: w.pledges?,
+                    held: w.held?,
+                    delegations: w.delegations?,
+                    withdrawn: w.withdrawn?,
+                    blocked_persons: w.blocked_persons?,
+                    blocked_keys: w.blocked_keys?,
+                    keygen_unusable: w.keygen_unusable,
+                    broker_certificate: BrokerCertificateStatus {
+                        path: w.broker_certificate_path?,
+                        valid: w.broker_certificate_valid?,
+                        days_left: w.broker_certificate_days,
+                        failure: w.broker_certificate_failure.as_deref().map(known_failure),
+                    },
+                    certificates: match w.certificates_carried {
+                        None => None,
+                        Some(carried) => Some(CertificateStatus {
+                            carried,
+                            not_carried: w.certificates_not_carried?,
+                            directory_refused: w.certificates_directory_refused?,
+                            uncovered: w.uncovered?,
+                        }),
+                    },
+                })))
+            }
             _ => None,
         }
     }

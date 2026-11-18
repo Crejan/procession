@@ -350,7 +350,7 @@ impl Shared {
         self.record.lock().map_err(|_| Error::Refused("the record's lock is poisoned".into()))?.append(now, entry)
     }
 
-    fn load_programs(&self) -> Result<()> {
+    pub(crate) fn load_programs(&self) -> Result<()> {
         let bytes = match fs::read(&self.programs_file) {
             Ok(bytes) => bytes,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
@@ -359,17 +359,19 @@ impl Shared {
         let file: ProgramsFile = serde_json::from_slice(&bytes)
             .map_err(|e| Error::Corrupt { path: self.programs_file.clone(), problem: e.to_string() })?;
         let mut policy = self.policy.lock().map_err(|_| Error::Refused("poisoned".into()))?;
-        for (program, standing) in file.programs {
-            match standing.as_str() {
-                "admitted" => policy.set_standing(program, Standing::Admitted),
-                "blocked" => policy.set_standing(program, Standing::Blocked),
-                _ => {
-                    return Err(Error::Corrupt {
-                        path: self.programs_file.clone(),
-                        problem: format!("unknown standing {standing:?}"),
-                    });
-                }
+        // Everything read back is checked before any of it counts: a file with a name that breaks the rule, or a
+        // standing that is not one of the two, is refused whole, like a damaged one. Nothing of it is repeated.
+        let corrupt = |problem: &str| Error::Corrupt { path: self.programs_file.clone(), problem: problem.to_owned() };
+        for (program, standing) in &file.programs {
+            if program.is_empty() || !crate::agent::text::is_showable(program) {
+                return Err(corrupt("a program name in `programs` is empty, too long or holds a control character"));
             }
+            if !matches!(standing.as_str(), "admitted" | "blocked") {
+                return Err(corrupt("a standing in `programs` is neither admitted nor blocked"));
+            }
+        }
+        for (program, standing) in file.programs {
+            policy.set_standing(program, if standing == "admitted" { Standing::Admitted } else { Standing::Blocked });
         }
         Ok(())
     }

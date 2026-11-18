@@ -129,3 +129,70 @@ no `dump` verb (the engine has it, the verb list is unchanged). Open for the des
 - The marker is not wired to a `backup` yet: no backup exists (it was not built in unit 4, which stayed read-only). It is the primitive the backup, prune and
   check jobs call; wiring and the one-shot CLI's use are tests-with-the-job later.
 - Merged `integration` again; `Cargo.lock` conflicted and was taken from `integration`, then my dependencies were re-added by the build.
+
+## Item 4: SHA-256 restore test, a repository written by restic, switch to p-ermit (done)
+- **p-ermit switch**: `p_reserve_core::text::for_display` now asks `p_ermit::text::check` per character (my copy of the character set is gone). Behaviour: same set; mine still *replaces*
+  a refused character with a space (a `detail` for a log must still be written), p-ermit's `check` only refuses, so no difference in what is refused. I also moved the
+  configuration file and the password file onto `p_ermit::settings` (`read_toml_optional` with the `toml` feature, `read_secret_checked`): my `read_checked`, `read_secret` checks
+  and TOML error scrubbing are deleted; `p-act` is no longer a dependency of p-reserve. Error text differs only in wording (p-ermit's). 
+- **Engine tests** in `crates/p-reserve-core/tests/engine.rs` (feature `testing`, so out of the default run). All 5 pass, none skipped (`restic` 0.19.0 is on this machine, local repository in a
+  temp dir, no network):
+  - restore of a whole tree and of every file one by one, SHA-256 of each restored file against the source file (small, empty, symlink as its target, nested, a 3 MiB file of
+    several chunks, a compressible one), from a repository written by rustic AND from one written by `restic` 0.19.0 (repository v2, compression on);
+  - the engine lists (kinds included), dumps and restores what restic wrote; opening and reading takes no lock and changes no file (`locks/`, `snapshots/`, `index/`, `keys/`
+    listings identical);
+  - **a restic that is writing** (`restic backup --stdin` holds its lock until its input closes): the repository opens and reads normally while the lock is held; rustic neither
+    waits nor refuses and takes no lock of its own (lock count stays 1, then 0 when restic finishes). A snapshot restic wrote after the open is **listed at once** (the list is read
+    from the repository each time) but **its data is not in the loaded index**: reading it fails with outcome `failed`, detail "Tree ID ... not found in index", never wrong bytes;
+    a new open reads it. So the daemon has to reopen, when that failure comes or when it learns of a new snapshot.
+  - Not tested: a repository **exclusively** locked by restic (prune, forget, rewrite hold one briefly; nothing here could hold one open). rustic takes no locks, so it would not notice it:
+    reading while restic prunes is the unsafe case the SPEC already names.
+- **A flaky test found and fixed**: `textfile::tests` set a umask of `0277` (no owner write) process-wide; a test creating a file at the same moment failed with "permission denied"
+  (it hit the engine fixture once). The mask list no longer has `0277` (`0007` instead) and `umask.rs` says why.
+- **Commands and times, here (a macOS machine, load average lower than before):**
+  default, as the orchestrator's sweep: `cargo test --workspace --offline` 2 min 34 s, all pass, no rustic compiled (62 result lines, one `ignored` is in another crate's doctests);
+  the engine tests: `cargo test -p p-reserve-core -p p-reserve --features p-reserve/engine-rustic --offline` 5 min 51 s in all (builds already warm; of which the new
+  `--test engine` file 76 s and the lib's engine tests 107 s, the CLI process tests 140 s, run in parallel with each other), all pass. Faster with
+  `--config 'profile.dev.package."*".opt-level=2'` (once built), much slower on a cold build.
+- Three-umask sweep of my two crates (022, 002, 077) before the engine tests: same counts, 0 failed.
+
+## Audit: strings from elsewhere in preserve's output (read from the code at d9b7ee2, nothing changed, nothing run)
+"Passed the rule" means the character rule (`p_ermit::text`) was applied before the point. `for_display` (mine) *replaces* refused characters with a space and cuts to a
+length; it is not the escape form. serde_json escapes only U+0000 to U+001F, so C1 (U+0085, U+009B) and bidirectional marks pass through JSON raw.
+
+| # | Site | Where the string comes from | Passed the rule? | What a control char, ESC or U+202E does there |
+|---|---|---|---|---|
+| 1 | `snapshots` text: host, paths | the snapshot file; written by whoever wrote the repository (restic, another machine) | **No** | on the operator's terminal: ESC rewrites the screen or the title, a newline fakes a line, U+202E reorders the text |
+| 2 | `snapshots` JSON: `host`, `paths`, `tags` (ids are hex) | same | **No** | a front end's list shows it as is; C1 and bidi marks survive JSON |
+| 3 | `ls` text: file name | the snapshot's tree: the bytes the source file system held. Taken as `node.name().to_string_lossy()` | **No**; also **lossy**: invalid UTF-8 becomes U+FFFD, not reversible | terminal as in 1; a file named with a newline looks like two entries |
+| 4 | `ls` JSON: `name` (lossy as in 3); echoes the `snapshot` and `path` arguments | tree; the arguments are the operator's own (later a front end's) | **No** (name); arguments not applicable to the CLI, **yes to the socket** | as 2 |
+| 5 | `restore` text/JSON: destination (argument echoed), counts | the operator's argument; numbers | n/a (own input) | none from the repository |
+| 6 | `restore` on disk | node names from the repository | rustic's `LocalDestination::path` refuses `..`, a root or a prefix component (read, `local_destination.rs:218-240`, not run), so a crafted name cannot leave the destination; names with a newline, ESC or bidi mark are created **as they are** (real name, which is right); a name holding `/` is split into nested directories | on disk: the real name, a file that the next `ls` of that directory will show raw |
+| 7 | `dump` / `read` (engine returns bytes into a writer; the protocol's `read` is base64) | file contents | n/a: bytes in a field, never spliced into text | none |
+| 8 | engine errors: `EngineError.detail` (`fail` and `named` in `rustic.rs`) | rustic's own message: quotes paths, tree ids, context values, repository data | **Yes**, replaced + cut at 512 bytes, in `fail()` | passed; but see 9 |
+| 9 | forwarding of 8: stderr text `preserve <verb>: <outcome>: <detail>` and the JSON `error` object's `detail` (`repo.rs`) | 8 | passed the character rule, but the workspace rule says rustic's text goes only to a log, escaped and bounded | JSON `detail` reaches machines and front ends: **should go** (the outcome is the code); stderr is the operator's log: keep, with the escape form |
+| 10 | `repo.rs` `plain()` (config, password file, no engine) | p-ermit's error text, which names the path (from the command line or the configuration) | **Yes** (`for_display`) | passed |
+| 11 | `health` text: source and target | **declared pairs**: validated by the name class at config load. **Without declared pairs: the ledger file's labels** | declared: yes. **From the ledger: No** | terminal: as 1; the ledger is a file another writer could have touched (root, same user) |
+| 12 | `health` JSON: same two strings | same | same | as 2 |
+| 13 | `health` errors on stderr (`preserve health: ...`) | p-ermit's and `textfile::Malformed { line, problem }`; `problem` embeds `{:?}` of an unknown label, outcome or cause **from the file** | **No** (not through `for_display`), and it **repeats the offending value** against the new rule (Debug escapes controls; it is not guaranteed for bidi marks) | terminal; must say line and what is wrong, not the value |
+| 14 | ledger **writer** `textfile::render`: pair names | `Pair` strings from config (class-validated) but `Ledger::record` takes any string; marker recovery supplies names from a marker file | **No** at the writer; label escaping covers `\\`, `"` and newline only: ESC, `\r`, C1, bidi are written raw into a file that node_exporter and people read | a monitor or a person reading the file |
+| 15 | ledger **reader** `textfile::parse` | the ledger file | accepts any characters in a label value; they feed 11 and 12 and are written back by the next save | as 11 |
+| 16 | marker file: `Stored.pairs`, `job` read back in `recover` | a file in a 0700 directory of the same user | job id validated at `begin` but **not on reading back**; pair names not validated | flows into 14 and into `Recovered` (printed later) |
+| 17 | `check_name` refusal shows the name | the configuration | **Yes** (`for_display`, 64 bytes) | passed (replace, not escape; the designer's exception: the name is shown) |
+| 18 | usage and unknown-verb text: `unknown verb '{other}'`, `unknown argument {flag:?}` | the operator's argv | no, but own input | negligible; Debug in some, raw in `main.rs` |
+| 19 | job messages and the socket's `detail` | not built | by design: bounded + the rule (proposal, section 2) | to be built with the escape form |
+| 20 | catalog, usage, `health` level words, reasons, outcome and cause names, freshness, times, byte counts | constants, closed enums, numbers | n/a | none |
+
+Count: **20 sites; 13 touch a string from outside** (1, 2, 3, 4, 6, 8, 9, 11, 12, 13, 14, 15, 16). **Not covered: 1, 2, 3, 4 (name), 11 (ledger-derived), 12 (ledger-derived), 13, 14, 15, 16; and 9 for JSON.**
+Covered: 5, 7, 8, 10, 17, 20 (and 19 by design, 18 own input, 6 by rustic's path check).
+
+What I would do (nothing done yet):
+- **Escape form** (`p_ermit::text::escape`, with its report of whether anything was escaped) at **output** for: `snapshots` host/paths/tags and `ls` names, text and JSON (JSON gets an `escaped: true` marker on the
+  record that had any), and `health` pair names from the ledger. For `ls`, take the name as bytes (`OsStr`, not `to_string_lossy`) so a name that is not UTF-8 is shown with `\x{..}` and is reversible; a file named
+  with a newline, ESC, C1 or U+202E is listed, as what it is, never refused and never raw.
+- **Validation at entry** for the ledger: `Pair` names through the name class when they are made (config) and, on **reading** a ledger or a marker, `p_ermit::text::check` (not the class: a fundament ledger has names like `tank/home`);
+  a refusal names the line and not the value. And the **writer** refuses (or escapes) rather than write a control or bidi character into a file.
+- **Errors**: `textfile::Malformed.problem` and every message of mine say line and what, never the value; engine `detail` stays out of JSON, goes to stderr only escaped and bounded (the escape form instead of my replace-by-space).
+- **restore** must restore the real name on disk and only the output is escaped; rustic does that. The test the workspace rule asks for: a snapshot holding a file named with U+0085, U+009B and U+202E (and ESC and a newline, and one with invalid UTF-8
+  if restic can store it), listed in text and JSON, dumped (bytes equal), restored (the on-disk name is the real one, the output shows it escaped), and a ledger or marker with such a name refused or escaped, through every output preserve has.
+- `for_display` stays only where a string is bounded for a log; it is not the escape form and goes away when the escape lands.

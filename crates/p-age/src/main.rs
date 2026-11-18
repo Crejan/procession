@@ -219,7 +219,7 @@ fn main() -> ExitCode {
             ExitCode::from(2)
         }
         [other, ..] => {
-            eprintln!("page: unknown verb '{other}'\n\n{}", usage());
+            eprintln!("page: unknown verb '{}'\n\n{}", p_age::util::shown(other), usage());
             ExitCode::from(2)
         }
     }

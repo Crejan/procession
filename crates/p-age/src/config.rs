@@ -29,7 +29,7 @@ pub enum ConfigError {
     State(#[from] crate::core::StateError),
     #[error("`listen` names no address")]
     NoAddress,
-    #[error("the site CA key {path}: {why}")]
+    #[error("the site CA key {path}: {}", crate::util::shown(why))]
     SiteCa { path: String, why: String },
     #[error("cannot open the log {path}: {source}")]
     Log { path: String, source: std::io::Error },

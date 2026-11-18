@@ -44,18 +44,28 @@ impl std::fmt::Display for KeygenError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             KeygenError::NotFound(path) => {
-                write!(f, "{path} does not exist: install the OpenSSH client (ssh-keygen) there")
+                write!(f, "{} does not exist: install the OpenSSH client (ssh-keygen) there", shown_path(path))
             }
-            KeygenError::NotTrusted { path, why } => write!(f, "{path} is not trusted: {why}"),
+            KeygenError::NotTrusted { path, why } => write!(f, "{} is not trusted: {}", shown_path(path), shown(why)),
             KeygenError::Version { found, needed } => {
-                write!(f, "OpenSSH {needed} or later is needed (found: {found})")
+                write!(f, "OpenSSH {} or later is needed (found: {})", shown(needed), shown(found))
             }
-            KeygenError::Cannot(what, kind) => write!(f, "cannot use {what}: {kind}"),
+            KeygenError::Cannot(what, kind) => write!(f, "cannot use {}: {}", shown(what), shown(kind)),
         }
     }
 }
 
 impl std::error::Error for KeygenError {}
+
+/// A path or a word that may have come from outside, escaped and bounded for a message.
+fn shown(s: &str) -> String {
+    p_ermit::text::escape_clipped(s, 256).text
+}
+
+/// A path, as it is if the rule has nothing against it, else escaped and bounded.
+fn shown_path(s: &str) -> String {
+    if p_ermit::text::check(s).is_ok() { s.to_owned() } else { shown(s) }
+}
 
 /// Who may own the program and the directories above it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -189,7 +199,7 @@ impl Keygen {
         match parse_version(&text) {
             Some(version) if version >= MIN_VERSION => Ok(version),
             _ => Err(KeygenError::Version {
-                found: text.lines().next().unwrap_or("").chars().take(60).collect(),
+                found: p_ermit::text::escape_clipped(text.lines().next().unwrap_or(""), 60).text,
                 needed: needed(),
             }),
         }

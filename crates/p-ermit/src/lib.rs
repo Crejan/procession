@@ -7,6 +7,9 @@
 
 #[cfg(unix)]
 pub mod peer;
+/// Probe strings and `assert_clean` for the tests of programs that show text from elsewhere.
+#[cfg(feature = "test-support")]
+pub mod probe;
 #[cfg(unix)]
 pub mod settings;
 pub mod text;

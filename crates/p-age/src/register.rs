@@ -194,9 +194,27 @@ impl Register {
     }
 
     /// The register from what [`Register::snapshot`] wrote.
-    #[must_use]
-    pub fn restore(snapshot: Snapshot) -> Register {
-        Register {
+    ///
+    /// # Errors
+    /// The name of the member that has an entry that is not valid: a person's name that is not a name, a fingerprint
+    /// that is not one. The value is not in the error. What the broker acts on and prints is validated when it is read.
+    pub fn restore(snapshot: Snapshot) -> Result<Register, &'static str> {
+        use crate::site::valid_name;
+        use p_act::sign::Fingerprint;
+        let fingerprint = |s: &str| s.parse::<Fingerprint>().is_ok();
+        if !snapshot.delegations.iter().all(|e| fingerprint(&e.fingerprint)) {
+            return Err("delegations (fingerprint)");
+        }
+        if !snapshot.delegations.iter().all(|e| valid_name(&e.person)) {
+            return Err("delegations (person)");
+        }
+        if !snapshot.blocked.iter().all(|n| valid_name(n)) {
+            return Err("blocked");
+        }
+        if !snapshot.blocked_keys.iter().all(|k| fingerprint(k)) {
+            return Err("blocked_keys");
+        }
+        Ok(Register {
             delegations: snapshot
                 .delegations
                 .into_iter()
@@ -207,7 +225,7 @@ impl Register {
                 .collect(),
             blocked: snapshot.blocked.into_iter().collect(),
             blocked_keys: snapshot.blocked_keys.into_iter().collect(),
-        }
+        })
     }
 
     /// Drop the delegations whose validity ended before `now`, and say how many. A withdrawn

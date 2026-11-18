@@ -1,4 +1,6 @@
-//! Tests that need a given umask. The umask is process-wide, so they take one lock.
+//! Tests that need a given umask. The umask is process-wide, so they take one lock. Other tests in the process do not
+//! take it, so a mask used here must never remove the owner's own permissions (no `0o2xx`, `0o4xx`, `0o1xx` bits):
+//! a test that creates files at the same time would fail with "permission denied".
 
 use std::sync::Mutex;
 

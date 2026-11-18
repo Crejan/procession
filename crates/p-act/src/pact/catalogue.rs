@@ -22,7 +22,7 @@ const FORBIDDEN: [&str; 9] = ["$ref", "$defs", "default", "examples", "oneOf", "
 /// What the bundle makes impossible to start with.
 #[derive(Debug, Error, PartialEq, Eq)]
 pub enum CatalogueError {
-    #[error("two services map to the tool prefix `{0}`")]
+    #[error("two services map to the tool prefix `{}`", crate::error::shown(.0, 64))]
     PrefixCollision(String),
 }
 
