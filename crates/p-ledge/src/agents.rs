@@ -69,6 +69,14 @@ pub fn start(shared: &Shared, args: StartArgs) -> Result<(Value, Delegation), Co
         eprintln!("pledge: the broker cannot be reached (or has not sent its standing yet): nothing issued");
         return Err(Code::BrokerUnavailable);
     }
+    // A delegation key the broker blocks issues nothing: said to the person, in the record.
+    if let Some(key) = shared.key_with_purpose("delegation")
+        && shared.broker_state.is_key_blocked(&key.fingerprint)
+    {
+        eprintln!("pledge: the delegation key is blocked by the broker: nothing issued");
+        shared.event("issuing-refused", json!({"why": "the delegation key is blocked by the broker"}));
+        return Err(Code::Refused);
+    }
     let mut groups = args.groups;
     if !groups.iter().all(|g| is_name(g)) {
         return Err(Code::BadArguments);
