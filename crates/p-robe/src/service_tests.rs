@@ -184,6 +184,11 @@ enum Plan {
     UnknownThen(Option<PathBuf>),
     /// An approval with clearance members, which stage 1 refuses.
     ApproveWithClearance(PathBuf),
+    /// A valid approval of **another** request (another hash) first, then, if `then_own`, the real one.
+    Foreign {
+        key: PathBuf,
+        then_own: bool,
+    },
 }
 
 struct FakePledge {
@@ -303,6 +308,15 @@ fn connection(stream: UnixStream, plan: &Plan, events: &Mutex<Vec<String>>, host
             ));
             if let Some(path) = path {
                 answer(&stream, hash, Answered::Approved(approve(path, submit.request())), POLICY);
+            }
+        }
+        Plan::Foreign { key, then_own } => {
+            let other =
+                p_act::Request::compose(submit.request().call(), submit.request().call_sig(), Rating::WORST).unwrap();
+            answer(&stream, other.hash(), Answered::Approved(approve(key, &other)), POLICY);
+            if *then_own {
+                std::thread::sleep(Duration::from_millis(200));
+                answer(&stream, hash, Answered::Approved(approve(key, submit.request())), POLICY);
             }
         }
         Plan::ApproveWithClearance(path) => {
@@ -666,6 +680,25 @@ fn an_answer_with_an_unknown_result_is_no_answer_and_the_wait_goes_on() {
     rig.pledge.set(Plan::UnknownThen(None));
     let sent = sign(&CallSpec { secs: 2, ..spec(&rig.pki.jan_agent, "sys kit", &[]) });
     assert_eq!(rig.outcome(&sent), Outcome::Expired, "an unknown result alone does not end the wait");
+}
+
+#[test]
+fn an_answer_for_a_request_the_service_is_not_waiting_on_is_dropped_and_nothing_is_acted_on() {
+    let rig = Rig::new(Plan::Silent);
+    // A valid approval, but of another request's bytes, arrives for another hash: dropped and logged.
+    rig.pledge.set(Plan::Foreign { key: rig.pki.confirmed.clone(), then_own: false });
+    let sent = sign(&CallSpec { secs: 2, ..spec(&rig.pki.jan_agent, "sys kit", &[]) });
+    assert_eq!(rig.outcome(&sent), Outcome::Expired, "the foreign answer did not end the wait");
+    assert!(rig.log_has("a message for a request not held: ignored"), "{:?}", rig.log);
+    assert!(rig.ran().is_empty(), "nothing ran on it");
+    // The same, and then the real approval: only that one is acted on, once.
+    rig.pledge.set(Plan::Foreign { key: rig.pki.confirmed.clone(), then_own: true });
+    let sent = rig.jan("sys kit", &[]);
+    assert_eq!(word(&rig.outcome(&sent)), "done");
+    assert_eq!(rig.ran().iter().filter(|l| l.starts_with("event=start")).count(), 1);
+    // The same identifier is spent: an answer cannot make it run twice.
+    assert_eq!(word(&rig.outcome(&sent)), "refused/invalid");
+    assert_eq!(rig.ran().iter().filter(|l| l.starts_with("event=start")).count(), 1);
 }
 
 #[test]

@@ -4,8 +4,9 @@
 //! `tools/call`, answered as a stream.
 //!
 //! **Ignored, and it does nothing unless `PROBE_STAGE1_HTTP=1`.** It binds `127.0.0.1:$PROBE_STAGE1_PORT`
-//! (default 18765), which the sandbox this was written in does not allow, and it needs a `pact` with
-//! its HTTP client (p-act's `ureq` one). It has **never been run**; it compiles, and its gate works.
+//! (default 18765), which the sandbox this was written in does not allow, and it needs the `pact`
+//! binary with its HTTP client (p-act's `ureq` one, `--features p-act/pact`). It has **never been run**;
+//! it compiles against p-act's merged client, and its gate works.
 //!
 //! With `PROBE_STAGE1_SUDO=1` too, the verb is run by `SudoRunner` (as `RUNBOOK-stage1-linux.md` sets
 //! it up, as `probe-svc`); otherwise by `InProcess`, as a simulated root, on any machine with TCP.
@@ -32,7 +33,11 @@ use serde_json::{Value, json};
 fn pact_binary() -> PathBuf {
     let exe = std::env::current_exe().unwrap();
     let path = exe.parent().and_then(std::path::Path::parent).unwrap().join("pact");
-    assert!(path.exists(), "{} is not built: cargo build --workspace --features p-robe/test-verbs", path.display());
+    assert!(
+        path.exists(),
+        "{} is not built: cargo build --workspace --features p-robe/test-verbs,p-act/pact",
+        path.display()
+    );
     path
 }
 
@@ -52,7 +57,7 @@ fn pact_call(bundle: &[u8], tool: &str, arguments: &Value) -> Value {
 }
 
 #[test]
-#[ignore = "binds a TCP port and needs pact's HTTP client; PROBE_STAGE1_HTTP=1"]
+#[ignore = "binds a TCP port; needs the pact binary; PROBE_STAGE1_HTTP=1"]
 fn the_real_pact_calls_the_real_probe_over_http() {
     if std::env::var("PROBE_STAGE1_HTTP").as_deref() != Ok("1") {
         eprintln!("PROBE_STAGE1_HTTP is not 1: nothing run");
