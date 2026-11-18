@@ -14,6 +14,11 @@ publish = false
 name = "preserve"
 path = "src/main.rs"
 
+[features]
+# The repository engine (rustic_core). Off by default: the verbs that read a repository then say that this build has
+# no engine. `testing` brings the throwaway-repository helper the engine's tests and the process tests use.
+engine-rustic = ["p-reserve-core/engine-rustic", "p-reserve-core/testing"]
+
 [dependencies]
 p-reserve-core = { path = "../p-reserve-core", version = "0.0.0" }
 humantime = "2"
@@ -24,6 +29,5 @@ serde_json = "1"
 toml = "0.9"
 
 [dev-dependencies]
-p-reserve-core = { path = "../p-reserve-core", version = "0.0.0", features = ["testing"] }
 tempfile = "3"
 serde_json = "1"

@@ -1,3 +1,6 @@
+#![cfg(feature = "engine-rustic")]
+//! Built only with the engine: `cargo test -p p-reserve --features engine-rustic`.
+//!
 //! `preserve snapshots`, `ls` and `restore` as processes, against a
 //! throwaway repository in a temporary directory. The repository is made once
 //! for the whole file (a debug build derives its key slowly); every test reads

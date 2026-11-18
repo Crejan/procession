@@ -181,12 +181,22 @@ never in it: a path to a 0600 file, or the key store.
 
 The ledger file (mode 0644, whatever the umask, readable by the metrics
 exporter) holds what a local user may read: source and target names, outcomes,
-times, byte and file counts. A name is a short label (letters, digits and
-`. _ - : + /`, at most 128; not an address, no `@`, no `://`, not a path from
-the root or into a home); the configuration refuses any other. It holds no
+times, byte and file counts. A configured name of a source or a target is a plain
+word, `[a-z0-9][a-z0-9._-]{0,63}`: no slash, no upper case, not `.` or `..`. That
+is what goes into the ledger, the metrics' labels and the socket's messages; the
+path it stands for stays in the configuration. A configuration with a name outside
+the class is refused at load, with the name (cut, printable) and the rule. It holds no
 repository address, no credential, no path from inside a home directory.
 
 ### Reading a repository
+
+The engine is a cargo feature, `engine-rustic` of `p-reserve` (and of
+`p-reserve-core`), off by default: `rustic_core` and `rustic_backend` are about
+500 crates and minutes of build. A build without it still has everything else
+(core, ledger, health, freshness, configuration); `snapshots`, `ls` and
+`restore` then fail with the outcome `not-run` and the words "this build has no
+repository engine", exit 3, and `preserve catalog` does not mark them
+implemented. Test it with `cargo test -p p-reserve --features engine-rustic`.
 
 `preserve snapshots <target>`, `preserve ls <target> <snapshot> [path]` and
 `preserve restore <target> <snapshot> <path> --to <destination>` open the

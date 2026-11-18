@@ -11,7 +11,6 @@ use std::time::{Duration, SystemTime};
 
 use p_reserve_core::Outcome;
 use p_reserve_core::engine::{Engine, EngineError, Node, NodeKind, RestoreSummary, Snapshot};
-use p_reserve_core::rustic::{Location, RusticEngine};
 use serde::Serialize;
 
 use crate::config::{Config, DEFAULT_CONFIG, read_secret};
@@ -149,15 +148,29 @@ fn plain(detail: impl Into<String>) -> Failure {
     }
 }
 
-fn open(options: &Options) -> Result<(String, RusticEngine), Failure> {
+/// Whether this build can read a repository at all.
+pub const HAS_ENGINE: bool = cfg!(feature = "engine-rustic");
+
+#[cfg(feature = "engine-rustic")]
+fn engine(target: &crate::config::TargetConfig, password: &str) -> Result<Box<dyn Engine>, Failure> {
+    use p_reserve_core::rustic::{Location, RusticEngine};
+    let location = Location { repository: target.repository.clone(), options: target.options.clone() };
+    Ok(Box::new(RusticEngine::open(&location, password)?))
+}
+
+#[cfg(not(feature = "engine-rustic"))]
+fn engine(_target: &crate::config::TargetConfig, _password: &str) -> Result<Box<dyn Engine>, Failure> {
+    Err(plain("this build has no repository engine (built without the engine-rustic feature)"))
+}
+
+fn open(options: &Options) -> Result<(String, Box<dyn Engine>), Failure> {
     let config = Config::load(&options.config)
         .map_err(|e| plain(e.to_string()))?
         .ok_or_else(|| plain(format!("{} does not exist", options.config.display())))?;
     let name = &options.positional[0];
     let target = config.target(name).ok_or_else(|| plain(format!("no target called {name:?} in the configuration")))?;
     let password = read_secret(&target.password_file).map_err(|e| plain(e.to_string()))?;
-    let location = Location { repository: target.repository.clone(), options: target.options.clone() };
-    Ok((name.clone(), RusticEngine::open(&location, &password)?))
+    Ok((name.clone(), engine(target, &password)?))
 }
 
 /// Run the verb; returns the process exit code.

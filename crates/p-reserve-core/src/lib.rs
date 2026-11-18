@@ -14,8 +14,9 @@ pub mod health;
 pub mod ledger;
 pub mod marker;
 pub mod outcome;
+#[cfg(feature = "engine-rustic")]
 pub mod rustic;
-#[cfg(any(test, feature = "testing"))]
+#[cfg(all(feature = "engine-rustic", any(test, feature = "testing")))]
 pub mod testing;
 pub mod text;
 pub mod textfile;

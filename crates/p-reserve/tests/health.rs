@@ -130,7 +130,7 @@ fn a_pair_name_that_is_an_address_or_a_home_path_is_refused_before_it_could_reac
         write_config(&config, &format!("[[pair]]\nsource = \"{source}\"\ntarget = \"offsite\"\n"));
         let out = run_at(&dir.path().join("none.prom"), 0, &["--config", config.to_str().unwrap()]);
         assert_eq!(out.status.code(), Some(3), "{source}");
-        assert!(!String::from_utf8_lossy(&out.stderr).contains("alice"), "{source}");
+        assert!(String::from_utf8_lossy(&out.stderr).contains("[a-z0-9][a-z0-9._-]{0,63}"), "{source}");
     }
 }
 

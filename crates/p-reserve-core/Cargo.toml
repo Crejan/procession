@@ -11,9 +11,12 @@ include = ["src/**"]
 publish = false
 
 [features]
+# The engine on rustic_core (`rustic::RusticEngine`). Off by default: rustic_core and rustic_backend are about 500
+# crates and minutes of build time, and nothing else in the crate needs them.
+engine-rustic = ["dep:rustic_core", "dep:rustic_backend"]
 # `testing::make_repository`: makes a throwaway repository and writes a snapshot to it. For tests only; nothing
-# else in this crate writes to a repository.
-testing = []
+# else in this crate writes to a repository. Needs the engine.
+testing = ["engine-rustic"]
 
 [dependencies]
 serde = { version = "1", features = ["derive"] }
@@ -21,8 +24,8 @@ thiserror = "2"
 libc = "0.2"
 serde_json = "1"
 
-rustic_core = "0.14"
-rustic_backend = "0.8"
+rustic_core = { version = "0.14", optional = true }
+rustic_backend = { version = "0.8", optional = true }
 
 [dev-dependencies]
 tempfile = "3"

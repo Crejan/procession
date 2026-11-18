@@ -185,24 +185,29 @@ fn describe(text: &str, e: &toml::de::Error) -> String {
     }
 }
 
-/// A source or target name as it will appear in the ledger, which anyone on
-/// the machine may read: a short label, not an address and not a path into
-/// somebody's home. Letters, digits and `. _ - : + /` only, 1 to 128 bytes;
-/// no `@`, no `://`, no `..`, no leading `/` or `~`.
+/// The rule for a configured name of a source or a target: `[a-z0-9][a-z0-9._-]{0,63}`.
+pub const NAME_RULE: &str = "[a-z0-9][a-z0-9._-]{0,63}";
+
+/// Whether `name` is in the class [`NAME_RULE`]: a plain word, no slash, no
+/// upper case, not `.` or `..` (a leading dot is already out), at most 64
+/// bytes. It is what goes into the ledger, the metrics' labels and the
+/// socket's messages; the path it stands for stays in the configuration.
+pub fn is_name(name: &str) -> bool {
+    let bytes = name.as_bytes();
+    (1..=64).contains(&bytes.len())
+        && (bytes[0].is_ascii_lowercase() || bytes[0].is_ascii_digit())
+        && bytes.iter().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || matches!(b, b'.' | b'_' | b'-'))
+}
+
+/// `Ok` for a name in the class; otherwise the refusal, with the name (cut and
+/// made printable: it is the one value from the file an error may carry) and
+/// the rule.
 pub fn check_name(what: &str, name: &str) -> Result<(), String> {
-    let plain = name.bytes().all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'-' | b':' | b'+' | b'/'));
-    if name.is_empty()
-        || name.len() > 128
-        || !plain
-        || name.contains("://")
-        || name.contains("..")
-        || name.starts_with('/')
-    {
-        return Err(format!(
-            "a {what} name is a short label (letters, digits and . _ - : + /, at most 128, not a path or an address)"
-        ));
+    if is_name(name) {
+        return Ok(());
     }
-    Ok(())
+    let shown = p_reserve_core::text::for_display(name, 64);
+    Err(format!("the {what} name {shown:?} is not allowed: a name is {NAME_RULE}"))
 }
 
 fn duration(key: &str, text: &str) -> Result<Duration, String> {
@@ -364,24 +369,58 @@ mod tests {
     }
 
     #[test]
-    fn error_texts_carry_no_value_from_the_file() {
+    fn error_texts_carry_no_value_from_the_file_except_a_refused_name() {
         let dir = tempfile::tempdir().unwrap();
         let secret = "hunter2-SECRET";
         for text in [
             format!("ledger = 5\nmetric_prefix = {secret}"),
             format!("metric_prefix = 7\nledger = [\"{secret}\"]"),
             format!("[freshness]\nfresh_within = \"{secret}\""),
-            format!("[[pair]]\nsource = \"{secret}@host\"\ntarget = \"b\""),
-            format!("{secret} = 1"),
             format!("[[pair]]\nsource = \"a\"\ntarget = \"b\"\nfresh = \"{secret}\""),
+            format!("[[target]]\nname = \"a\"\nrepository = \"{secret}\"\npassword_file = 5"),
         ] {
             let path = write(dir.path(), &text, 0o600);
             let err = Config::load(&path).unwrap_err().to_string();
-            assert!(!err.contains(secret) || text.starts_with(secret), "{err}");
+            assert!(!err.contains(secret), "{err}");
         }
         // a key's name may appear (it tells a person which to remove); a value never does
         let path = write(dir.path(), &format!("ledger = \"{secret}\"\nmetric_prefix = 3"), 0o600);
         assert!(!Config::load(&path).unwrap_err().to_string().contains(secret));
+        // the one exception, by the designer's rule: a refused name is shown, with the rule
+        let path = write(dir.path(), "[[pair]]\nsource = \"Home\"\ntarget = \"b\"\n", 0o600);
+        let err = Config::load(&path).unwrap_err().to_string();
+        assert!(err.contains("\"Home\"") && err.contains(NAME_RULE), "{err}");
+    }
+
+    #[test]
+    fn the_name_class_has_its_edges_where_the_rule_says() {
+        let long = |n: usize| format!("a{}", "b".repeat(n - 1));
+        for good in ["a", "0", "home", "off-site.1", "db_main", "a.b", "9x", "a-", "a.", &long(64)] {
+            assert!(is_name(good), "{good}");
+        }
+        for bad in [
+            "",
+            &long(65),
+            ".hidden",
+            "-lead",
+            "_lead",
+            ".",
+            "..",
+            "a/b",
+            "/home",
+            "Home",
+            "hOme",
+            "a b",
+            "é",
+            "a@b",
+            "a:b",
+            "a+b",
+            "a\nb",
+            "tank/home",
+        ] {
+            assert!(!is_name(bad), "{bad:?}");
+            assert!(check_name("source", bad).unwrap_err().contains(NAME_RULE), "{bad:?}");
+        }
     }
 
     #[test]
@@ -390,11 +429,5 @@ mod tests {
         assert!(bad.default_limits().unwrap_err().contains("fresh_within"));
         let inverted: Config = toml::from_str("[freshness]\nfresh_within = \"3d\"\nstale_after = \"1d\"").unwrap();
         assert!(inverted.default_limits().is_err());
-        for good in ["home", "tank/home", "off-site.1", "db:main+x"] {
-            assert!(check_name("source", good).is_ok(), "{good}");
-        }
-        for bad in ["", "/home/alice/docs", "alice@host", "sftp://u:pw@h/p", "../x", "a b", "é", &"x".repeat(129)] {
-            assert!(check_name("source", bad).is_err(), "{bad}");
-        }
     }
 }
