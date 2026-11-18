@@ -33,6 +33,44 @@ pub fn own_uid() -> u32 {
     unsafe { libc::getuid() }
 }
 
+/// The longest account name [`account_of`] returns, in characters.
+pub const MAX_ACCOUNT_NAME_CHARS: usize = 64;
+
+/// The name of the account with user id `uid`, from the system's user database (`getpwuid_r`), or `None` if there is no
+/// entry, the name is not valid UTF-8, it breaks the character rule ([`crate::text::check`]: no control character, no
+/// bidirectional mark), it is empty or longer than [`MAX_ACCOUNT_NAME_CHARS`], or anything at all went wrong.
+///
+/// **For showing and recording, never for deciding who may do what**: a name can change between the connection and the
+/// lookup, and two accounts can have one name; decisions are by the user id.
+///
+/// **It can block, and for a long time**: on a site with a directory (LDAP, NIS, a remote name service) the lookup asks
+/// the network, and no timeout is added here. A caller keeps it off the path that answers somebody (a thread of its
+/// own, a result that is used when it arrives).
+#[must_use]
+pub fn account_of(uid: u32) -> Option<String> {
+    let mut buffer = vec![0_u8; 1024];
+    loop {
+        // SAFETY: `passwd` is plain data for which all-zero is valid; it is only read after `getpwuid_r` filled it.
+        let mut entry: libc::passwd = unsafe { std::mem::zeroed() };
+        let mut found: *mut libc::passwd = std::ptr::null_mut();
+        // SAFETY: `entry`, `buffer` and `found` are valid for the call, `buffer.len()` is its size, and `getpwuid_r`
+        // writes only inside them.
+        let status =
+            unsafe { libc::getpwuid_r(uid, &raw mut entry, buffer.as_mut_ptr().cast(), buffer.len(), &raw mut found) };
+        if status == libc::ERANGE && buffer.len() < 1 << 20 {
+            buffer.resize(buffer.len() * 2, 0);
+            continue;
+        }
+        if status != 0 || found.is_null() || entry.pw_name.is_null() {
+            return None;
+        }
+        // SAFETY: on success `pw_name` points to a NUL-terminated string inside `buffer`, which is still alive.
+        let name = unsafe { std::ffi::CStr::from_ptr(entry.pw_name) }.to_str().ok()?.to_owned();
+        let chars = name.chars().count();
+        return (chars > 0 && chars <= MAX_ACCOUNT_NAME_CHARS && crate::text::check(&name).is_ok()).then_some(name);
+    }
+}
+
 /// The path of the program that process `pid` runs, if it can be read.
 #[must_use]
 pub fn program_path(pid: i32) -> Option<String> {
@@ -527,5 +565,20 @@ mod tests {
         let file = std::fs::File::open("/dev/null").unwrap();
         let unreadable = Peer::read(&file).unwrap_err();
         assert!(std::error::Error::source(&unreadable).is_some());
+    }
+
+    #[test]
+    fn an_account_is_named_by_the_user_database_or_not_at_all() {
+        assert_eq!(account_of(0).as_deref(), Some("root"));
+        let own = account_of(own_uid());
+        assert!(own.as_ref().is_none_or(|n| !n.is_empty() && n.chars().count() <= MAX_ACCOUNT_NAME_CHARS), "{own:?}");
+        // A user id nobody has.
+        assert_eq!(account_of(4_000_000_123), None);
+        // Whatever comes back obeys the character rule.
+        for uid in [0, 1, 501, 1000, 65534] {
+            if let Some(name) = account_of(uid) {
+                assert!(crate::text::check(&name).is_ok(), "{uid}");
+            }
+        }
     }
 }
