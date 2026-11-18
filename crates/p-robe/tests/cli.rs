@@ -322,7 +322,11 @@ mod with_test_verbs {
         assert!(text(&out.stderr).contains("not a regular file"));
         // A file that is not there cannot be rated: the worst, and then the verb fails.
         refused_above(&read(&dir, Some("open,none,none"), &dir.join("open/absent")));
-        assert_eq!(read(&dir, Some("secret,none,none"), &dir.join("open/absent")).status.code(), Some(1));
+        assert_eq!(
+            read(&dir, Some("secret,none,none"), &dir.join("open/absent")).status.code(),
+            Some(70),
+            "a verb that was started and did not read is a failed call, not the verb's own code"
+        );
         let out = probe(&["--within", "secret,none,none", "test", "read", "open/a"], Some(&dir));
         assert_eq!(out.status.code(), Some(64));
     }

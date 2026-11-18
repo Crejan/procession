@@ -841,9 +841,9 @@ impl crate::runner::Runner for Fixed {
         until: i64,
         _: &str,
         _: &[String],
-    ) -> Result<crate::runner::RunOutput, String> {
+    ) -> Result<crate::runner::RunOutput, crate::runner::RunError> {
         self.asked.lock().unwrap().push((call_id.to_string(), until));
-        Ok(crate::runner::RunOutput { rc: self.rc, timed_out: false, stdout: String::new() })
+        Ok(crate::runner::RunOutput { rc: self.rc, timed_out: false, signal: None, stdout: String::new() })
     }
 }
 
@@ -857,6 +857,9 @@ fn the_dispatchers_exit_codes_reach_the_agent_as_the_documented_outcomes_and_the
         (64, "refused/not-allowed", "dispatcher-refused"),
         (3, "unavailable", "dispatcher-unavailable"),
         (0, "done", "ran"),
+        (70, "failed", "dispatcher-failed"),
+        (2, "failed", "dispatcher-code:2"),
+        (1, "unavailable", "sudo-refused"),
     ] {
         let asked = Arc::new(Mutex::new(Vec::new()));
         let (mut service, log) = make_service(
@@ -880,6 +883,52 @@ fn the_dispatchers_exit_codes_reach_the_agent_as_the_documented_outcomes_and_the
             (sent.id.as_str(), call.deadline().unix()),
             "the dispatcher is told the call's deadline"
         );
+    }
+}
+
+/// A runner that gives what it was told to, once.
+struct Canned(Mutex<Option<Result<crate::runner::RunOutput, crate::runner::RunError>>>);
+
+impl crate::runner::Runner for Canned {
+    fn run(
+        &self,
+        _: Rating,
+        _: &str,
+        _: i64,
+        _: &str,
+        _: &[String],
+    ) -> Result<crate::runner::RunOutput, crate::runner::RunError> {
+        self.0.lock().unwrap().take().expect("asked once")
+    }
+}
+
+#[test]
+fn a_run_that_may_have_started_is_failed_and_only_a_certain_not_started_is_unavailable() {
+    use crate::runner::{RunError, RunOutput};
+    let rig = Rig::new(Plan::Silent);
+    rig.pledge.set(confirmed(&rig));
+    let output = |rc, timed_out, signal| RunOutput { rc, timed_out, signal, stdout: "{\"type\":\"header\"}\n".into() };
+    for (given, expected, exact) in [
+        (Err(RunError::NotStarted("cannot start sudo: nope".into())), "unavailable", "run:cannot start sudo"),
+        (Err(RunError::Lost("answer over the limit".into())), "failed", "run-lost:answer over the limit"),
+        (Ok(output(255, true, Some(9))), "failed", "run-limit"),
+        (Ok(output(255, false, Some(11))), "failed", "dispatcher-signal:11"),
+        (Ok(output(101, false, None)), "failed", "dispatcher-code:101"),
+    ] {
+        let (mut service, log) = make_service(
+            &rig.pki,
+            rig.pledge.link(),
+            &rig.used,
+            InProcess { audit_file: rig.audit.clone(), lock_dir: rig.used.clone(), user: "probe".into(), before: None },
+            16,
+        );
+        service.runner = Box::new(Canned(Mutex::new(Some(given))));
+        let sent = rig.jan("sys kit", &[]);
+        match service.handle(&sent.tool(), &AtomicBool::new(false)) {
+            Handled::Outcome { outcome, .. } => assert_eq!(word(&outcome), expected, "{exact}"),
+            other => panic!("{other:?}"),
+        }
+        assert!(log.lock().unwrap().iter().any(|l| l.contains(exact)), "{exact}: {:?}", log.lock().unwrap());
     }
 }
 
@@ -954,6 +1003,17 @@ mod with_test_verbs {
             Outcome::Done { rc: 0, answer } => assert!(answer.contains("\"args\":[\"x=1\"]"), "{answer}"),
             other => panic!("{other:?}"),
         }
+    }
+
+    #[test]
+    fn a_verb_that_was_started_and_exits_with_a_code_is_failed_with_the_cause_under_the_calls_identifier() {
+        let rig = Rig::new(Plan::Silent);
+        rig.pledge.set(confirmed(&rig));
+        let sent = rig.jan("test fail", &["2"]);
+        assert_eq!(rig.outcome(&sent), Outcome::Failed);
+        assert!(rig.log_has("dispatcher-failed"), "{:?}", rig.log);
+        let line = rig.ran().into_iter().find(|l| l.starts_with("event=done ")).expect("a done line");
+        assert!(line.contains(" rc=70 ") && line.contains("cause=verb-code:2") && line.contains(&sent.id), "{line}");
     }
 
     #[test]

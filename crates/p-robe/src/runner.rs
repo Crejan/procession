@@ -22,12 +22,22 @@ const OUTPUT_LIMIT: u64 = 3 << 20;
 /// What the dispatcher did.
 #[derive(Debug, PartialEq, Eq)]
 pub struct RunOutput {
-    /// Its exit code (see `dispatch.rs`).
+    /// Its exit code (see `dispatch.rs`); 255 if it ended by a signal.
     pub rc: u8,
-    /// It was killed at [`RUN_LIMIT`].
+    /// It was killed at the run limit.
     pub timed_out: bool,
+    /// The signal that ended it, if one did.
+    pub signal: Option<i32>,
     /// What it wrote: one JSON object per line.
     pub stdout: String,
+}
+
+/// Why a run gave no [`RunOutput`]. The difference is the one an agent hears: `NotStarted` is certain
+/// (nothing was started), `Lost` is not (something was, and its result is gone).
+#[derive(Debug, PartialEq, Eq)]
+pub enum RunError {
+    NotStarted(String),
+    Lost(String),
 }
 
 /// How an approved call is run.
@@ -38,7 +48,7 @@ pub trait Runner: Send + Sync {
     /// not start the verb at or after it.
     ///
     /// # Errors
-    /// Why it could not be started or read, in words.
+    /// [`RunError::NotStarted`] when it certainly did not start, [`RunError::Lost`] when it may have.
     fn run(
         &self,
         within: Rating,
@@ -46,7 +56,7 @@ pub trait Runner: Send + Sync {
         until: i64,
         action: &str,
         params: &[String],
-    ) -> Result<RunOutput, String>;
+    ) -> Result<RunOutput, RunError>;
 }
 
 /// The argument vector after `sudo -n --`.
@@ -79,6 +89,8 @@ pub fn argv(
 pub struct SudoRunner {
     pub sudo: PathBuf,
     pub probe: PathBuf,
+    /// How long a run may take before it is killed ([`RUN_LIMIT`] in service).
+    pub limit: std::time::Duration,
 }
 
 impl Runner for SudoRunner {
@@ -89,7 +101,7 @@ impl Runner for SudoRunner {
         until: i64,
         action: &str,
         params: &[String],
-    ) -> Result<RunOutput, String> {
+    ) -> Result<RunOutput, RunError> {
         let mut child = Command::new(&self.sudo)
             .args(["-n", "--"])
             .args(argv(&self.probe, within, call_id, until, action, params))
@@ -98,16 +110,16 @@ impl Runner for SudoRunner {
             .stdout(Stdio::piped())
             .stderr(Stdio::null())
             .spawn()
-            .map_err(|e| format!("cannot start sudo: {e}"))?;
+            .map_err(|e| RunError::NotStarted(format!("cannot start sudo: {e}")))?;
         // A watchdog kills it at the limit; the read then ends with the pipe.
         let finished = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
         let timed_out = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
         let watchdog = {
-            let (finished, timed_out, pid) = (finished.clone(), timed_out.clone(), child.id());
+            let (finished, timed_out, pid, limit) = (finished.clone(), timed_out.clone(), child.id(), self.limit);
             std::thread::spawn(move || {
                 let started = std::time::Instant::now();
                 while !finished.load(std::sync::atomic::Ordering::SeqCst) {
-                    if started.elapsed() >= RUN_LIMIT {
+                    if started.elapsed() >= limit {
                         timed_out.store(true, std::sync::atomic::Ordering::SeqCst);
                         // SAFETY: a signal to a child this function started and has not yet waited for.
                         unsafe { libc::kill(i32::try_from(pid).unwrap_or(0), libc::SIGKILL) };
@@ -117,18 +129,46 @@ impl Runner for SudoRunner {
                 }
             })
         };
-        let mut text = String::new();
-        let read = child.stdout.take().ok_or("no stdout")?.take(OUTPUT_LIMIT).read_to_string(&mut text);
+        // From here on the verb may have run: whatever goes wrong is `Lost`, not `NotStarted`.
+        let lost = |what: &str, e: &dyn std::fmt::Display| RunError::Lost(format!("{what}: {e}"));
+        let Some(stdout) = child.stdout.take() else {
+            let _ = child.kill();
+            let _ = child.wait();
+            finished.store(true, std::sync::atomic::Ordering::SeqCst);
+            let _ = watchdog.join();
+            return Err(RunError::Lost("no stdout".into()));
+        };
+        // The answer is read on its own thread, so that a run cut short at the limit does not wait for a
+        // verb that still holds the pipe (sudo can be killed; what it started is not ours to kill).
+        let (sent, received) = std::sync::mpsc::channel();
+        // One byte more than the limit tells an answer that is too long from one that just fits.
+        std::thread::spawn(move || {
+            let mut text = String::new();
+            let read = stdout.take(OUTPUT_LIMIT + 1).read_to_string(&mut text);
+            let _ = sent.send((read, text));
+        });
         let status = child.wait();
         finished.store(true, std::sync::atomic::Ordering::SeqCst);
         let _ = watchdog.join();
-        read.map_err(|e| e.to_string())?;
-        let status = status.map_err(|e| e.to_string())?;
-        // sudo's own failure (no rule, no password) is 1: a code a verb could also give;
-        // the answer's absence tells them apart for a person reading the log.
+        let timed_out = timed_out.load(std::sync::atomic::Ordering::SeqCst);
+        let status = status.map_err(|e| lost("wait", &e))?;
+        let (read, text) = if timed_out {
+            received.recv_timeout(std::time::Duration::from_secs(1)).unwrap_or((Ok(0), String::new()))
+        } else {
+            received.recv().map_err(|e| lost("read", &e))?
+        };
+        if text.len() as u64 > OUTPUT_LIMIT {
+            return Err(RunError::Lost("answer over the limit".into()));
+        }
+        // A read that failed (not UTF-8, say) while the run was not cut short has lost the answer.
+        if !timed_out {
+            read.map_err(|e| lost("read", &e))?;
+        }
+        use std::os::unix::process::ExitStatusExt;
         Ok(RunOutput {
-            rc: u8::try_from(status.code().unwrap_or(255)).unwrap_or(255),
-            timed_out: timed_out.load(std::sync::atomic::Ordering::SeqCst),
+            rc: status.code().map_or(255, |code| u8::try_from(code).unwrap_or(255)),
+            timed_out,
+            signal: status.signal(),
             stdout: text,
         })
     }
@@ -156,7 +196,7 @@ impl Runner for InProcess {
         until: i64,
         action: &str,
         params: &[String],
-    ) -> Result<RunOutput, String> {
+    ) -> Result<RunOutput, RunError> {
         use std::ffi::OsString;
         if let Some(before) = &self.before {
             before();
@@ -176,7 +216,7 @@ impl Runner for InProcess {
         let (mut out, mut err) = (Vec::new(), Vec::new());
         let rc =
             crate::dispatch::Dispatcher::new(&audit, self.lock_dir.clone()).run(&caller, &words, &mut out, &mut err);
-        Ok(RunOutput { rc, timed_out: false, stdout: String::from_utf8_lossy(&out).into_owned() })
+        Ok(RunOutput { rc, timed_out: false, signal: None, stdout: String::from_utf8_lossy(&out).into_owned() })
     }
 }
 
@@ -184,6 +224,60 @@ impl Runner for InProcess {
 mod tests {
     use super::*;
     use p_act::rating::{Damage, Disruption, Exposure};
+
+    use std::os::unix::fs::PermissionsExt;
+
+    /// A `sudo` that is the shell script `body` (it is given the whole argument vector, as sudo is).
+    fn fake_sudo(name: &str, body: &str) -> SudoRunner {
+        let dir = crate::testdir::new(name);
+        let path = dir.join("sudo");
+        std::fs::write(&path, format!("#!/bin/sh\n{body}\n")).unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        SudoRunner { sudo: path, probe: "/usr/local/bin/probe".into(), limit: std::time::Duration::from_secs(20) }
+    }
+
+    fn run(runner: &SudoRunner) -> Result<RunOutput, RunError> {
+        let within = Rating::new(Exposure::Open, Damage::None, Disruption::None);
+        runner.run(within, ID, 1_794_409_565, "sys kit", &[])
+    }
+
+    #[test]
+    fn a_dispatcher_that_answers_and_exits_is_taken_as_it_is() {
+        let out = run(&fake_sudo("ok", "echo '{\"type\":\"header\"}'; exit 70")).unwrap();
+        assert_eq!((out.rc, out.timed_out, out.signal), (70, false, None));
+        assert_eq!(out.stdout, "{\"type\":\"header\"}\n");
+    }
+
+    #[test]
+    fn a_dispatcher_killed_by_a_signal_says_which() {
+        let out = run(&fake_sudo("killed", "echo '{\"type\":\"header\"}'; kill -9 $$")).unwrap();
+        assert_eq!((out.signal, out.timed_out), (Some(9), false));
+    }
+
+    #[test]
+    fn a_run_past_the_limit_is_killed_and_says_so() {
+        let started = std::time::Instant::now();
+        let mut runner = fake_sudo("slow", "sleep 30");
+        runner.limit = std::time::Duration::from_millis(600);
+        let out = run(&runner).unwrap();
+        assert!(out.timed_out && out.signal == Some(9), "{out:?}");
+        assert!(started.elapsed() < std::time::Duration::from_secs(10), "{:?}", started.elapsed());
+    }
+
+    #[test]
+    fn an_answer_over_the_limit_or_not_text_is_lost_not_unavailable() {
+        let big = run(&fake_sudo("big", "head -c 4000000 /dev/zero | tr '\\0' x")).unwrap_err();
+        assert!(matches!(big, RunError::Lost(ref why) if why.contains("over the limit")), "{big:?}");
+        let binary = run(&fake_sudo("binary", "printf '\\377\\376'")).unwrap_err();
+        assert!(matches!(binary, RunError::Lost(_)), "{binary:?}");
+    }
+
+    #[test]
+    fn a_sudo_that_cannot_be_started_is_the_one_certain_not_started() {
+        let mut runner = fake_sudo("absent", "exit 0");
+        runner.sudo = runner.sudo.with_file_name("no-such-sudo");
+        assert!(matches!(run(&runner), Err(RunError::NotStarted(_))));
+    }
 
     const ID: &str = "3f2b6c1e-8a57-4d0e-9b1a-5c2e7d9f0a11";
 
