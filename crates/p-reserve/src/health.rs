@@ -8,9 +8,9 @@ use std::io::Write;
 use std::path::PathBuf;
 use std::time::{Duration, SystemTime};
 
+use p_reserve_core::Level;
 use p_reserve_core::health::{Health, Reason, assess};
 use p_reserve_core::textfile::Textfile;
-use p_reserve_core::{Level, Pair};
 use serde::Serialize;
 
 use crate::config::{Config, DEFAULT_CONFIG};
@@ -104,20 +104,21 @@ pub fn run(args: &[&str], out: &mut impl Write, err: &mut impl Write) -> u8 {
 
 fn health(options: &Options) -> Result<Health, String> {
     let explicit = options.config.as_path() != std::path::Path::new(DEFAULT_CONFIG);
-    let config = match Config::load(&options.config)? {
+    let config = match Config::load(&options.config).map_err(|e| e.to_string())? {
         Some(config) => config,
         None if explicit => return Err(format!("{} does not exist", options.config.display())),
         None => Config::default(),
     };
-    let limits = config.limits()?;
     let path = options.ledger.as_deref().unwrap_or(config.ledger_path());
     let file = Textfile::new(path, config.prefix()).map_err(|e| e.to_string())?;
     let ledger = file.load().map_err(|e| e.to_string())?;
     let now = options.now.map_or_else(SystemTime::now, |secs| SystemTime::UNIX_EPOCH + Duration::from_secs(secs));
-    let declared = config.declared();
-    let pairs: Vec<Pair> =
-        if declared.is_empty() { ledger.pairs().map(|(pair, _)| pair.clone()).collect() } else { declared };
-    Ok(assess(&ledger, &pairs, now, &limits))
+    let mut declared = config.declared()?;
+    if declared.is_empty() {
+        let limits = config.default_limits()?;
+        declared = ledger.pairs().map(|(pair, _)| (pair.clone(), limits)).collect();
+    }
+    Ok(assess(&ledger, declared.iter().map(|(pair, limits)| (pair, limits)), now))
 }
 
 fn level_word(level: Level) -> &'static str {

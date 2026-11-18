@@ -133,16 +133,48 @@ Implemented, with tests:
 
 ### Health
 
-`preserve health` reads the ledger file, needs no daemon, and exits with the
-worst level: 0 ok, 1 warnings, 2 critical; 3 the ledger or configuration could
-not be read; 4 a usage error. Per pair, the level is the loudest of: the
+`preserve health` reads the ledger file and the configuration, needs no
+daemon, and its exit code is for a monitor:
+
+| Code | Meaning |
+|---|---|
+| 0 | ok: every pair is fresh and its last run was clean |
+| 1 | warning: some pair is overdue, its last run was `incomplete` or failed, or its last snapshot could not read some files |
+| 2 | critical: some pair is stale, or declared and never seen |
+| 3 | unknown: the ledger or the configuration could not be read or understood; nothing is said about the pairs |
+| 4 | usage error |
+
+No code has two meanings. Per pair, the level is the loudest of: the
 freshness band (`overdue` warning, `stale` critical); the last outcome
 (`incomplete` and every failure are warnings, `ok` and `deferred` are not);
 files the last successful snapshot could not read (any: warning). So an
 `incomplete` snapshot counts for freshness and is never shown as `ok`; a
-failure keeps the pair a warning until its age makes it critical; repeating a
-failure raises nothing. A declared pair the ledger has not seen is critical.
-Without declared pairs, every pair in the ledger is reported.
+failure keeps the pair a warning until its age makes it critical, and
+repeating a failure raises nothing. **Only a success moves freshness.** A pair
+that never succeeded is pending for its grace period, counted from its first
+attempt, and critical after it, however many attempts, failed or deferred, come
+later and however recent the last one is; it is never fresh and never "up to
+date". A declared pair the ledger has not seen is critical. Without declared
+pairs, every pair in the ledger is reported.
+
+Limits: `fresh_within` 26 hours, `stale_after` 72 hours, `first_run_grace` one
+hour. They are provisional and **assume a daily schedule**; the file's
+`[freshness]` changes them for every pair, and a `[[pair]]` sets its own (a
+weekly pair is not judged by a daily one).
+
+The configuration (`/etc/p-reserve.toml`, TOML because a person writes it) is
+read as strictly as the JSON settings files: a regular file, owned by root or
+the running user (`p_act::settings::check_owner_and_mode`, not a copy), no group
+or other write bit, an unknown key refused, a key given twice refused, at most
+1 MiB, and no error text carries a value from the file. A repository password is
+never in it: a path to a 0600 file, or the key store.
+
+The ledger file (mode 0644, whatever the umask, readable by the metrics
+exporter) holds what a local user may read: source and target names, outcomes,
+times, byte and file counts. A name is a short label (letters, digits and
+`. _ - : + /`, at most 128; not an address, no `@`, no `://`, not a path from
+the root or into a home); the configuration refuses any other. It holds no
+repository address, no credential, no path from inside a home directory.
 
 To come, in the order of "Order of work":
 

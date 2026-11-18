@@ -65,16 +65,17 @@ impl Health {
     }
 }
 
-/// The health of `pairs`, which are the declared ones. A declared pair the
-/// ledger has not seen is stale; a ledger pair that is not declared is not
-/// reported (it is on its way out, see [`Ledger::retain`]).
+/// The health of `pairs`, which are the declared ones, each with its own
+/// limits (a pair on a weekly schedule is not judged by a daily one). A
+/// declared pair the ledger has not seen is stale; a ledger pair that is not
+/// declared is not reported (it is on its way out, see [`Ledger::retain`]).
 pub fn assess<'a>(
     ledger: &Ledger,
-    pairs: impl IntoIterator<Item = &'a Pair>,
+    pairs: impl IntoIterator<Item = (&'a Pair, &'a Thresholds)>,
     now: SystemTime,
-    limits: &Thresholds,
 ) -> Health {
-    let pairs: Vec<PairHealth> = pairs.into_iter().map(|pair| assess_pair(ledger, pair, now, limits)).collect();
+    let pairs: Vec<PairHealth> =
+        pairs.into_iter().map(|(pair, limits)| assess_pair(ledger, pair, now, limits)).collect();
     let level = pairs.iter().map(|pair| pair.level).max().unwrap_or(Level::Ok);
     Health { level, pairs }
 }
@@ -140,7 +141,7 @@ mod tests {
     }
 
     fn health(ledger: &Ledger, now: SystemTime) -> PairHealth {
-        assess(ledger, [&pair()], now, &limits()).pairs.remove(0)
+        assess(ledger, [(&pair(), &limits())], now).pairs.remove(0)
     }
 
     #[test]
@@ -160,7 +161,7 @@ mod tests {
         assert_eq!(h.level, Level::Warning);
         assert_eq!(h.unreadable, 12);
         assert_eq!(h.reasons, vec![Reason::LastRun(Outcome::Incomplete), Reason::Unreadable(12)]);
-        let whole = assess(&ledger, [&pair()], t(1), &limits());
+        let whole = assess(&ledger, [(&pair(), &limits())], t(1));
         assert_eq!(whole.exit_code(), 1);
     }
 
@@ -188,11 +189,41 @@ mod tests {
     fn a_declared_pair_the_ledger_never_saw_is_critical_and_an_undeclared_one_is_not_reported() {
         let mut ledger = Ledger::default();
         ledger.record(Pair::new("other", "offsite"), Run::stored(1, 0), t(0));
-        let h = assess(&ledger, [&pair()], t(0), &limits());
+        let h = assess(&ledger, [(&pair(), &limits())], t(0));
         assert_eq!(h.pairs.len(), 1);
         assert_eq!(h.level, Level::Critical);
         assert_eq!(h.pairs[0].reasons, vec![Reason::Stale, Reason::NeverRun]);
-        assert_eq!(assess(&ledger, [], t(0), &limits()).level, Level::Ok);
+        assert_eq!(assess(&ledger, [], t(0)).level, Level::Ok);
+    }
+
+    #[test]
+    fn a_pair_that_never_succeeded_is_critical_past_its_grace_whatever_attempts_follow() {
+        let mut ledger = Ledger::default();
+        // an attempt every hour for two days, deferred and failed: no success
+        for hour in 0..48 {
+            let outcome = if hour % 2 == 0 { Outcome::Deferred } else { Outcome::Failed };
+            ledger.record(pair(), Run::ended(outcome), t(hour));
+            let h = health(&ledger, t(hour));
+            assert_ne!(h.freshness, Freshness::Fresh, "hour {hour}");
+            assert_ne!(h.freshness, Freshness::Overdue, "hour {hour}");
+            // the grace period runs from the first attempt only: a recent attempt does not extend it
+            let expected = if hour == 0 { Level::Ok } else { Level::Critical };
+            assert_eq!(h.level, expected, "hour {hour}");
+        }
+        // only a success moves it
+        ledger.record(pair(), Run::stored(1, 0), t(48));
+        assert_eq!(health(&ledger, t(48)).freshness, Freshness::Fresh);
+    }
+
+    #[test]
+    fn each_pair_is_judged_by_its_own_limits() {
+        let mut ledger = Ledger::default();
+        let (daily, weekly) = (Pair::new("daily", "x"), Pair::new("weekly", "x"));
+        ledger.record(daily.clone(), Run::stored(1, 0), t(0));
+        ledger.record(weekly.clone(), Run::stored(1, 0), t(0));
+        let week = Thresholds { fresh_within: 8 * 24 * HOUR, stale_after: 14 * 24 * HOUR, first_run_grace: HOUR };
+        let h = assess(&ledger, [(&daily, &limits()), (&weekly, &week)], t(72));
+        assert_eq!((h.pairs[0].level, h.pairs[1].level), (Level::Critical, Level::Ok));
     }
 
     #[test]
@@ -209,6 +240,6 @@ mod tests {
         let (a, b) = (Pair::new("a", "x"), Pair::new("b", "x"));
         ledger.record(a.clone(), Run::stored(1, 0), t(0));
         ledger.record(b.clone(), Run::stored(1, 1), t(0));
-        assert_eq!(assess(&ledger, [&a, &b], t(1), &limits()).level, Level::Warning);
+        assert_eq!(assess(&ledger, [(&a, &limits()), (&b, &limits())], t(1)).level, Level::Warning);
     }
 }
