@@ -19,6 +19,7 @@ find_pact
 commit_of_checkout
 SVCUID=$(id -u "$SVC")
 echo "checkout $CHECKOUT at $COMMIT; person $PERSON; pact: $PACT; pledge: $PLEDGE"
+STARTED=$(date '+%Y-%m-%d %H:%M:%S')   # the journal is read from here, not by a count of lines
 
 BUNDLE=$PHOME/probe-stage1-bundle
 # The little script the person runs (pact reads the bundle from a regular file on standard input, which it must own with
@@ -83,7 +84,7 @@ T0=$(date +%s)
 R=$(pact_call test_peak '{"params":[]}'); PACT_RC=$?; T1=$(date +%s)
 expect "test_peak, answered late" "$R" done
 WAITED=$((T1 - T0))
-if [ "$WAITED" -ge 50 ]; then pass "the call lasted $WAITED s: past pact's 45 s idle timeout, so the service's keepalive comments arrived"; else fail "the call lasted only $WAITED s: it did not wait long enough to show a keepalive (answer after 60 s)"; fi
+if [ "$WAITED" -ge 46 ]; then pass "the call lasted $WAITED s: past pact's 45 s idle timeout, so the service's keepalive comments arrived"; else fail "the call lasted only $WAITED s: not past pact's 45 s idle timeout, so it shows nothing about the keepalive (answer after 60 s)"; fi
 
 # -- pledge's record ------------------------------------------------------------------------------------------
 HIST=$(as_person "$PLEDGE history $(pledge_args)")
@@ -98,8 +99,10 @@ for pair in $IDS; do
 done
 
 # -- the service's log and the dispatcher's, by call identifier ---------------------------------------------------
-sleep 1
-JOURNAL=$(journalctl -t probe --no-pager -n 400 2>/dev/null)
+# journald may be a moment behind the calls: wait (up to 15 s) for the last call's lines before reading them.
+LASTID=${IDS##* }; LASTID=${LASTID%%:*}
+[ -z "$LASTID" ] || journal_has "id=$LASTID" 15 -t probe --since "$STARTED"
+JOURNAL=$(journalctl -t probe --since "$STARTED" --no-pager 2>/dev/null)
 for pair in $IDS; do
   id=${pair%%:*}; want=${pair#*:}
   [ -n "$id" ] || continue

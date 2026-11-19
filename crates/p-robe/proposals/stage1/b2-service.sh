@@ -82,8 +82,12 @@ fi
 rm -f "$STATEDIR/verify.out"
 systemctl daemon-reload
 systemctl enable --now probe-setup.timer >/dev/null 2>&1 && pass "probe-setup.timer enabled" || fail "probe-setup.timer did not enable"
+# A oneshot unit: `systemctl start` returns when it has FINISHED (success or failure), so the journal is read after it; journald may
+# still be a moment behind, hence the short wait.
 systemctl start probe-setup.service
-if journalctl -u probe-setup.service --no-pager -n 20 2>/dev/null | grep -q 'Not due: 30 days'; then pass "the renewal unit ran and said: not due, 30 days left"; else fail "the renewal unit did not say 'Not due: 30 days'; what its journal says follows"; show_output "-" "$(journalctl -u probe-setup.service --no-pager -n 20 2>&1)"; fi
+if systemctl is-failed --quiet probe-setup.service; then fail "the renewal unit failed (systemctl status probe-setup.service)"; show_output "-" "$(journalctl -u probe-setup.service --no-pager -n 20 2>&1)"
+elif journal_has "$NOT_DUE_PATTERN" 10 -u probe-setup.service; then pass "the renewal unit ran and said: not due (29 or 30 days left of the 30)"
+else fail "the renewal unit did not say 'Not due: 29 or 30 days left'; what its journal says follows"; show_output "-" "$(journalctl -u probe-setup.service --no-pager -n 20 2>&1)"; fi
 systemctl enable --now probe-serve.service >/dev/null 2>&1
 # Wait up to 20 s for the service to listen.
 n=0

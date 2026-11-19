@@ -230,3 +230,19 @@ require_keygen_usable() {
       show_output "$KIT_RC" "$KIT_OUT"; exit 1 ;;
   esac
 }
+
+# What the renewal unit says right after the certificate was made: 30 days left, or 29 once a day boundary passed between the
+# two (the unit counts whole days). Both are "not due".
+NOT_DUE_PATTERN='Not due: (29|30) days left'
+
+# journal_has PATTERN SECONDS JOURNALCTL-ARGS...: waits up to SECONDS for a line matching the extended regex PATTERN in what
+# `journalctl ARGS` prints (journald may be a moment behind the process that wrote), returns 0 as soon as there is one.
+journal_has() {
+  pattern=$1; limit=$2; shift 2
+  n=0
+  while :; do
+    if journalctl "$@" --no-pager 2>/dev/null | grep -Eq "$pattern"; then return 0; fi
+    [ "$n" -ge "$limit" ] && return 1
+    sleep 1; n=$((n + 1))
+  done
+}

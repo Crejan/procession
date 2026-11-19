@@ -621,3 +621,49 @@ fn a1_takes_a_checkout_not_a_binary_and_checks_everything_before_its_first_chang
     // The binary is never named by hand any more.
     assert!(!a1.contains("PROBE_SRC=\"${1"), "a1 must not take a binary");
 }
+
+#[test]
+fn the_renewal_unit_may_say_29_or_30_days_and_the_journal_wait_returns_at_once_when_the_line_is_there() {
+    let line = |days: u32| {
+        format!("Not due: {days} days left of the service's certificate (renewed when 10 or fewer remain).")
+    };
+    for (days, matches) in [(30, true), (29, true), (28, false), (31, false), (3, false)] {
+        let (_, out) = with_common(&format!(
+            "printf '%s\n' \"{}\" | grep -Eq \"$NOT_DUE_PATTERN\" && echo yes || echo no",
+            line(days)
+        ));
+        assert_eq!(out.trim() == "yes", matches, "{days}");
+    }
+    // journal_has with a stand-in journalctl: found at once; found after a wait; never found, after the limit.
+    let dir = std::env::temp_dir().join(format!("probe-jh-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let fake = dir.join("journalctl");
+    std::fs::write(
+        &fake,
+        "#!/bin/sh\ncase \"$*\" in *--since*) ;; esac\nif [ -f \"$FLAG\" ]; then echo 'call id=abc outcome=done'; fi\n",
+    )
+    .unwrap();
+    std::fs::set_permissions(&fake, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+    let flag = dir.join("flag");
+    let run = |setup: &str| {
+        let started = std::time::Instant::now();
+        let (_, out) = with_common(&format!(
+            "PATH='{}':$PATH; FLAG='{}'; export FLAG\n{setup}\njournal_has 'id=abc' 3 -t probe --since 'x' && echo found || echo missing",
+            dir.display(),
+            flag.display()
+        ));
+        (out.trim().to_string(), started.elapsed())
+    };
+    let _ = std::fs::remove_file(&flag);
+    let (out, took) = run("true");
+    assert_eq!(out, "missing");
+    assert!(took >= std::time::Duration::from_secs(3), "it waited the limit: {took:?}");
+    std::fs::write(&flag, "").unwrap();
+    let (out, took) = run("true");
+    assert_eq!(out, "found");
+    assert!(took < std::time::Duration::from_secs(2), "{took:?}");
+    // The line shows up one second in: found after a wait, within the limit.
+    let _ = std::fs::remove_file(&flag);
+    let (out, _) = run(&format!("( sleep 1; touch '{}' ) &", flag.display()));
+    assert_eq!(out, "found");
+}
