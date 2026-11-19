@@ -953,13 +953,13 @@ in 5.3); adapters as MCP servers; future bookings; telling logged-in users
 when a reservation starts; asking the holder before an administrator's
 release (approval system, section 9).
 
+## Decided later (operator, 2026-11-19)
+
+- **No future bookings for now.** No calendar in v1 or the phases above;
+  `since` keeps room for a start in the future without a schema change.
+- **The holder is not told when an exempt administrator logs in.** The
+  exempt login is still warned at login like anyone else.
+
 ## Open questions
 
-- **Future bookings.** A calendar ("rt03 tomorrow 9 to 12") is the next
-  thing people will ask of a register. *Proposal:* not in v1; `since`
-  already allows a start in the future without a schema change, the rules
-  (overlap, who wins) are the work.
-- **Enforce and administrators.** `enforce` exempts root and the
-  administrator groups. Should an exempt login still be warned and the
-  holder told that someone logged in? *Proposal:* warned, not told (no
-  notification channel in v1).
+None at the moment.
