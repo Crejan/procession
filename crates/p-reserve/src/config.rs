@@ -107,19 +107,7 @@ pub fn read_secret(path: &Path) -> Result<String, ConfigError> {
     Ok(text)
 }
 
-/// The rule for a configured name of a source or a target: `[a-z0-9][a-z0-9._-]{0,63}`.
-pub const NAME_RULE: &str = "[a-z0-9][a-z0-9._-]{0,63}";
-
-/// Whether `name` is in the class [`NAME_RULE`]: a plain word, no slash, no
-/// upper case, not `.` or `..` (a leading dot is already out), at most 64
-/// bytes. It is what goes into the ledger, the metrics' labels and the
-/// socket's messages; the path it stands for stays in the configuration.
-pub fn is_name(name: &str) -> bool {
-    let bytes = name.as_bytes();
-    (1..=64).contains(&bytes.len())
-        && (bytes[0].is_ascii_lowercase() || bytes[0].is_ascii_digit())
-        && bytes.iter().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || matches!(b, b'.' | b'_' | b'-'))
-}
+pub use p_reserve_core::ledger::{NAME_RULE, is_name};
 
 /// `Ok` for a name in the class; otherwise the refusal, with the name (cut and
 /// made printable: it is the one value from the file an error may carry) and

@@ -29,7 +29,7 @@ use std::time::{Duration, SystemTime};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
-use crate::ledger::{Ledger, Pair, Run};
+use crate::ledger::{Ledger, Pair, Run, is_name};
 use crate::textfile::{Textfile, TextfileError};
 
 const SCHEMA_VERSION: u32 = 1;
@@ -254,9 +254,7 @@ fn open_orphan(path: &Path) -> Result<Orphan, MarkerError> {
         serde_json::from_slice::<Stored>(&bytes).ok().filter(|s| {
             s.schema_version == SCHEMA_VERSION
                 && valid_id(&s.job)
-                && s.pairs
-                    .iter()
-                    .all(|p| p_ermit::text::check(&p.source).is_ok() && p_ermit::text::check(&p.target).is_ok())
+                && s.pairs.iter().all(|p| is_name(&p.source) && is_name(&p.target))
         })
     };
     Ok(Some((file, stored)))
