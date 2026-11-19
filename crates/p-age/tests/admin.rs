@@ -465,7 +465,7 @@ async fn each_verbs_help_and_its_usage_say_what_the_exit_codes_mean() {
             "2  usage",
             "3  no broker answers",
             "4  in force but NOT stored (block, withdraw)",
-            "5  the broker is degraded (`status` only)",
+            "5  the broker is degraded: the register cannot be stored, or there is no valid directory.json (`status` only)",
         ] {
             assert!(out.contains(line), "{verb}: {out}");
         }

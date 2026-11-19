@@ -21,7 +21,7 @@ use crate::site::Site;
 pub enum ConfigError {
     #[error(transparent)]
     Settings(#[from] p_act::settings::SettingsError),
-    #[error(transparent)]
+    #[error("the site file: {0}")]
     Site(#[from] crate::site::SiteError),
     #[error(transparent)]
     Perm(#[from] crate::perm::PermError),

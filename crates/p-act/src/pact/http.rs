@@ -56,7 +56,8 @@ fn read_json_answer(body: impl Read, id: &Value) -> Result<Value, TransportError
     let bytes = read_capped(body, MAX_ANSWER_MESSAGE)
         .map_err(|e| lost(format!("the body broke off: {e}")))?
         .ok_or_else(|| lost("the answer is over the limit"))?;
-    let value: Value = serde_json::from_slice(&bytes).map_err(|_| lost("the body is not JSON"))?;
+    let value: Value = p_ermit::json::parse_slice(&bytes)
+        .map_err(|e| lost(format!("the body is not JSON without a repeated key: {e}")))?;
     if is_response_to(&value, id) { Ok(value) } else { Err(lost("the body is not the answer to this request")) }
 }
 
@@ -70,7 +71,7 @@ pub(crate) fn read_sse(mut stream: impl BufRead, id: &Value) -> Result<Value, Tr
             return Ok(None);
         }
         let event = std::mem::take(data);
-        match serde_json::from_str::<Value>(&event) {
+        match p_ermit::json::parse(&event) {
             Ok(v) if is_response_to(&v, id) => Ok(Some(v)),
             // A notification, or something else: ignored, within a budget.
             _ => {
@@ -143,7 +144,7 @@ pub(crate) fn interpret(
             // A JSON-RPC error in the body (the service refuses a call it will not take with `400` and one) is passed on to be
             // mapped; anything else is the transport's.
             let parsed =
-                read_capped(body, MAX_ERROR_BODY).ok().flatten().and_then(|b| serde_json::from_slice::<Value>(&b).ok());
+                read_capped(body, MAX_ERROR_BODY).ok().flatten().and_then(|b| p_ermit::json::parse_slice(&b).ok());
             match parsed {
                 Some(v) if v.get("error").is_some() => Ok(v),
                 _ => Err(TransportError::Unavailable(format!("the service answered {status}"))),
@@ -591,6 +592,28 @@ mod tests {
 
     fn quick() -> HttpTransport {
         HttpTransport::new(None).with_timeouts(Duration::from_millis(600), Duration::from_secs(5))
+    }
+
+    #[test]
+    fn a_service_answer_with_a_repeated_key_is_a_lost_answer_never_the_first_or_the_last() {
+        let id = json!(7);
+        for body in [
+            r#"{"jsonrpc":"2.0","id":7,"result":{"content":[]},"result":{"content":[1]}}"#,
+            r#"{"jsonrpc":"2.0","id":7,"id":8,"result":{}}"#,
+            r#"{"jsonrpc":"2.0","id":7,"result":{"structuredContent":{"outcome":"done","outcome":"declined"}}}"#,
+            r#"{"jsonrpc":"2.0","id":7,"result":{"tools":[{"name":"a","name":"b"}]}}"#,
+        ] {
+            let r = read_json_answer(std::io::Cursor::new(body.as_bytes().to_vec()), &id);
+            assert!(
+                matches!(&r, Err(TransportError::Lost(m)) if m.contains("not JSON") || m.contains("twice")),
+                "{body}: {r:?}"
+            );
+            let sse = format!("data: {body}\n\n");
+            let r = read_sse(std::io::Cursor::new(sse.into_bytes()), &id);
+            assert!(r.is_err(), "{body}");
+        }
+        let ok = r#"{"jsonrpc":"2.0","id":7,"result":{"a":{"a":1}}}"#;
+        assert!(read_json_answer(std::io::Cursor::new(ok.as_bytes().to_vec()), &id).is_ok());
     }
 
     #[test]
