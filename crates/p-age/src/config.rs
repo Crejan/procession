@@ -22,7 +22,7 @@ pub enum ConfigError {
     #[error(transparent)]
     Settings(#[from] p_act::settings::SettingsError),
     #[error(transparent)]
-    Site(#[from] crate::site::LoadError),
+    Site(#[from] crate::site::SiteError),
     #[error(transparent)]
     Perm(#[from] crate::perm::PermError),
     #[error(transparent)]
@@ -106,7 +106,7 @@ impl Config {
     pub fn build(&self) -> Result<Arc<Broker>, ConfigError> {
         let group = self.administrators_group.as_deref().map(crate::admin::resolve_group).transpose()?;
         let now = std::time::SystemTime::now();
-        let site = Arc::new(Site::read_pair(&self.site, &Site::directory_path(&self.site), now)?);
+        let site = Arc::new(Site::load(&self.site, &Site::directory_path(&self.site), now)?);
         let register = Core::read_state_for(&self.state_dir.join("register.json"), group.as_ref().map(|g| g.gid))?;
         let log = FileLog::open(&self.log)
             .map_err(|source| ConfigError::Log { path: self.log.display().to_string(), source })?;

@@ -230,6 +230,14 @@ struct ReplyWire {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     directory_as_of: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    directory_problem: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    directory_names: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    directory_groups: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    directory_empty: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     broker_certificate_path: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     broker_certificate_valid: Option<bool>,
@@ -268,6 +276,10 @@ impl Reply {
                 w.broker_uid = Some(s.broker_uid);
                 w.directory_source = s.directory.as_ref().map(|d| d.source.clone());
                 w.directory_as_of = s.directory.as_ref().map(|d| d.as_of.clone());
+                w.directory_problem = s.directory_problem.clone();
+                w.directory_names = s.directory_sets.names_not_in_site.clone();
+                w.directory_groups = s.directory_sets.groups_not_in_site.clone();
+                w.directory_empty = s.directory_sets.groups_without_members.clone();
                 let b = &s.broker_certificate;
                 w.broker_certificate_path = Some(b.path.clone());
                 w.broker_certificate_valid = Some(b.valid);
@@ -311,13 +323,17 @@ impl Reply {
                     &w.keygen_unusable,
                     &w.directory_source,
                     &w.directory_as_of,
+                    &w.directory_problem,
                     &w.administrators_group,
                     &w.broker_certificate_path,
                     &w.broker_certificate_failure,
                 ]
                 .iter()
                 .all(|t| t.as_deref().is_none_or(crate::util::is_clean));
-                if !(names && keys && clean(&w.uncovered) && texts) {
+                let sets_clean = [&w.directory_names, &w.directory_groups, &w.directory_empty]
+                    .iter()
+                    .all(|l| l.iter().all(|x| crate::util::is_clean(x)));
+                if !(names && keys && clean(&w.uncovered) && texts && sets_clean) {
                     return None;
                 }
                 Some(Reply::Status(Box::new(Status {
@@ -330,6 +346,12 @@ impl Reply {
                     blocked_keys: w.blocked_keys?,
                     keygen_unusable: w.keygen_unusable,
                     broker_uid: w.broker_uid?,
+                    directory_problem: w.directory_problem,
+                    directory_sets: crate::site::Mismatch {
+                        names_not_in_site: w.directory_names,
+                        groups_not_in_site: w.directory_groups,
+                        groups_without_members: w.directory_empty,
+                    },
                     directory: match (w.directory_source, w.directory_as_of) {
                         (Some(source), Some(as_of)) => Some(crate::site::DirectoryInfo { source, as_of }),
                         (None, None) => None,
@@ -367,6 +389,16 @@ fn done(stored: Stored) -> Reply {
         Stored::Yes => Ok(()),
         Stored::No(e) => Err(e.code),
     })
+}
+
+/// `N` and, escaped and clipped, the first names: `0`, or `3 (a, b, c)`, or `12 (a, b, c, d, e, f, g, h, i, j, ...)`.
+fn name_list(names: &[String]) -> String {
+    const SHOWN: usize = 10;
+    if names.is_empty() {
+        return "0".to_owned();
+    }
+    let shown: Vec<String> = names.iter().take(SHOWN).map(|n| crate::util::shown(n)).collect();
+    format!("{} ({}{})", names.len(), shown.join(", "), if names.len() > SHOWN { ", ..." } else { "" })
 }
 
 /// Carry out one command on the running broker, for a caller that is this process's own user (a test's, or the
@@ -779,8 +811,20 @@ pub fn render(command: &Command, reply: &Reply) -> (String, u8) {
                         crate::util::shown(&d.as_of)
                     )
                 }
-                None => "directory: none\n".to_owned(),
+                None => match &s.directory_problem {
+                    Some(why) => format!("directory: none ({})\n", crate::util::shown(why)),
+                    None => "directory: none\n".to_owned(),
+                },
             });
+            // What the two files say that the other does not know: ignored or empty, never refused; shown so that a
+            // writer's fault is not hidden by the tolerance. Names are escaped and clipped.
+            for (count_text, names) in [
+                ("names not in the site file", &s.directory_sets.names_not_in_site),
+                ("groups not in the site file", &s.directory_sets.groups_not_in_site),
+                ("groups of the site file without members key", &s.directory_sets.groups_without_members),
+            ] {
+                out.push_str(&format!("  {}: {}\n", count_text, name_list(names)));
+            }
             out.push_str(&match &s.administrators {
                 Some(g) => format!("administrators: group {} (gid {})", crate::util::shown(&g.name), g.gid),
                 None => format!("administrators: root and the broker's account (uid {})", s.broker_uid),

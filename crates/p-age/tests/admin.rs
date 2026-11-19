@@ -384,6 +384,12 @@ fn commands_and_answers_are_read_as_strictly_as_everything_else() {
     }
     let status = p_age::core::Status {
         broker_uid: 501,
+        directory_problem: None,
+        directory_sets: p_age::site::Mismatch {
+            names_not_in_site: vec!["stranger".into()],
+            groups_not_in_site: vec![],
+            groups_without_members: vec!["new".into()],
+        },
         directory: Some(p_age::site::DirectoryInfo { source: "model".into(), as_of: "2026-11-19T10:00:00Z".into() }),
         administrators: Some(p_age::admin::AdminGroup { name: "page-admins".into(), gid: 4711 }),
         keygen_unusable: Some("/usr/bin/ssh-keygen is not trusted: it is owned by user 501".into()),
