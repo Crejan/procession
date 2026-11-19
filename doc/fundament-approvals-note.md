@@ -1,15 +1,12 @@
 # Approvals: what fundament's site model would say
 
-**A second writing.** The first copy of this note and its report were lost
-with a scratchpad. This one is written again on 2026-11-18 from the same
-session's text, not rebuilt from the repository, so points 1 to 8 are the
-first writing's. It differs in three ways: the issuer, the certifier of a
-service's key and the source of memberships on a directory site are
-decided, so the variants not chosen are kept only as short records; the
-decided points are marked decided; the report is the last section of this
-file. Nothing in fundament
-was read again for this writing: every statement about fundament is as of
-its `main` checkout on 2026-11-11.
+**Third writing, on fundament's `develop`.** The first two writings stood on
+fundament's `main` as of 2026-11-11. This one, of 2026-11-19, stands on
+`develop` at commit 8b6fe8f, which knows three kinds of site and has a site
+CA with a signing step; both change this note. `develop` is 16 commits ahead
+of `main` and other sessions are still editing it, so what is said here
+about the hosted directory and the site CA may move again. What was read on
+`develop` and what is still as read on `main` is in the [Report](#report).
 
 **Where this would belong in fundament.** That repository's rules name no
 home for a proposal: its `CLAUDE.md` says "No design note, no numbered
@@ -17,9 +14,8 @@ decision, no review per unit" and "an entity or field is added when a ported
 role or a site's inventory needs it, never designed ahead". `doc/model/` is
 the reference of what the loader does. The page this would become once built
 is `doc/model/approvals.md`, linked from the theme table of
-`doc/model/index.md`, its fields in `model/README.md`. Placed under
-`doc/model/` unbuilt, it would be the first page there that describes
-nothing the loader does. See C1.
+`doc/model/index.md`, its fields in `model/README.md`. Decided (C1): the
+note stays here in procession until a site is about to bind the broker.
 
 Status: a proposal. Nothing is implemented. Terms of the approval system are
 those of [`approvals.md`](approvals.md) section 1 (an "agent" is an AI
@@ -27,25 +23,41 @@ agent; a "grant" is only the model's sudo rule; the "issuer" is whoever
 holds the site CA's key); everything else is fundament's. Paths without a
 prefix below are paths in the fundament repository.
 
-What the approval system takes from a site: persons with `enabled` and four
-keys each; which groups may use which service on which host; who is in which
-group, read where the site keeps it; hosts with their host keys; one key,
-the site CA's, that certifies persons' approval keys and the broker's and
-signs the list of hosts' keys. `access` and grants play no part (R10).
+**Three kinds of site.** `backend(site)` is derived, never declared
+(`doc/model/people.md`, The backend is derived; A hosted directory;
+`python/model/src/fundament_model/hosted.py`):
+
+| Kind | When | Accounts and groups on a host | A membership's home | `enabled` lives |
+|---|---|---|---|---|
+| `local` | neither of the others | local users the converge writes | the person row's `groups` | `persons.yml` |
+| `directory` (FreeIPA) | a service of a type with a `directory` block is active | sssd, joined to the realm | the directory; `groups` on a row refused | `persons.yml`, applied by the people lifecycle |
+| `hosted-ldap` (Google Secure LDAP) | `site.yml` names a provider of type `hosted-ldap` | sssd over the provider's LDAPS, read live, one client certificate per host | the provider; `groups` on a row refused | the provider (`offboard` suspends); `persons.yml` may be empty |
+
+The first site to bind the broker is a `hosted-ldap` one; a FreeIPA site is
+to follow.
+
+**What the approval system takes from a site.** Two inputs to the broker,
+the same on every kind (point 4): the *site file*, from the model at a
+converge (hosts with their keys, service bindings, the groups they name,
+persons with their approval keys), and `directory.json` (who is active and
+who is in which group), written by the converge on a local site and by a
+job beside the broker on the other two. And one key, the site CA's, that
+certifies persons' approval keys and the broker's and signs the list of
+hosts' keys. `access` and grants play no part (R10).
 
 | Addition | Where | Kind |
 |---|---|---|
 | `approval_keys` on a person row | `persons.yml` | a field |
-| `approval-broker`, with the site CA's slot | product `service-types.yml` | a type with a flag |
-| `agents: true`; the first type that carries it | product `service-types.yml` | a flag, a type |
+| `approval-broker`, with the approvals CA's slot | product `service-types.yml` | a type with a flag |
+| `agents: true`; the first type that carries it | product or site `service-types.yml` | a flag, a type |
 | `groups` on a binding of such a type | `services.yml` `params` | a typed parameter, required |
-| `approval-<host>-<service>`, `approval-sync` | derived flows | two rows of the table |
-| `approval_view(site)` and smaller queries | a module `approvals.py` | queries |
-| a signing step in the converge | `fundament.core` | mechanism, not model |
+| `approval-<host>-<service>` | derived flows | a row of the table |
+| `approval_view(site)`, `approval_directory(site)`, smaller queries | a module `approvals.py` | queries |
+| user certificates and an SSHSIG in `site_ca_sign` | `fundament.core` | an extension of what exists |
 
 No new top-level file and no new kind of entity. In the YAML below, type
-names, unit names, ports and program names are placeholders: the software
-defines its own.
+names other than `probe`, unit names, ports and program names are
+placeholders: the software defines its own.
 
 **Decided, open.**
 
@@ -54,9 +66,15 @@ defines its own.
 | the issuer is the operator at a converge; 90-day certificates, renewed at a converge once fewer than 60 days remain; no always-on issuer | decided (J1) |
 | which groups may use a service: a required `groups` parameter on the binding | decided |
 | an agent's certificate: the person its only principal, groups in the extension `groups@procession` | decided; nothing in the model follows from it but the login grammar of point 1 |
-| a service's key certified by its host's key, not by the site CA | decided by the owner on 2026-11-18 (J8) |
-| memberships on a directory site come from the directory, through the sync job beside the broker | decided by the owner on 2026-11-18 (C2) |
-| whether the first sandboxes separate model and signer | open with the owner; not a model question, see the end of [Open](#open-for-the-owner) |
+| a service's key certified by its host's key, not by the site CA | decided (J8) |
+| who is active and who is in which group: `directory.json`, by the converge on a local site and by the job `page-sync` on the other two | decided (C2), as point 4 has it |
+| an administrator may prolong a stale `directory.json` with `page directory extend` | decided by the owner |
+| on `hosted-ldap`, an account that is only suspended and keeps its groups keeps approving until its groups are removed or it is blocked | decided: the owner accepts the limit (point 7) |
+| C1, J2, J3 (the name `probe`), J4, J6, J7 | decided as recommended |
+| verbs marked `host_text` are not excluded from the automatic mode | decided; not a model matter |
+| whether a hosted site keeps a `persons.yml` row for those who approve | open with the owner (E, under [Open](#open-for-the-owner)) |
+| J9, the sync job's bind account on a FreeIPA site | deferred until a FreeIPA site is ported |
+| whether the first sandboxes separate model and signer | open with the owner; not a model question |
 
 ## 1. A person's approval keys
 
@@ -83,16 +101,17 @@ Why a second field and not four more `keys` rows with a purpose: `keys` is
 "the whole attribute, set, never appended" (`doc/model/people.md`, Persons),
 and every reader of it writes a login path: `local_users`, `root_keys`,
 `estate_persons`, an account's `pubkeys_from_group`, the directory's key
-attribute. A purpose on a `keys` row would make each of those readers
-remember to filter. A field none of them reads cannot reach an
-`authorized_keys` file; that is the argument `parked` makes for leaving the
-derived host sets (`doc/model/inventory.md`, Parked hosts).
+attribute, and on a hosted site the provider's `sshPublicKeys`, which
+`onboard` writes "exactly as the row lists them" (`doc/identity.md`, People
+on a hosted directory). A purpose on a `keys` row would make each of those
+readers remember to filter. A field none of them reads cannot reach an
+`authorized_keys` file or the provider's key list.
 
 Why a mapping and not a list: the purposes are a closed vocabulary of four,
 each exactly once. A mapping says that in its shape.
 
 Replacing after a lost machine is one edit: the block is replaced, four rows
-and their dates.
+and their dates. One `verified_on` per key (decided, J4).
 
 **Loader checks** (in `load_identity.py`, with the person row; cross-row
 checks in the identity stage):
@@ -106,65 +125,68 @@ checks in the identity stage):
   RSA and `sk-` types, which are fine for a login and refused here by name;
   `verified_on` is a calendar date;
 - **the four keys of one person are four different keys**, compared on type
-  and blob (adopted by the designer). A service tells a confirmed approval
-  from an automatic one only by the name in the certificate; one key under
-  both names would make every automatic signature verify as confirmed;
+  and blob. A service tells a confirmed approval from an automatic one only
+  by the name in the certificate; one key under both names would make every
+  automatic signature verify as confirmed;
 - no approval key, on type and blob, is another person's approval key, a
   `keys` row of any person, an account's `pubkey`, or a public half the
   loader holds (`Site.automation_public`, `account_public`, `cluster_keys`,
-  `host_key_public`; `loader.py`). Disabled persons count: their rows are in
-  the file.
+  `host_key_public`, the site CA's two halves; `loader.py`). Disabled
+  persons count: their rows are in the file.
 
 One test holds the separation: no query that returns login keys returns an
 approval key of the fixture.
 
-**Queries.** `approval_keys(site, login)`: the four rows or `None`.
-`approval_signers(site)`: per enabled person with the field, the login and
-the two approval keys, what the issuer certifies.
+**On a hosted site** the model cannot compare an approval key with the
+login keys a person holds at the provider when the row lists none: those
+live at the provider. That the two lists never share a key is then a rule
+for whoever enters them, not a load check.
 
-**A person's name** in a certificate is the login. `_check.LOGIN`
-(`[a-z_][a-z0-9_-]{0,31}`, `_check.py`) lies inside what
-`approval-formats.md` 3.1 allows for the one principal of an agent's
-certificate (`[A-Za-z0-9._-]+`, at most 64) and holds no `:`. The groups in
-`groups@procession` are identity group names, slugs, which hold no comma.
+**Queries.** `approval_keys(site, login)`: the four rows or `None`.
+`approval_signers(site)`: per person with the field whom the model does not
+hold disabled, the login and the two approval keys, what the issuer
+certifies.
+
+**A person's name** in a certificate, in the site file and in
+`directory.json` is the login. `_check.LOGIN`
+(`[a-z_][a-z0-9_-]{0,31}`, `_check.py:42`) lies inside what
+`approval-formats.md` 3.1 allows (`[A-Za-z0-9._-]+`, at most 64) and holds
+no `:`. On a hosted site the login is also the provider's `uid`: `onboard`
+writes the POSIX account's username as the login (`doc/identity.md`). The
+groups in `groups@procession` are identity group names, which on a hosted
+site "name the provider's groups by their LDAP `cn`"
+(`doc/model/people.md`, A hosted directory).
 
 **A second approving device** would change the certificate names first
 (`approvals.md` section 9); this shape holds one set per person until then.
 
 **Cost without approvals.** None: the field is optional. A person with the
-field on a site that binds no broker loads and is inert, so keys can be
-entered before the broker exists.
+field on a site that binds no broker loads and is inert.
 
 ## 2. The site CA and the issuer
 
-**The model has no SSH certificate authority today.** No role sets
-`TrustedUserCAKeys`, no slot holds a CA key, and the binding value
-`tls: internal-ca` (`entities.TLS_MODES`) has no reader in `bindings.py` or
-`edge.py`. The certificate authorities a site can have are the directory's
-(`public/realm-ca.pem`, issuing through `ipa_cert` on the directory host,
-`doc/identity.md`) and an external ACME one. So "a site that already has a
-realm CA or a user CA" reads, in the model: a realm CA on a directory site,
-nothing on a local site, never a user CA.
+**What exists on `develop`.** A site with `site.yml` `site_ca: true` has two
+generated site slots (`catalogue/slots.yml`, `site-ca`;
+`doc/model/secrets.md`, The site CA): `site/ca/x509`, an EC P-256 CA, and
+`site/ca/ssh`, an Ed25519 key whose public half `public/site/ca/ssh.pub` is
+the `known_hosts` line `@cert-authority * <key>`. "No host's scope holds
+either ref, so no lookup renders a CA key." The one reader is
+`fundament.core.site_ca_sign` (`doc/core.md`), which signs in the controller
+process with `cryptography`, returns certificates only, and is idempotent:
+the target's `current` certificate is returned unchanged while it is the
+CA's, for the same key and names, with more than `renew_days` left. For
+`kind: ssh` it issues **host certificates only**. The earlier writings'
+"the model has no SSH certificate authority" and "the signing step is new
+mechanism" were true of `main` and are withdrawn.
 
-**Another key, always.** The realm CA is an X.509 key inside the directory's
-own CA; it never leaves that host and cannot make an SSH certificate. Were a
-site to run an SSH user CA through a role of its own, that key must not be
-this one either: sshd knows no namespaces, so one key trusted for logins and
-for approvals keeps the two apart only by convention. The model's rule for
-the same situation is "one ref, one contract" (`doc/model/secrets.md`,
-Derived refs).
-
-**What the issuer signs:**
-
-| Signed | Name or namespace | From the model |
-|---|---|---|
-| each enabled person's two approval keys | `<login>:confirmed`, `<login>:automatic` | `approval_signers(site)` |
-| the broker's key | `broker` | the public half of `service/<broker>/signing-key` (point 4) |
-| the list of hosts' keys | namespace `hosts-v1@procession`, by the CA key itself | `approval_hosts(site)` (point 6) |
-
-### The issuer is the operator, at a converge (decided)
-
-No host holds the key.
+**The approvals CA is a key of its own, in a slot beside `site/ca/ssh`.**
+`site/ca/ssh` is what clients' `known_hosts` trust for *which machine this
+is*. A key trusted for that must not also certify persons: sshd and
+`known_hosts` know no namespaces, so one key for both keeps a host's
+identity and a person's approval apart only by convention. The model's rule
+for the same situation is "one ref, one contract" (`doc/model/secrets.md`,
+Derived refs). Nor can it be the realm CA of a FreeIPA site, an X.509 key
+that never leaves the directory host, or `site/ca/x509`.
 
 ```yaml
 # product service-types.yml, on the broker's type (point 4)
@@ -172,87 +194,89 @@ approval-broker:
   secrets:
     # Services and persons' machines trust the public half: a replace in one
     # step leaves approvals nobody accepts, hence pinned, as the automation key.
-    - {ns: site, key: approval-ca, kind: blob, gate: generate, generator: ssh-key,
+    - {ns: site, key: ca/approvals, kind: blob, gate: generate, generator: ssh-key,
        pinned: true}
 ```
 
-- **Where the key lives.** `site/approval-ca`, in the store only. Its public
-  half is the committed site file `public/site/approval-ca.pub` (the
-  store's pair mechanism, `doc/secret-store/index.md`, Public halves): the
-  trust anchor an administrator hands a person's machine at enrolment, and
-  the line the bindings of points 4 and 5 emit.
+- **Where the key lives.** `site/ca/approvals`, in the store only, derived
+  while the broker's type is bound (the active rule), whether or not the
+  site has `site_ca`. The generator is `ssh-key`, not `ssh-ca`: the public
+  half is then the bare key line an allowed-signers file takes
+  (`public/site/ca/approvals.pub`), not a `known_hosts` line. That half is
+  the trust anchor an administrator hands a person's machine at enrolment,
+  and the line the bindings of points 4 and 5 emit.
 - **Never on the broker's host.** A type's `ns: site` slot is in no host's
-  lookup scope (`host_slots`: "No other `site/` ... ref",
-  `doc/model/secrets.md`), so a binding for the broker's host that named it
-  is refused at load as a `Lookup` outside the host's slots.
-- **Which program signs, where, when.** The converge's own process on the
-  controller, which already holds the store and reads the automation key in
-  memory (`doc/converge/index.md`, The agent). It signs when the broker's
-  host is a target of the run, and delivers certificates and the hosts list
-  to that host as files. The key is never a role input and never a task
-  argument.
-- **Validity.** 90 days. A certificate is renewed at any converge of the
-  broker's host once fewer than 60 days remain, or when the row's key is no
-  longer the one certified, or when none exists. How long the present one
-  has left is read from what the broker's host holds. A broker that lied
-  about it could only prevent a renewal, and it can refuse everything
-  anyway.
+  lookup scope (`host_slots`, `doc/model/secrets.md`), so a binding for the
+  broker's host that named it is refused at load.
+
+**What the issuer signs:**
+
+| Signed | Name or namespace | From the model |
+|---|---|---|
+| the two approval keys of each person `approval_signers` lists | `<login>:confirmed`, `<login>:automatic` | `approval_signers(site)` |
+| the broker's key | `broker` | the public half of `service/<broker>/signing-key` (point 4) |
+| the list of hosts' keys | namespace `hosts-v1@procession`, by the CA key itself | `approval_hosts(site)` (point 6) |
+
+### The issuer is the operator, at a converge (decided)
+
+No host holds the key. The signing goes through `site_ca_sign`, extended.
+
+- **When.** When the broker's host is a target of the run. The certificates
+  and the hosts list are delivered to that host as files.
+- **Validity.** 90 days, renewed once fewer than 60 remain: that is
+  `site_ca_sign`'s own idempotence with `renew_days: 60`, the present
+  certificate read from the broker's host as `current`. A certificate is
+  also issued anew when the row's key is no longer the one certified, or
+  when none exists. A broker that lied about `current` could only prevent a
+  renewal, and it can refuse everything anyway.
+- **What `site_ca_sign` still lacks:**
+  1. a kind that signs with `site/ca/approvals` and issues a *user*
+     certificate with exactly one principal and a validity;
+  2. issuing it with **no critical option and no extension** (everything
+     cleared, as `ssh-keygen -s ... -O clear` does), because a verifier
+     refuses one that has any (`approval-formats.md`, section 3.2);
+  3. an SSHSIG signature by the CA key itself over the hosts list.
+     `cryptography` builds certificates and has no SSHSIG;
+     `ssh-keygen -Y sign` takes a key from a file or an SSH agent, and the
+     store's rule is that a key is never written. So either a few lines of
+     own code for the SSHSIG framing, or the key loaded into an agent of
+     the step's own for that one signature, as the runner does with the
+     automation key (`doc/converge/index.md`, The agent). This choice is
+     this note's suggestion, not the designer's;
+  4. that it is not refused on a site without `site_ca`: today it is,
+     because no slot derives the CA's ref.
+- **What it writes for the broker** has one layout. The certificates
+  directory holds only what the broker carries to persons' machines, the
+  approval-key certificates, each a file named `<login>-<purpose>-cert.pub`
+  (OpenSSH's convention for a certificate file); the broker reads only
+  `*-cert.pub` there and takes person, purpose and key from the
+  certificate, never from the name; directory and files are owned by root
+  or the broker's user with no write bit for group or others, and a
+  directory that fails that is refused whole. The broker's own certificate
+  is not in that directory: it is a separate file beside the broker's
+  signing key, named in the broker's configuration (a `certificate` path
+  next to the key's). The broker checks it at start (issuer the site CA,
+  the name `broker`, validity, no critical option, no extension, and that
+  it certifies the key the broker holds) and issues no clearance without a
+  valid one. The site CA's public key is a file of its own (`site_ca` in
+  the broker's configuration).
 - **The alert.** The broker's type ships a rule pack over the days left on
   the certificates its host holds, written by a collector there (an
   `observability` block, `doc/model/operations.md`), the threshold a pack
   parameter.
-- **What it needs that the product does not have:** a controller-side step
-  that signs inside the runner's process. Every value a role gets from the
-  store today is a `Lookup` in a host's scope; this one must not be. It is
-  a small piece of `fundament.core`, and it is new mechanism, not model.
-  The certificates can be built with `cryptography`, which the store uses
-  for every key (`doc/secret-store/index.md`, Generators) and which builds
-  SSH certificates. The certificates it issues for a person's approval keys
-  and for the broker's key carry no critical option and no extension: they
-  are issued with everything cleared (`ssh-keygen -s ... -O clear`, or the
-  builder's equivalent), because a verifier refuses one that has any
-  (`approval-formats.md`, section 3.2). What it writes for the broker has
-  one layout. The certificates directory holds only what the broker
-  carries to persons' machines, the approval-key certificates, each a file
-  named `<login>-<purpose>-cert.pub` (OpenSSH's convention for a
-  certificate file); the broker reads only `*-cert.pub` there and takes
-  person, purpose and key from the certificate, never from the name;
-  directory and files are owned by root or the broker's user with no write
-  bit for group or others, and a directory that fails that is refused
-  whole. The broker's own certificate is not in that directory: it is a
-  separate file beside the broker's signing key, named in the broker's
-  configuration (a `certificate` path next to the key's). The broker checks
-  it at start (issuer the site CA, the name `broker`, validity, no critical
-  option, no extension, and that it certifies the key the broker holds) and
-  issues no clearance without a valid one. The site CA's public key is a
-  file of its own (`site_ca` in the broker's configuration). The
-  hosts list is a product of the same converge, signed
-  while the key is unlocked. It needs an SSHSIG signature by the CA key
-  itself; `ssh-keygen -Y sign` takes a key from a file or an SSH agent, and
-  the store's rule is that a key is never written, so the step loads the key
-  into an agent of its own for that one signature, as the runner does with
-  the automation key. That mechanism is this note's suggestion, not the
-  designer's.
-- **Loader checks.** None beyond the slot; the type is one per site
-  (point 4).
 - **What a site pays in liveness.** A site that does not converge the
-  broker's host for 60 days loses every person's approvals at once, after an
-  alert. A leaver's or a lost machine's certificates can outlive the edit by
-  up to 90 days; they matter only if the broker fails as well.
+  broker's host for 60 days loses every person's approvals at once, after
+  an alert. A leaver's or a lost machine's certificates can outlive the
+  change by up to 90 days; they matter only if the broker fails as well.
 
 **Query.** `approval_ca(site)`: the ref and the public half as the loader
 read it (`None` before the first `init`; the bindings that need it return a
-`Refusal`, as `bind_admin_keys` does without the automation key's half,
-`doc/linux.md`).
+`Refusal`, as `bind_admin_keys` does without the automation key's half).
 
-**Not chosen: an always-on issuer on a bound host.** The first writing
-proposed it while renewal was required "on a schedule". For the record, it
-was `acme-issuer`'s shape (`catalogue/service-types.yml`): a type
-`approval-ca` with the key as `service/<issuer>/ca-key` on its one provider,
-a daily timer running `ssh-keygen`, 30-day certificates, delivery by push to
-a command account on the broker's type, and a load check that its host is
-neither the broker's nor a guest or node of it. It would have put a CA key
-at rest on a managed host.
+**Not chosen: an always-on issuer on a bound host.** For the record, it was
+`acme-issuer`'s shape: a type with the key on its one provider, a daily
+timer, 30-day certificates, delivery by push. It would have put a CA key at
+rest on a managed host.
 
 **Cost without approvals.** None: an unbound type derives no slot, account,
 flow or unit (the active rule, `doc/model/catalogue.md`).
@@ -304,18 +328,23 @@ approval-broker:
   tier: hub
   endpoints:
     https: {port: 443, proto: tcp}
-  units: [page.service, fundament-approval-sync.timer]
+  units: [page.service]
   approval_broker: true
   # It authenticates its own callers: a person's machine by its connection key,
   # a service by its signed request.
   own_auth: true
   secrets:
-    - {ns: site, key: approval-ca, kind: blob, gate: generate, generator: ssh-key,
+    - {ns: site, key: ca/approvals, kind: blob, gate: generate, generator: ssh-key,
        pinned: true}
     - {ns: service, key: signing-key, kind: blob, gate: generate, generator: ssh-key}
   params:
     waiting_per_agent: {type: int, default: 5}
+    # How often page-sync reads the directory; unused on a local site.
     sync_seconds: {type: int, default: 300}
+    # Past this age of directory.json the broker refuses clearances and sign-ins.
+    directory_max_age_seconds: {type: int, default: 86400}
+    # The most one `page directory extend` may add.
+    directory_extend_max_seconds: {type: int, default: 86400}
 ```
 
 ```yaml
@@ -338,71 +367,115 @@ approvals:
   each provider of a type flagged `agents` to the broker's endpoint, a row
   of the derived-flow table (`doc/model/policy.md`), like `oidc-<service>`.
 - **Reach from persons' machines** is declared by the site, as a flow or a
-  publication: those machines are no model hosts, and from where they come
-  is a site value with no default, as `egress` is.
+  publication: those machines are no model hosts.
 - **TLS** is the binding's `tls`, the site's choice: the requirement is "a
-  certificate pledge and services can verify". The model adds no check. A
-  pledge and a service so hold two anchors of different kinds: the site CA's
-  public half for who signed what, and the TLS root or a pinned certificate
-  only for reaching the broker. The first is the model's (point 2); the
-  second follows from the binding's `tls` like any service's.
+  certificate pledge and services can verify". A pledge and a service hold
+  two anchors of different kinds: the site CA's public half for who signed
+  what (point 2), and the TLS root or a pinned certificate only for
+  reaching the broker.
 - **Tier `hub`**, and `hubs_of` (`doc/model/inventory.md`, Hubs) gains the
   reason `approvals`: the broker for every host that provides a type flagged
   `agents`.
 
-**What it is given from the site project**, when its host is converged. One
-derivation, `approval_view(site)`, pure and byte-stable;
+### The two inputs
+
+The same two on every kind of site. A person is enabled for the broker
+exactly if the site file has the person and `active` of `directory.json`
+has the name.
+
+**The site file**, from the model, by the converge of the broker's host.
+One derivation, `approval_view(site)`, pure and byte-stable;
 `bind_approval_broker` hands it to the role, which writes it in the form
 `page load` takes and loads it when it changed:
 
 | Part | From | Notes |
 |---|---|---|
-| `persons`: login -> `{enabled, keys?}` | `persons.yml` | every row; `keys` is the row's `approval_keys` as point 1 has it (the four purposes, each `{key, verified_on?}`), present only while the person is enabled and the row has the field |
+| `persons`: login -> `{keys}` | `persons.yml` | the rows that have `approval_keys` and that the model does not hold disabled; `keys` is the field as point 1 has it (the four purposes, each `{key, verified_on?}`) |
 | `services`: type -> host -> groups | bindings of types flagged `agents` | point 5; keyed by type and host, since that is the name a call carries |
-| `hosts`: name -> host key | the providers of those services | `public/host/<h>/ssh-host-key.pub`, which the loader reads already for every converged host (`Site.host_key_public`, `loader.py`) |
+| `hosts`: name -> host key | the providers of those services | `public/host/<h>/ssh-host-key.pub`, which the loader reads for every converged host (`Site.host_key_public`, `loader.py:499`) |
 | `groups`: name -> `{description}` | `identity.yml` `groups` | the groups some binding names; for point 6 |
-| `members`: group -> logins | `persons.yml` rows' `groups` | **on a local site only**; on a directory site the part is absent |
-| `ca`, `settings` | the site CA's public half; the binding's params | |
+| `ca`, `settings` | the approvals CA's public half; the binding's params | |
 
-`access`, grants and host classes are not in it: R10 reads none of them. A
-host whose public half the store has not written is left out of `hosts` and
-is a finding, as a cluster member without its half is (`doc/linux.md`,
-admin_keys).
+It carries neither `enabled` nor `members`, on any kind. `access`, grants
+and host classes are not in it either. A row the model itself holds
+disabled (`enabled: false`) is left out, so that such a person is not
+enabled for the broker whatever `directory.json` says; this reading of
+"persons = name and approval keys" is this note's and is for the designer to
+confirm. A host whose public half the store has not written is left out of
+`hosts` and is a finding.
 
-**Who is in which group** (decided, C2: on a directory site from the
-directory, through the sync job). The model's rule is
-that a membership has one home per site: the person row on a local site, the
-directory on a directory site, where `groups` on a row is refused
-(`doc/model/people.md`, Persons). The view follows it exactly as
-`vpn_identities` does: the members on a local site, nothing on a directory
-site, "where the converge expands it from the directory". Here a job
-expands it instead of the converge: a kit program beside the broker on a timer (`sync_seconds`,
-300 proposed), which reads the members of the groups the view names from the
-directory and writes them in the same form. The broker does not know which
-of the two wrote the part. What the job needs from the model on a directory
-site is what the IdP's federation has (`doc/model/idp.md`,
-`catalogue/service-types.yml` `idp`):
+**`directory.json`**, on the broker's host:
 
-- a read-only bind account contributed by the type
-  (`accounts: {approval-sync: {kind: bind, auth: password, rbac_role:
-  read-only}}`), with its password slot;
-- the realm CA (`realm_ca: {restart: [...]}` on the type, so `ca_trust`
-  serves the host where it is no realm member);
-- a derived flow `approval-sync`, the broker's host to the directory's
-  `ldaps` endpoint, as `idp-federation`;
-- the directory's containers, from the `directory` block, as the IdP reads
-  them.
+```json
+{"v":1,"source":"hosted-ldap","as_of":"2026-11-19T10:15:00Z",
+ "active":["alice","bob"],
+ "members":{"rt-operators":["alice"],"admins":[]}}
+```
 
-One gap (J9): a type's `accounts` block is active with the type, and a bind
-account means nothing on a local site. The `idp` type never meets the case
-because it refuses a local site. Here the account, the realm CA flag, the
-flow and the timer must exist on a directory site only; the model has that
-condition for slot rows (`when: {backend: directory}`, `catalogue/slots.yml`)
-and not for an `accounts` block.
+`source` is `model`, `freeipa` or `hosted-ldap`; it is shown and decides
+nothing. Every group the site file names is a key of `members`, possibly
+empty, and holds only persons that are in `active`. Refused, with the old
+file left standing: an unknown member, an unknown or repeated name, an
+`as_of` more than 60 seconds ahead. The file is 0644 and replaced by
+writing a new one and renaming it.
 
-**Loader checks.** One per site; every group a binding names exists; on a
-local site every such group has a `gid`, as any group a person names does
-already.
+| Kind | Writer | `active` | `members` |
+|---|---|---|---|
+| `local` | the converge of the broker's host: a second derivation, `approval_directory(site)` | the rows with `enabled` true | the rows' `groups`, for the groups the site file names |
+| `directory` (FreeIPA) | the job `page-sync` | the entry is present and not locked (`nsAccountLock`) | read from the directory |
+| `hosted-ldap` | the job `page-sync` | **derived**: a person of the site file is active exactly if the job finds them in at least one group the site file names | read from the provider |
+
+Why `active` is derived on a hosted site: Google's Secure LDAP still
+returns a suspended user in a search, and its schema has no status
+attribute. The consequence is in point 7.
+
+`approval_directory` is pure like every query; `as_of` is the writer's, set
+by the role at the converge, since "a load does not read the clock"
+(`doc/model/index.md`, The realm CA's public file).
+
+**The job `page-sync`**: the second binary of p-age, under an account of its
+own, on a timer (`sync_seconds`, 300). It reads LDAPS itself and not through
+sssd: sssd's cache is of unknown age, and "a group without a POSIX gid is
+invisible to SSSD" (`doc/linux.md`, ldap_client).
+
+- Names are the directory's `uid` and `cn` as they are. One that does not
+  meet the character rules is left out and counted, never rewritten.
+- One bind per run; one search per named group, read from `memberUid`; a
+  member DN under the groups base is followed by the job (depth at most 8,
+  loops cut).
+- A named group that is not found is a failed run, not an empty group. Any
+  error (`ADMIN_LIMIT_EXCEEDED` too) writes nothing; no retry inside a run.
+  The same rule `ipa_access_exporter` has for the same reason: "an empty
+  answer would read as everyone removed" (`doc/identity.md`).
+
+What the model gives the job, through the broker's binding:
+
+| | `hosted-ldap` | `directory` (FreeIPA) |
+|---|---|---|
+| the groups to read | the groups the bindings name | the same |
+| where | the provider's `uri`, `users` and `groups` bases (`hosted.hosted_ldap(site)`) | the directory's `ldaps` endpoint and the `directory` block's containers |
+| the credential | the host's own client certificate, the slot `host/<h>/ldap-client` (a record `{certificate, key}`, `catalogue/slots.yml:21-24`), which every converged host of such a site has already; handed to the unit by systemd `LoadCredential` | a read-only bind account contributed by the type, with its password slot (J9, deferred) |
+| the server's trust | the distribution's CA bundle, as `ldap_client` verifies it | the realm CA (`realm_ca` on the type) |
+| a flow | none to a site host: the provider is outside the site, and the product renders no host egress fence (`doc/model/policy.md`, Egress) | derived, the broker's host to `ldaps`, as `idp-federation` |
+
+So on a hosted site the job needs no bind account, no realm CA and no new
+flow. The provider's LDAP client must have "read group information" for
+the units it serves, and a change there "takes up to a day"
+(`doc/linux.md`, ldap_client, Traps).
+
+**Freshness.** On a local site the file never ages: it changes only with a
+converge, as the model does. On the two directory kinds the broker measures
+`as_of` against `directory_max_age_seconds` (86400): past it every
+clearance and every sign-in is refused (`directory-stale`), while blocks
+and withdrawals keep working. An administrator prolongs with
+`page directory extend <hours>`: at most `directory_extend_max_seconds`
+(24 hours) per call, repeatable, no total cap, each call recorded with who
+made it and tied to that `as_of`, ended by the next good file or by
+`page directory resume`.
+
+**Loader checks.** One per site; every group a binding names exists;
+`sync_seconds` below `directory_max_age_seconds`; on a local site every
+named group has a `gid`, as any group a person names does already.
 
 **Cost without approvals.** None; the type is unbound.
 
@@ -412,7 +485,7 @@ A type says it with a flag, and the site says whose agents may use it on the
 binding (decided: the binding's `groups` is the one home):
 
 ```yaml
-# product service-types.yml
+# service-types.yml
 probe:
   description: A host's diagnostics as rated verbs, offered to agents; acts only on a person's approval.
   tier: client
@@ -445,36 +518,33 @@ names nobody of the site: a product grant names an `account` of its own
 entry, and a command account says `from: site` and leaves the callers to
 `policy.yml` (`doc/model/people.md`, Command accounts). The product cannot
 know a site's group names. The site's half is a typed parameter, as
-`remote-console` takes `admin_groups` (`catalogue/service-types.yml`). Two
-bindings of one type name different groups for different hosts, which is
-"which groups may use which service on which host". Any group passes, role
-or entitlement.
+`remote-console` takes `admin_groups`. Two bindings of one type name
+different groups for different hosts. Any group passes, role or
+entitlement; on a hosted site it is a group of the provider, named by its
+`cn`.
 
-**The name.** `<service>` in `<service>@<host>` and in a call is the type's
-name, not the binding's: `probe` on every host, whatever the site called its
-bindings. So a host provides at most one service of a type flagged `agents`,
-refused at load otherwise, and such a type's name full-matches
-`[a-z][a-z0-9-]*` (a model slug may start with a digit; the format may not),
-checked when the catalogue loads. `<host>` is the model's host name, a slug,
-inside the format's `[A-Za-z0-9._-]+`.
+**The name** (decided, J3: `probe`). `<service>` in `<service>@<host>` and
+in a call is the type's name, not the binding's: `probe` on every host. So a
+host provides at most one service of a type flagged `agents`, refused at
+load otherwise, and such a type's name full-matches `[a-z][a-z0-9-]*` (a
+model slug may start with a digit; the format may not), checked when the
+catalogue loads. `<host>` is the model's host name, a slug.
 
 **The persons' rule is not derived from `groups`.**
 [`crates/p-robe/SPEC.md`](../crates/p-robe/SPEC.md) says the sudo rule by
 which a person calls the dispatcher "has nothing to do with agents". It
-stays what it is today, a site grant in `identity.yml`
-(`doc/observability.md`: "The sudo rule for people (step 9) is the site's").
-Two facts, two homes.
+stays a site grant in `identity.yml`. Two facts, two homes.
 
 **On each provider**, by a role bound through `bind_agent_service`:
 
 | What | How |
 |---|---|
 | the program | a release artefact named by role options with its checksum, as `diag_wheel` and `diag_wheel_sha256` are (`doc/observability.md`); empty: nothing installed |
-| its account | a system user the role creates; see C5 |
+| its account | a system user the role creates (decided, J6; see C5) |
 | its signing key | made on the host by the role when absent, Ed25519, readable by the account only. No slot: nobody off the host needs its public half, and a reinstalled host makes a new one and certifies it |
 | its certificate | a kit program on a timer, as root: the host's SSH host key signs the service's public key under `<type>@<host>`, valid 30 days, reissued after 20 or when the key changed. The roll-out installs the timer; renewal needs no converge |
-| the allowed-signers file | the two lines of point 3, from the site CA's public half; a `Refusal` while the half is absent |
-| the dispatcher's rule for the account | a local sudoers file checked with `visudo -cf`, as `diag` writes its own; see C5 |
+| the allowed-signers file | the two lines of point 3, from the approvals CA's public half; a `Refusal` while the half is absent |
+| the dispatcher's rule for the account | a local sudoers file checked with `visudo -cf`, as `diag` writes its own and as `ldap_client` writes a hosted site's grants (`/etc/sudoers.d/fundament-grants`); see C5 |
 
 **Which host key, and where a wrong one is refused:**
 
@@ -482,18 +552,22 @@ Two facts, two homes.
   service. For a managed host the model's key is the `ssh-host-key` slot,
   generated by `ssh-key`, whose default is Ed25519 and whose slot row sets
   no `type` (`catalogue/slots.yml`); the store's import check holds an
-  imported value to the slot's type (`doc/secret-store/index.md`, The pair
-  check). So the key the site holds is Ed25519 by construction. The loader
-  still checks the half it read (`Site.host_key_public`) for each provider
-  of a type flagged `agents`: any other type is a load problem naming the
-  host. An RSA key can thus only be a live key the site does not hold, which
-  the next check refuses.
+  imported value to the slot's type. So the key the site holds is Ed25519
+  by construction. The loader still checks the half it read for each
+  provider of a type flagged `agents`: any other type is a load problem
+  naming the host. An RSA key can thus only be a live key the site does not
+  hold, which the next check refuses.
 - **The live key.** "An adopted host keeps its own key until host-key
-  delivery installs the generated one" (`doc/converge/index.md`, Host keys).
-  The role compares the host's live key of that type with the bound half and
-  fails by name when they differ or the key is absent; the timer's program
-  makes the same comparison before every signature. Nothing is certified
-  with a key the site does not hold.
+  delivery installs the generated one" (`doc/converge/index.md`, Host keys;
+  read on `main`). The role compares the host's live key of that type with
+  the bound half and fails by name when they differ or the key is absent;
+  the timer's program makes the same comparison before every signature.
+- **Beside the site's host certificates.** On a site with `site_ca` every
+  converged host's Ed25519 host key also carries a host certificate from
+  `site/ca/ssh` (`doc/linux.md`, ssh_host_cert). That is for clients'
+  `known_hosts` and has no part here: the service's certificate is issued
+  *by* the host key, and verifiers take the host key from the signed list
+  of point 6.
 
 **Loader checks.** `groups` non-empty, every name an identity group; at most
 one service of the type per host; the type's name in the format; a provider
@@ -512,9 +586,9 @@ site declares the flow to the `mcp` endpoint.
 key certifies). For the record, it would have made the service's key a
 generated host slot of the type and given the issuer a third name form,
 `<type>@<host>`; the host timer, the host-key checks, `approval_hosts`, the
-`hosts` part of the view, the signed list of point 6 and the name `hosts`
-would have gone. With the operator as issuer, every service's certificate
-would then have renewed only at a converge.
+`hosts` part of the site file, the signed list of point 6 and the name
+`hosts` would have gone. With the operator as issuer, every service's
+certificate would then have renewed only at a converge.
 
 **Cost without approvals.** None; the flag is on unbound types.
 
@@ -523,8 +597,8 @@ would then have renewed only at a converge.
 Through the broker, which carries and cannot alter what the site CA signed:
 
 - **Renewed certificates.** Public data, in no slot; from the converge to
-  the broker's host as files. They are delivered beside the view and are
-  not part of it: `approval_view` holds no certificate.
+  the broker's host as files. They are delivered beside the site file and
+  are not part of it: `approval_view` holds no certificate.
 - **The list of hosts' keys**, signed by the site CA's key itself in the
   namespace `hosts-v1@procession` (point 3). What the model gives the issuer
   for it is `approval_hosts(site)`: for each provider of a type flagged
@@ -536,63 +610,110 @@ Through the broker, which carries and cannot alter what the site CA signed:
   its `at` is later than that of the list it holds and keeps the newest
   (`approval-formats.md` 6.1), so the model owes no cadence. A host removed
   from the site stays in a pledge's list until the next one; harmless, since
-  it has left the broker's view with the same converge and the broker passes
-  on nothing from a host it does not know. The list exists because a
-  service's key is certified by its host's key (decided, J8).
-- **Group names and descriptions**: `groups` of the view. A group's
+  it has left the site file with the same converge and the broker passes on
+  nothing from a host it does not know. The list exists because a service's
+  key is certified by its host's key (decided, J8).
+- **Group names and descriptions**: `groups` of the site file. A group's
   `description` is optional in the model; one without gives its name alone.
-  Which groups are a person's comes from `members` or the sync job.
+  Which groups are a person's comes from `directory.json`.
 - **The trust anchor** is not received this way: the committed public half
-  of the site CA's key is what an administrator hands over.
+  of the approvals CA's key is what an administrator hands over.
 
 ## 7. Disabling and leaving
 
-One edit, the one the model already requires: `enabled: false` with `left`
-(`doc/model/people.md`: `left` is set exactly when `enabled` is false). At
-the next load:
+**At once, on every kind:** an administrator blocks the person at the broker
+(`page block`). It is not model data.
 
-| Derivation | Effect |
-|---|---|
-| `approval_signers` | the person is not listed: nothing is renewed for the two names |
-| `approval_view` `persons` | the row stays with `enabled: false` and without keys: no clearance, no sign-in |
-| `approval_view` `members` (local site) | the person is in no group |
-| `local_users`, `root_keys`, person slots | as today |
+What then makes the person not enabled for the broker, per kind:
 
-**The order**, for a leaver (as `approvals.md` section 10 has it):
+| Kind | The step | When it holds | What the next converge of the broker's host adds |
+|---|---|---|---|
+| `local` | `enabled: false` with `left` in `persons.yml` (`left` is set exactly when `enabled` is false, `doc/model/people.md`) | with a converge of the broker's host, which writes `directory.json` and the site file | nothing more; `approval_signers` no longer lists the person, so nothing is renewed |
+| `directory` (FreeIPA) | the person is locked or removed from the groups in the directory | within one run of `page-sync` | the row's keys leave the site file once the row is disabled or gone; no renewal |
+| `hosted-ldap` | the person is removed from the groups at the provider | within one run of `page-sync`: in no named group, so not in `active` | the row's keys leave the site file once the row is gone; no renewal |
 
-1. An administrator blocks the person at the broker (`page block`). This is
-   what stops someone at once; it is not model data.
-2. The edit, committed.
-3. A limited converge of the broker's host
-   (`fundament converge --limit <broker's host>`). Tier `hub` converges
-   last (`doc/model/roles.md`, Tiers), so a whole-site run that stops in an
-   earlier tier has not told the broker; the limited run first makes "stops
-   with the next roll-out" hold whatever else fails.
-4. The rest of the site.
-5. What remains: certificates on the person's machine, valid for up to 90
-   days. They matter only if the broker fails as well. On a directory site
-   the memberships go with the directory's own offboarding, within one sync
-   interval.
-6. `retire` later, as for any person. `retired_uids` keeps the login from
-   being handed out again (`doc/model/people.md`, Retired ids), so a
-   leftover `<login>:confirmed` certificate can never name a later person.
+For a local site the order stays: block, the edit, a limited converge of the
+broker's host (`fundament converge --limit <broker's host>`; tier `hub`
+converges last, so a whole-site run that stops earlier has not told the
+broker), then the rest.
 
-The model has a shape for an offboarding step a service type owns, a
-`deliveries` block with `on: [offboard]` (`doc/model/people.md`,
-Deliveries). Step 1 could be the broker type's delivery. Not proposed now
-(J7).
+**The decided limit on a hosted site.** `active` there means "in at least
+one named group". An account that is only suspended at the provider and
+keeps its groups therefore keeps approving, until its groups are removed or
+it is blocked. The owner accepts this. The site's leaver instructions say:
+offboard through the playbook; a suspension made by hand is followed by
+`page block`.
 
-A returning person is enabled with `left` cleared; the block is entered
-anew.
+**What `offboard` does today on a hosted site**
+(`collections/ansible_collections/fundament/identity/plugins/module_utils/workspace.py`,
+`offboard_plan` and `offboard_apply`, lines 164 to 183;
+`identity/playbooks/offboard.yml`): it suspends the user, then removes every
+direct group membership the provider lists for them, then signs them out,
+then ends the services' own sessions. So a leaver offboarded through the
+playbook is out of every named group and not active after the next run of
+`page-sync`. Two things about it are owed (next section).
+
+**What remains, on every kind:** certificates on the person's machine, valid
+for up to 90 days. They matter only if the broker fails as well.
+
+**`retire`** later, as for any person. `retired_uids` keeps the login from
+being handed out again (`doc/model/people.md`, Retired ids; on a hosted site
+`onboard` never allocates a retired uid, `doc/identity.md`), so a leftover
+`<login>:confirmed` certificate can never name a later person.
 
 **A lost machine** is the block replaced (point 1), after the block at the
 broker. The next converge of the broker's host certifies the new keys at
 once. The model keeps no list of ended keys.
 
-## 8. diag-tools
+Not built as a delivery (decided, J7): the block at the broker is not a
+`deliveries` step of the broker's type.
+
+## 8. What fundament owes
+
+Registered at the owner's word. First the two changes to what exists, then
+what the model lacks for the points above.
+
+**In `offboard`, on a site that has a broker:**
+
+1. **First `page block <person>` on the broker's host.** It is immediate and
+   recorded, and it makes a run that fails halfway harmless: whatever the
+   provider's steps got to, the person approves nothing. The playbook
+   already has the shape for a step on a site host: its second play ends
+   the dashboards' sessions on their hosts.
+2. **The removals before the suspension.** Today the order is suspend, then
+   remove from the groups. A run that fails between the two leaves an
+   account that is suspended and still a member, which by the hosted site's
+   definition of `active` still approves. With the removals first, a failed
+   run never leaves that state.
+
+Not covered by either, and not verified: a membership that comes only
+through a nested group. `offboard` lists the user's direct groups;
+`page-sync` follows member DNs under the groups base.
+
+**What the model lacks:**
+
+| Lacking | For |
+|---|---|
+| `approval_keys` on a person row, with its checks | point 1 |
+| the slot `site/ca/approvals` on the broker's type | point 2 |
+| `site_ca_sign`: user certificates with one principal and nothing else; an SSHSIG; not refused without `site_ca` | point 2 |
+| the type `approval-broker`, its flag, its one-per-site check | point 4 |
+| the params `sync_seconds`, `directory_max_age_seconds`, `directory_extend_max_seconds`, `waiting_per_agent` | point 4 |
+| `approval_view(site)` without `enabled` and `members` | point 4 |
+| the second derivation `approval_directory(site)` for a local site, and a role that writes it with `as_of` | point 4 |
+| the job's inputs in `bind_approval_broker`: the group list, the provider's `uri`, `users` and `groups` bases, the `Lookup` of `host/<h>/ldap-client` | point 4 |
+| a unit that exists on some kinds only: a type's `units` is one list, and `page-sync`'s timer does not exist on a local site, where `monitored_units` would then watch a unit that is not there | point 4; the same want of a backend condition as J9 |
+| a rule pack over the age of `directory.json`, beside the one over the certificates' days left | points 2 and 4 |
+| the flag `agents`, the required `groups` param, the checks on the type's name and one service per host | point 5 |
+| the derived flow `approval-<host>-<service>`; the `hubs_of` reason | point 4 |
+| `approval_hosts(site)`, `approval_signers(site)`, `approval_ca(site)`, `agent_services(site)` | points 2, 5, 6 |
+| the role and its row for a provider of an `agents` type; the kit program that certifies with the host key | point 5 |
+| for a FreeIPA site, later: the bind account's condition (J9), the realm CA flag, the flow to `ldaps` | point 4 |
+
+## 9. diag-tools
 
 Until `probe` has replaced it, nothing of it changes, and the two share
-nothing. Today's wiring, by file:
+nothing. Today's wiring, by file (read on `main`):
 
 | Piece | Where |
 |---|---|
@@ -627,171 +748,169 @@ behind a flag: "migration is deletion", `.claude/rules/house-style.md`):
 - catalogue `verbs`, `diag_nouns` and the per-identity narrowing, for as
   long as the Python dispatcher runs anywhere. R10 has no narrowing by noun;
   the designer's answer is "not now; a binding could later name groups per
-  noun" (`crates/p-robe/SPEC.md`). A site that narrows one person to some
-  nouns today loses that with the replacement;
+  noun" (`crates/p-robe/SPEC.md`);
 - the verbs about a site as a whole (`mon`, `id`), which
-  `crates/p-robe/SPEC.md` leaves to a later second service. Until that
-  exists `diag-tools` is not replaced on the hosts that have that view.
+  `crates/p-robe/SPEC.md` leaves to a later second service.
 
 ## Conflicts
 
 Numbered as in the first writing.
 
-**C1. A design note, and designing ahead. Open.** fundament has neither
-("No design note"; "never designed ahead"; design points are the
-orchestrator's, the operator is asked only about site facts, money and
-hardware; its `CLAUDE.md`). This note is a design note, written ahead of any
-role or site that needs it, and it puts design questions to the owner.
-*Recommendation:* keep it here in procession until a site is about to bind
-the broker; then build, and write `doc/model/approvals.md` as the reference
-of what was built.
+**C1. A design note, and designing ahead. Decided:** the note stays in
+procession until a site is about to bind the broker; then it is built, and
+`doc/model/approvals.md` is written as the reference of what was built.
+fundament has neither a design note nor designing ahead (its `CLAUDE.md`),
+which is why it is not placed there now.
 
-**C2. Memberships on a directory site are not model data. Decided:** they
-come from the directory, through the sync job beside the broker (point 4).
-`persons.yml` refuses `groups` on a directory site: "memberships
-are the directory's" (`doc/model/people.md`, Persons), seeded by the people
-lifecycle and changed by hand with `ipa group-add-member`
-(`doc/identity.md`, What a site does by hand). The converge cannot hand the
-broker what the model does not hold, and a second home in the model would
-break the rule that a membership has one home per site. The sync job is the
-model's own precedent (`vpn_identities`: `None` on a directory site,
-expanded from the directory). What follows from the decision: on a
-directory site R10's answer is partly
-the directory's, as fresh as the timer, and the broker's host holds a
-read-only bind credential.
+**C2. Who is active and who is in which group. Decided,** as point 4 has
+it. The model holds memberships only on a local site; on the other two,
+`groups` on a person row is refused (`doc/model/people.md`), and on a
+hosted site `enabled` is not the model's either. So neither is in the site
+file on any kind: both are in `directory.json`, written from the model by
+the converge on a local site and from the directory by `page-sync` on the
+other two. The earlier writings cited `vpn_identities` as the model's
+precedent for "expanded from the directory"; on `develop` nothing consumes
+it outside the model (`people.py:490`, `:522`), so the job is new in kind,
+and what it copies from the product is `ipa_access_exporter`'s rule for a
+failed read.
 
-**C3. "On every change, and at least hourly." Settled.** A converge is an
-operator's command from a clean clone with the store unlocked by a person
-(`doc/converge/index.md`); the product has no trigger and no scheduled run.
-The requirement is withdrawn: nothing scheduled depends on a converge.
+**C3. "On every change, and at least hourly." Settled.** The requirement is
+withdrawn: nothing scheduled depends on a converge.
 
-**C4. "TLS from the site's own certificate authority." Settled.** A local
-site has none, and `internal-ca` has no reader. The requirement is now any
-certificate pledge and services can verify, left to the binding's `tls`.
+**C4. "TLS from the site's own certificate authority." Settled.** The
+requirement is any certificate pledge and services can verify, left to the
+binding's `tls`. (`develop` has `site/ca/x509` on a site with `site_ca`;
+whether `tls: internal-ca` now reads it was not checked beyond a search
+that found no reader in `bindings.py`, `edge.py` and `load_edge.py`.)
 
-**C5. An account for a service, and its sudo rule. Open.** `accounts` are
-`bind`, `service` and `shared`: directory users on a directory site, local
-users with a site-given `uid` on a local one. A command account is a forced
-command over SSH. A daemon's own system user is neither, and a catalogue
-grant's `account` must be an identity account or a command account of its
-own entry (`load_identity.py`, the "no account" problem). So the service's
-account and the rule that lets it run the dispatcher have no home in the
-model today. *Recommendation:* J6.
+**C5. An account for a service, and its sudo rule. Decided through J6:** the
+role makes the account. The fact behind it stands: `accounts` are `bind`,
+`service` and `shared`, a command account is a forced command over SSH, a
+daemon's own system user is neither, and a catalogue grant's `account` must
+be an identity account or a command account of its own entry
+(`load_identity.py`; read on `main`). So the rule that lets the service run
+the dispatcher is the role's own file and is not in `grants_on`.
 
-**C6. The command (U6) and grants. Settled as out of scope.** "As sudo
-matches" is not a design (`approvals.md` section 10); stage 4, not in this
-note.
+**C6. The command (U6) and grants. Settled as out of scope.** Stage 4.
 
 ## Open, for the owner
 
-Each with a recommendation and what it rests on.
+**E. Whether a hosted site keeps a `persons.yml` row for those who approve.
+Open.** The row would hold `approval_keys` and nothing else of substance.
+The designer recommends yes: the operator certifies the keys at the
+converge, so they must be where the converge reads; the repository gives
+them a reviewed history; and the provider's `sshPublicKeys` is a list of
+login keys, which must never be the same list. From fundament's side: a
+hosted site's `persons.yml` "may be empty", and a row the site keeps "is a
+directory site's: `groups` refused, `uid` a pin inside the range"
+(`doc/model/people.md:36-37`), so such a row is admitted. Two things to
+settle with it. A row needs `given` and `family`, and `profile` unless the
+site has a `default_profile` (`model/README.md#personsyml`, read on `main`;
+not re-read on `develop`), so "nothing else" means those too unless the
+loader is relaxed. And `onboard` takes its person from a `persons.yml` row,
+so a site that onboards through the playbook has the row anyway; the first
+hosted site's file is `{}` today. *This note's recommendation:* yes, the
+row, for the designer's reasons; the alternative is a second home for
+approval keys, which the model has no shape for.
 
-- **J1. Who the issuer is. Decided:** the operator at a converge, 90 days,
-  renewed below 60, no always-on issuer. It rests on the product having no
-  always-on holder of a store value (`doc/secret-store/index.md`,
-  `doc/converge/index.md`). What it still needs is the signing step of
-  point 2.
-- **J2. Product types or site types.** A site may declare types in its own
-  catalogue and run its own roles (`doc/model/catalogue.md`, Two layers;
-  `doc/model/site-roles.md`); the flags, the derived flows, the person field
-  and the signing step need the product either way. *Recommendation:* the
-  flags, field, flows and `approval-broker` in the product; `probe` as a
-  site type on the first site and a product row once a second site binds it.
-  Basis: "a fact only one site has is site data" (the port workspace's
-  `CLAUDE.md`).
-- **J3. Type names.** `approval-broker` and `probe` are placeholders. The
-  type's name is on the wire and in every service certificate, so renaming
-  it later is a change for every verifier, while `crates/p-robe/SPEC.md`
-  still calls `probe` a working name. *Recommendation:* settle the service's
-  name before the first site binds it.
-- **J4. One `verified_on` per key or one for the block.**
-  *Recommendation:* per key, the `keys` row's shape
-  (`model/README.md#personsyml`), so one parse serves both and a single
-  replaced key carries its own date.
-- **J5. Settled.** The persons' dispatcher rule is not derived from the
-  binding's `groups`; it stays a site grant (point 5).
-- **J6. A role-made account, or a third account kind for grants (C5).**
-  *Recommendation:* role-made for the first service, as the product's other
-  daemons are (the observability roles create their users in their tasks),
-  and the gap named in the role's README; a third account kind when a
-  second service needs it. Basis: "never designed ahead".
-- **J7. Whether the leaver's block at the broker becomes a delivery.**
-  *Recommendation:* not now. No people converge reads deliveries yet, and a
-  profile must name every active delivery (`doc/model/people.md`, Person
-  profiles), which would cost every profile of such a site a line.
-- **J8. Service keys certified by the host key or by the site CA.
-  Decided:** the host's key, as point 5 is written. It rests on a managed
-  host's key being in the store already with its half in the site
-  (`catalogue/slots.yml`, `Site.host_key_public`), and on the host renewing
-  by itself. The site CA variant is not chosen; its record is at the end of
-  point 5.
-- **J9. The sync job's condition** (point 4). *Recommendation:* a bind
-  account contributed by a type derives on a directory site only. Basis: a
-  bind account is "a directory entry that never logs in"
-  (`doc/model/people.md`, Accounts), so on a local site there is nothing it
-  could be; that is a smaller change than a `when` on the block.
-- **Whether the first sandboxes separate model and signer. Open with the
-  owner.** This note has nothing on it: it was not in the brief or in the
-  documents read, and where a sandbox runs is no model fact (point 5). Not
-  examined from fundament's side.
+**Whether the first sandboxes separate model and signer. Open.** Not a
+model question; this note has nothing on it.
+
+**Decided, with what each rested on:**
+
+- **J1.** The operator is the issuer, at a converge. `develop` already
+  signs that way for host certificates (`site_ca_sign`).
+- **J2.** The flags, the field, the flow and `approval-broker` in the
+  product; `probe` as a site type on the first site and a product row once
+  a second site binds it. Basis: "a fact only one site has is site data"
+  (the port workspace's `CLAUDE.md`).
+- **J3.** The service's name is `probe`. It is on the wire and in every
+  service certificate, so it is settled before the first site binds it.
+- **J4.** One `verified_on` per key, the `keys` row's shape.
+- **J5.** The persons' dispatcher rule is not derived from `groups`.
+- **J6.** The service's account is made by its role, as the product's other
+  daemons are (the observability roles create their users in their tasks);
+  a third account kind for grants when a second service needs it.
+- **J7.** The leaver's block is not a delivery. No people converge reads
+  deliveries, and a profile must name every active delivery.
+- **J8.** A service's key is certified by its host's key.
+- **J9. Deferred.** It falls away for `hosted-ldap`, where the job uses the
+  host's client certificate. For a FreeIPA site it stays as it was: a bind
+  account contributed by a type should derive on a directory site only,
+  since a bind account is "a directory entry that never logs in"
+  (`doc/model/people.md`, Accounts). To be taken up when that site is
+  ported.
 
 ## Report
 
-**What was read.** In fundament, its `main` checkout as of 2026-11-11,
-read-only: `CLAUDE.md` and `.claude/rules/*.md`; `model/README.md`;
-`doc/model/` `people.md`, `policy.md`, `catalogue.md`, `secrets.md`,
-`services.md`, `index.md`, `edge.md`, `operations.md`, `inventory.md`, and
-`roles.md` from the profile table on; `doc/observability.md`,
-`doc/identity.md`; of `doc/converge/index.md` the commands, SSH, targets
-and the operator's sections; of `doc/secret-store/index.md` refs to public
-halves; of `doc/linux.md` admin_keys; the product catalogue's `classes.yml`,
-`slots.yml`, `service-types.yml`; greps in `python/model/src/fundament_model`
-(`_check.py`, `loader.py`, `load_identity.py`, `bindings.py`,
-`secret_slots.py`, `entities.py`). `develop` differed from `main` by a few
-lines in `doc/model/people.md` and `model/README.md`, not read. In
-procession: `doc/approvals.md`, `doc/approval-formats.md`,
-`crates/p-age/SPEC.md`, `crates/p-robe/SPEC.md` on `main`, then the diff to
-`integration` at commit 47bb806; sections 6.1 and 7 of
-`approval-formats.md` were not read again after the designer's answers on
-the hosts list, which are taken from the orchestrator's summary.
+**What was read for this writing**, in fundament at `develop` 8b6fe8f,
+read-only, through `git show` and `git grep` (the checkout itself is on
+`main`): `doc/model/people.md` (The backend is derived, A hosted directory,
+VPN identities, the last section); `doc/linux.md` (ldap_client, and the
+lines on ssh_host_cert); `doc/identity.md` (People on a hosted directory,
+the playbook table); `doc/core.md` (site_ca_sign); `doc/model/secrets.md`
+(The site CA); `model/README.md` (the `site.yml` providers, the backend
+paragraph); `catalogue/slots.yml` (the `ldap-client`, `hosted-ldap` and
+`site-ca` rows) and `catalogue/profiles.yml` (the `ldap_client` row);
+`hosted.py` (its head, `estate_group_mail`); `people.py` (`estate_persons`,
+`vpn_identities`); `loader.py:499` and `_check.py:42`; the role
+`ldap_client`'s README; the identity collection's README, `offboard.yml`,
+`module_utils/workspace.py` (group members, the onboard and offboard
+plans), the head of `lookup/people.py`; `doc/secret-store/index.md` (the
+generator table's two CA rows). In the port workspace: `dai/main`'s
+`README.md` (by search), `persons.yml`, and lines of `cloud.yml`,
+`people.yml`, `identity.yml`.
 
-**Verified, by reading:**
+**Still as read on `main` on 2026-11-11, not re-read on `develop`:**
+everything else this note cites: the catalogue's blocks and the active
+rule, `doc/model/policy.md`, `inventory.md`, `operations.md`, `roles.md`,
+`doc/converge/index.md`, `doc/observability.md`, the grant check in
+`load_identity.py`, `bind_diag`, the person row's required fields, point 9
+as a whole.
 
-- There is no SSH certificate authority in fundament: a search of `doc/`,
-  `model/`, `python/` and the collections for `TrustedUserCAKeys`,
-  `cert-authority` and allowed-signers found nothing of the product's.
-- `internal-ca` is in `entities.TLS_MODES` and has no hit in `bindings.py`,
-  `edge.py` or `load_edge.py`.
-- The loader reads `public/host/<h>/ssh-host-key.pub` for every converged
-  host into `host_key_public` (`loader.py`, lines 461 to 463 then).
-- `_check.LOGIN` is `[a-z_][a-z0-9_-]{0,31}`.
-- A catalogue grant's `account` must be an identity account or a command
-  account of its own entry (`load_identity.py`, lines 555 to 565 then).
-- The observability roles create their own users (`ansible.builtin.user` in
-  the tasks of `alertmanager`, `loki`, `node_exporter`, `log_pull_source`,
-  `diag`).
-- `bind_diag` and its outputs (`bindings.py`, line 2480 then); the
-  `diag-agent` account in `classes.yml`.
-- The `ssh-host-key` slot row sets no `type`; the generator's default is
-  Ed25519 (`doc/secret-store/index.md`, Generators).
+**Not read at all:** the branches `agent/*`; the port workspace's `tum/`,
+`c-it-work/`, `specs/` and `dai/main/SECRETS.md`; the loader's code for the
+hosted backend beyond `hosted.py`'s head; `site_ca_sign`'s code.
+
+**Verified by reading, on `develop`:**
+
+- Three backends, `hosted-ldap` derived from a `site.yml` provider, refused
+  beside a directory service.
+- `site/ca/x509` and `site/ca/ssh` exist on a site with `site_ca`; no host's
+  scope holds them; `site_ca_sign` signs in the controller process, issues
+  host certificates only for `kind: ssh`, and is refused without `site_ca`.
+- Every converged host of a hosted site has the slot
+  `host/<host>/ldap-client`, a record `{certificate, key}`, imported.
+- `offboard` suspends, then removes the direct group memberships, then
+  signs out.
+- `vpn_identities` has no consumer outside the model.
+- No search hit for a reader of `internal-ca` in `bindings.py`, `edge.py`,
+  `load_edge.py`.
 
 **Not verified:**
 
-- Nothing was run: no load, no test, no converge, no `ssh-keygen`.
+- Nothing was run: no load, no test, no converge, no `ssh-keygen`, no LDAP
+  query.
+- Everything said about Google's Secure LDAP itself (a suspended user is
+  still returned, no status attribute, `memberUid`, member DNs, admin
+  limits) is the designer's, taken from the orchestrator; this note read
+  only what fundament's documents say of the provider.
+- That the provider's client certificate, which `ldap_client` installs for
+  sssd, may also be used by a second program on the same host, and that
+  `LoadCredential` suits it.
+- That `nsAccountLock` is how a FreeIPA entry shows a disabled person.
+- That `site_ca_sign` can be extended as point 2 says without changing what
+  it does today; its code was not read.
 - That `ssh-keygen -Y verify` accepts, in every detail, the certificates a
-  controller-side builder or a host key as issuer would make; and the two
-  allowed-signers lines, which `approval-formats.md` itself says were not
-  run.
-- That `cryptography` in the version fundament pins builds SSH certificates
-  (the builder exists from version 40; the pin was not checked).
-- That loading the CA key into an agent for one SSHSIG signature works as
-  the runner's agent does; it is a suggestion from the converge document's
-  description.
-- Whether a contributed `accounts` block with a bind account loads on a
-  local site today (J9 assumes it is at least meaningless there).
-- Whether a failed tier stops the tiers after it, which the leaver's order
-  assumes as the worst case.
+  controller-side builder or a host key as issuer would make; the two
+  allowed-signers lines.
+- Whether a person row with `approval_keys` and little else loads on a
+  hosted site today (E).
+- Whether `offboard`'s listing of a user's groups misses nested
+  memberships.
+- Whether a failed tier stops the tiers after it, which the local site's
+  leaver order assumes as the worst case.
 - Whether fundament's token check, which lives outside the product, admits
   the approval system's program names and namespaces in the product.
-- Ports, unit names, program names and type names in the YAML are
-  placeholders.
+- Ports, unit names, program names and type names other than `probe` in the
+  YAML are placeholders.
