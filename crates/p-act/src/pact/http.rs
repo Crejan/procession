@@ -617,6 +617,29 @@ mod tests {
     }
 
     #[test]
+    fn a_tool_listing_with_a_repeated_key_anywhere_gives_no_tools_from_that_service_and_says_why() {
+        use crate::pact::Settings;
+        use crate::pact::catalogue::Catalogue;
+        let listing = |body: &'static str| {
+            fake(move |s| {
+                send(
+                    s,
+                    &format!(
+                        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                        body.len()
+                    ),
+                );
+            })
+        };
+        // The first two are good tools; a repeated key deep inside the second makes the whole listing refused.
+        let body = r#"{"jsonrpc":"2.0","id":1,"result":{"tools":[{"name":"a_one","description":"d"},{"name":"b_two","description":"d","inputSchema":{"type":"object","type":"object"}}]}}"#;
+        let Some(f) = listing(body) else { return };
+        let (catalogue, log) = Catalogue::build(&[service(&f.url)], &Settings::new(120, None), &quick()).unwrap();
+        assert!(catalogue.tools.is_empty(), "no partial catalogue");
+        assert!(log.len() == 1 && log[0].contains("twice") && log[0].contains("inputSchema"), "{log:?}");
+    }
+
+    #[test]
     fn a_json_answer_over_a_socket_and_what_is_sent() {
         let a = answer();
         let Some(f) = fake(move |s| {

@@ -111,6 +111,7 @@ closed_code! {
         TooManyWaiting => "too-many-waiting",
         Busy => "busy",
         NotReady => "not-ready",
+        DirectoryStale => "directory-stale",
     }
 }
 
@@ -127,6 +128,7 @@ closed_code! {
         Superseded => "superseded",
         Busy => "busy",
         Timeout => "timeout",
+        DirectoryStale => "directory-stale",
     }
 }
 
@@ -1017,8 +1019,8 @@ mod tests {
             assert!(fits(w), "{w}");
         }
         assert_eq!(PledgeReason::ALL.len(), 14);
-        assert_eq!(BrokerReason::ALL.len(), 8);
-        assert_eq!(ErrorCode::ALL.len(), 10);
+        assert_eq!(BrokerReason::ALL.len(), 9);
+        assert_eq!(ErrorCode::ALL.len(), 11);
         for c in PledgeReason::ALL {
             assert_eq!(PledgeReason::from_wire(c.wire()), *c);
         }
