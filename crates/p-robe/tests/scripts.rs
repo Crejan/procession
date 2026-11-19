@@ -438,10 +438,25 @@ fn undo_b_reads_nothing_before_it_has_checked_the_marker_and_no_script_writes_in
     let first_read = undo.find("sed -n").expect("it reads the marker");
     assert!(check < first_read, "undo-b reads the marker before it has checked it");
     assert!(undo.contains("sane_path"));
-    for name in ["b-common.sh", "b1-prepare-person.sh", "b2-service.sh", "b3-agent-calls.sh", "undo-b.sh"] {
+    // Every script of Stage A and Stage B: nothing root writes, executes or removes lies under a fixed name in a
+    // world-writable directory.
+    for name in [
+        "a1-prepare.sh",
+        "a2-check-rule.sh",
+        "a3-run-cross.sh",
+        "undo.sh",
+        "b-common.sh",
+        "b1-prepare-person.sh",
+        "b2-service.sh",
+        "b3-agent-calls.sh",
+        "undo-b.sh",
+    ] {
         for line in std::fs::read_to_string(stage1(name)).unwrap().lines().filter(|l| !l.trim_start().starts_with('#'))
         {
-            assert!(!line.contains("/var/tmp"), "{name} uses a world-writable place: {line}");
+            assert!(
+                !line.contains("/var/tmp") && !line.contains("/tmp/"),
+                "{name} uses a world-writable place: {line}"
+            );
         }
     }
 }

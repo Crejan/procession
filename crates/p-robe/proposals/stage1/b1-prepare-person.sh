@@ -13,7 +13,11 @@ identify "${1:-}"
 # -- preconditions (nothing changed yet) ------------------------------------------------------------------------
 [ -x "$PROBE" ] && [ -e /etc/sudoers.d/probe-svc ] || stop "Stage A is not in place ($PROBE or /etc/sudoers.d/probe-svc is missing): run a1 and a2 first"
 id "$SVC" >/dev/null 2>&1 || stop "the account $SVC does not exist: run a1 first"
-exists "$STATEDIR" && stop "$STATEDIR exists: Stage B was prepared before (or something else made that name: look at it); run undo-b.sh first"
+# The directory exists from Stage A (a1 made it): then it must be root's alone and hold no Stage B marker.
+if exists "$STATEDIR"; then
+  root_only "$STATEDIR" d || stop "$STATEDIR exists but is not a directory of root's that only root can write: look at it"
+  exists "$MARKER" && stop "$MARKER exists: Stage B was prepared before; run undo-b.sh first"
+fi
 exists "$STATE/config.json" && stop "$STATE/config.json exists (pledge state of $PERSON from before): look at it, move it away if it is not wanted, or run undo-b.sh"
 exists "$KEYDIR" && stop "$KEYDIR exists: look at it (it would hold a service key), move it away or run undo-b.sh"
 exists "$SETTINGS" && stop "$SETTINGS exists: look at it, move it away or run undo-b.sh"
@@ -27,8 +31,7 @@ echo "checkout $CHECKOUT at $COMMIT; person $PERSON (uid $PUID, group $PGROUP, h
 echo "pledge: $PLEDGE"
 
 # The directory only root can write: made with mkdir, which fails if the name exists (no race with another account).
-mkdir -m 0700 "$STATEDIR" || stop "cannot make $STATEDIR (it appeared meanwhile?)"
-chown root:root "$STATEDIR" && chmod 0700 "$STATEDIR"
+ensure_statedir
 marker_safe || stop "$STATEDIR is not root's alone"
 mark PERSON "$PERSON"
 

@@ -53,5 +53,7 @@ done
 marked GROUP_MADE && groupdel "$GROUP" 2>/dev/null && echo "removed the group $GROUP"
 marked HOSTKEY_MADE && rm -f /etc/ssh/ssh_host_ed25519_key /etc/ssh/ssh_host_ed25519_key.pub && echo "removed the host key b1 made"
 
-rm -rf "$STATEDIR"
+# Its own files only: Stage A's (check.log, account-existed) are undone by undo.sh; the directory goes when it is empty.
+rm -f "$MARKER" "$STATEDIR"/pledge-config.* "$STATEDIR"/key.* "$STATEDIR"/settings.* "$STATEDIR"/verify.out
+rmdir "$STATEDIR" 2>/dev/null
 echo "left alone: the audit lines already in the journal (history), Stage A (undo.sh), the build in your checkout"

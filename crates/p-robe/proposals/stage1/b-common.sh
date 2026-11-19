@@ -100,6 +100,16 @@ sane_path() {
 mark() { marker_safe || stop "$STATEDIR or $MARKER is not root's alone: refusing to write to it"; printf '%s=%s\n' "$1" "$2" >> "$MARKER"; chmod 0600 "$MARKER"; }
 marked() { root_only "$MARKER" f && grep -q "^$1=" "$MARKER"; }
 marker_value() { root_only "$MARKER" f && sed -n "s/^$1=//p" "$MARKER" | tail -1; }
+# ensure_statedir: the root-only directory exists, made here if it is not there (mkdir fails if the name appears meanwhile), and is
+# checked if it is. Stage A (a1) makes it first; b1 finds it there. Whoever finds it must not use it unless it is root's alone.
+ensure_statedir() {
+  if exists "$STATEDIR"; then
+    root_only "$STATEDIR" d || stop "$STATEDIR exists but is not a directory of root's that only root can write: look at it, remove it if it is not yours, and run this again"
+  else
+    mkdir -m 0700 "$STATEDIR" || stop "cannot make $STATEDIR (it appeared meanwhile?)"
+    chown root:root "$STATEDIR" && chmod 0700 "$STATEDIR"
+  fi
+}
 # tmpfile NAME: a fresh file in the root-only directory (mktemp: unpredictable name, created exclusively, 0600).
 tmpfile() { mktemp "$STATEDIR/$1.XXXXXX"; }
 

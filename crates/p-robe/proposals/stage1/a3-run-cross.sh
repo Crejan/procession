@@ -30,9 +30,9 @@ PLEDGE=$(printf '%s\n' "$PLEDGE_JSON" | sh "$HERE/find-artifact.sh" bin pledge) 
 echo "test:   $TEST"
 echo "pledge: $PLEDGE"
 # Copy them where probe-svc can read them (the checkout is the owner's).
-WORK=/var/tmp/probe-stage1-run
-rm -rf "$WORK"
-mkdir -p "$WORK"
+# A directory of its own with an unpredictable name, made by root in /run (root alone writes there; not /var/tmp). Root fills it, then
+# hands it to probe-svc, which runs the copies as itself: it is its own directory and executables, nobody else's.
+WORK=$(mktemp -d /run/probe-stage1-run.XXXXXX) || { echo "FAIL: cannot make a directory in /run"; exit 1; }
 cp "$TEST" "$WORK/stage1_sudo"
 cp "$PLEDGE" "$WORK/pledge"
 chown -R probe-svc:probe-svc "$WORK"
