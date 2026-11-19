@@ -175,7 +175,8 @@ programs have today, and what is not yet there is marked.
 | Stage B: `/run/pledge-<person>` (the person's, 0700; pledge makes it 0710 of the group), pledge's state `~/.local/state/pledge` (0700) with `config.json` (0600) and, once pledge runs, its keys and record | `b1`, pledge | `undo-b.sh` |
 | Stage B: `/etc/probe/` (the person's two public keys; the service's key and its certificate), `/etc/probe.json` (root, 0644) | `b1` (the directory), `b2` | `undo-b.sh` |
 | Stage B: the units `probe-serve.service`, `probe-setup.service`, `probe-setup.timer` in `/etc/systemd/system`, enabled | `b2` | `undo-b.sh` |
-| Stage B: the agent's bundle `~/probe-stage1-bundle` (0600, the person's) and `/var/tmp/probe-stage1.*` helper files, the marker `/var/tmp/probe-stage1.b-state` | `b3`, `b1` | `undo-b.sh` |
+| Stage B: **`/etc/probe-stage1/`** (root:root 0700, made by `b1` with `mkdir`, which fails if the name exists): the marker `b-state` (what `b1` made, which `undo-b.sh` obeys) and the scripts' temporary files | `b1` | `undo-b.sh` |
+| Stage B: the agent's bundle `~/probe-stage1-bundle` (0600, the person's) and `~/.probe-stage1-pact-call.sh` (written by the person through `su`, never by root) | `b3` | `undo-b.sh` |
 | a TCP port on 127.0.0.1 (8765) | `probe serve` | the unit stops |
 
 `undo.sh` is safe to run at any time and does nothing to what is not on this list.
@@ -304,6 +305,11 @@ the service's account can search the directory and write the socket and nothing 
 they drop another user). The person must be in `pledge-svc` **in the login that starts pledge** (`su - alice`: a fresh login; an old shell does not have it),
 else pledge's `chown` to the group is refused. `/run` is a tmpfs: after a reboot run `b1` again (after `undo-b.sh`). *Rehearsed with the real `pledge` on macOS with another group: the
 configuration `b1` writes is accepted, the directory becomes 0710 and the socket 0660 of the group, `keys create` asks in pledge's terminal, and `keys list` has the form `b2` reads.*
+
+**Nothing root obeys lies where another account could have put it.** The marker (which paths `undo-b.sh` removes as root, which group and host key it takes away) is in `/etc/probe-stage1`, a directory that only root can write
+(`b1` makes it with `mkdir -m 0700`, which fails if the name exists, then checks it); `b2`, `b3` and `undo-b.sh` read or append to the marker only if the directory and the file are root's, not links and not writable by group or others, and `undo-b.sh` also refuses a path from
+it that is not absolute, has `..`, or is near the top of the file system. Guards use `-e` and `-L` (a dangling link counts as there). The `pact` helper script is written into the person's home by the person, and run by him: root writes and executes nothing in `/var/tmp`. (Stage A's `a1`, `a2` and `a3` still write fixed names in
+`/var/tmp` as root; they are frozen under the owner and are reported in `REPORT-runbook.md`.)
 
 ### What you do, in order
 

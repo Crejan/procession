@@ -11,6 +11,7 @@ need_root
 identify "${1:-}"
 
 [ -e "$MARKER" ] || stop "b1 has not run ($MARKER is missing): run  sh $HERE/b1-prepare-person.sh $CHECKOUT"
+marker_safe || stop "$STATEDIR or $MARKER is not root's alone (root:root, not writable by others): do not go on; look at it"
 [ -x "$PROBE" ] || stop "$PROBE is missing: Stage A is not in place"
 command -v systemctl >/dev/null || stop "systemctl is not on this host: the units of this step need systemd"
 [ -d /run/systemd/system ] || stop "systemd is not running on this host (no /run/systemd/system): the units of this step need it"
@@ -40,7 +41,7 @@ for pair in "confirmed:$CONFIRMED" "automatic:$AUTOMATIC" "delegation:$DELEGATIO
   case "${pair#*:}" in "ssh-"*|"ecdsa-"*) ;; *) stop "no $(echo "${pair%%:*}") key in pledge's list: as $PERSON run  $PLEDGE keys create ${pair%%:*} $(pledge_args)  and answer y in pledge's terminal, then run this again" ;; esac
 done
 umask 022
-TMP=$(mktemp /var/tmp/probe-stage1.key.XXXXXX) || stop "mktemp failed"
+TMP=$(tmpfile key) || stop "mktemp failed"
 printf '%s\n' "$CONFIRMED" > "$TMP"; install -o root -g root -m 0644 "$TMP" "$KEYDIR/$PERSON-confirmed.pub"
 printf '%s\n' "$AUTOMATIC" > "$TMP"; install -o root -g root -m 0644 "$TMP" "$KEYDIR/$PERSON-automatic.pub"
 rm -f "$TMP"
@@ -60,7 +61,7 @@ chmod 0600 "$KEYDIR/service-key"; chmod 0644 "$KEYDIR/service-key.pub" "$KEYDIR/
 if ssh-keygen -L -f "$KEYDIR/service-key-cert.pub" | grep -q "probe@$HOST"; then pass "the certificate is for probe@$HOST"; else fail "the certificate does not name probe@$HOST"; fi
 
 # -- 4. /etc/probe.json ---------------------------------------------------------------------------------------------
-TMP=$(mktemp /var/tmp/probe-stage1.settings.XXXXXX) || stop "mktemp failed"
+TMP=$(tmpfile settings) || stop "mktemp failed"
 probe_settings_json "$PERSON" "$HOST" "$SOCK" "$PUID" > "$TMP"
 install -o root -g root -m 0644 "$TMP" "$SETTINGS"; rm -f "$TMP"
 mark SETTINGS_MADE 1
@@ -72,12 +73,12 @@ for unit in probe-serve.service probe-setup.service probe-setup.timer; do
   install -o root -g root -m 0644 "$HERE/$unit" "$UNITS/$unit" || stop "cannot install $unit"
 done
 mark UNITS_MADE 1
-if systemd-analyze verify "$UNITS/probe-serve.service" "$UNITS/probe-setup.service" "$UNITS/probe-setup.timer" 2>"$MARKER.verify"; then
-  if [ -s "$MARKER.verify" ]; then pass "systemd-analyze verify accepts the units (it also said, for you to read: $(tr '\n' ' ' < "$MARKER.verify"))"; else pass "systemd-analyze verify: nothing to say"; fi
+if systemd-analyze verify "$UNITS/probe-serve.service" "$UNITS/probe-setup.service" "$UNITS/probe-setup.timer" 2>"$STATEDIR/verify.out"; then
+  if [ -s "$STATEDIR/verify.out" ]; then pass "systemd-analyze verify accepts the units (it also said, for you to read: $(tr '\n' ' ' < "$STATEDIR/verify.out"))"; else pass "systemd-analyze verify: nothing to say"; fi
 else
-  fail "systemd-analyze verify failed: $(cat "$MARKER.verify")"
+  fail "systemd-analyze verify failed: $(cat "$STATEDIR/verify.out")"
 fi
-rm -f "$MARKER.verify"
+rm -f "$STATEDIR/verify.out"
 systemctl daemon-reload
 systemctl enable --now probe-setup.timer >/dev/null 2>&1 && pass "probe-setup.timer enabled" || fail "probe-setup.timer did not enable"
 systemctl start probe-setup.service

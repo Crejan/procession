@@ -11,6 +11,7 @@ need_root
 identify "${1:-}"
 
 [ -e "$MARKER" ] || stop "b1 has not run: run  sh $HERE/b1-prepare-person.sh $CHECKOUT"
+marker_safe || stop "$STATEDIR or $MARKER is not root's alone: do not go on; look at it"
 systemctl is-active --quiet probe-serve.service || stop "probe-serve is not active: b2 has not passed (systemctl status probe-serve)"
 [ -S "$RUNDIR/service.sock" ] || stop "pledge is not serving in $RUNDIR: the person starts it ($(pledge_serve_command))"
 find_pledge
@@ -20,14 +21,15 @@ SVCUID=$(id -u "$SVC")
 echo "checkout $CHECKOUT at $COMMIT; person $PERSON; pact: $PACT; pledge: $PLEDGE"
 
 BUNDLE=$PHOME/probe-stage1-bundle
-CALLER=/var/tmp/probe-stage1.pact-call.sh
-# The little script the person runs: pact reads the bundle from a regular file on standard input, which it must own
-# with no group or other bits (pledge made it 0600 for him).
-cat > "$CALLER" <<SH
+# The little script the person runs (pact reads the bundle from a regular file on standard input, which it must own with
+# no group or other bits; pledge made it 0600 for him). It lives in HIS home and is written BY HIM (through su), never by
+# root into a place another account could have prepared: root writes and executes nothing there.
+CALLER=$PHOME/.probe-stage1-pact-call.sh
+as_person "rm -f '$CALLER'; umask 077; cat > '$CALLER'" <<SH
 #!/bin/sh
 exec '$PACT' "\$@" < '$BUNDLE'
 SH
-chown "$PERSON:$PGROUP" "$CALLER"; chmod 0700 "$CALLER"
+[ -s "$CALLER" ] && [ "$(stat -c %U "$CALLER")" = "$PERSON" ] || stop "could not make $CALLER as $PERSON"
 mark CALLER_MADE "$CALLER"
 
 say() { echo; echo ">>> $*"; }

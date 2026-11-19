@@ -307,8 +307,13 @@ fn the_marker_round_trips_and_the_public_key_is_taken_from_pledges_list() {
     let dir = std::env::temp_dir().join(format!("probe-bscripts-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
     let marker = dir.join("marker");
+    // The directory is this test's own and private: `mark` refuses a marker that is not root's alone, so the test says
+    // which uid counts as root's.
+    let uid = std::os::unix::fs::MetadataExt::uid(&std::fs::metadata(&dir).unwrap());
+    std::fs::set_permissions(&dir, std::os::unix::fs::PermissionsExt::from_mode(0o700)).unwrap();
     let (ok, out) = with_common(&format!(
-        "MARKER='{}'; mark A 1; mark PARENT_MADE /x/y; mark PARENT_MADE /x; marked A && echo yes; marked B || echo no; marker_value PARENT_MADE",
+        "TRUSTED_UID={uid}; STATEDIR='{}'; MARKER='{}'; mark A 1; mark PARENT_MADE /x/y; mark PARENT_MADE /x; marked A && echo yes; marked B || echo no; marker_value PARENT_MADE",
+        dir.display(),
         marker.display()
     ));
     assert!(ok && out.lines().collect::<Vec<_>>() == ["yes", "no", "/x"], "{out}");
@@ -350,4 +355,103 @@ fn the_settings_and_pledge_configuration_the_scripts_write_are_read_by_the_progr
     assert_eq!(value["services"][0]["url"], "http://127.0.0.1:8765/mcp");
     let members: Vec<&str> = value.as_object().unwrap().keys().map(String::as_str).collect();
     assert_eq!(members, ["hosts", "person", "service_group", "services"]);
+}
+
+// -- the marker: nothing root obeys lies where another account could have put it -------------------------------
+
+#[test]
+fn the_marker_is_read_only_if_it_and_its_directory_are_root_alone_and_paths_from_it_are_sane() {
+    use std::os::unix::fs::{PermissionsExt, symlink};
+    let dir = std::env::temp_dir().join(format!("probe-bmarker-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    let state = dir.join("state");
+    std::fs::create_dir_all(&state).unwrap();
+    let mode = |path: &Path, bits: u32| std::fs::set_permissions(path, std::fs::Permissions::from_mode(bits)).unwrap();
+    let marker = state.join("b-state");
+    std::fs::write(&marker, "PERSON=alice\n").unwrap();
+    let me = std::fs::metadata(&marker).unwrap().uid_of();
+    // `root` is this test's own uid here (TRUSTED_UID); the real script has 0.
+    let check = |trusted: u32| {
+        let (_, out) = with_common(&format!(
+            "TRUSTED_UID={trusted}; STATEDIR='{}'; MARKER='{}'; marker_safe && echo safe || echo unsafe",
+            state.display(),
+            marker.display()
+        ));
+        out.trim().to_string()
+    };
+    mode(&state, 0o700);
+    mode(&marker, 0o600);
+    assert_eq!(check(me), "safe");
+    // Another account's file is not root's; group- or other-writable is not safe, for the file and for the directory.
+    assert_eq!(check(me + 1), "unsafe");
+    mode(&marker, 0o660);
+    assert_eq!(check(me), "unsafe");
+    mode(&marker, 0o602);
+    assert_eq!(check(me), "unsafe");
+    mode(&marker, 0o600);
+    mode(&state, 0o770);
+    assert_eq!(check(me), "unsafe");
+    mode(&state, 0o700);
+    // A symlink where the marker should be (a name another account made) is not read, whatever it points at.
+    let target = dir.join("elsewhere");
+    std::fs::write(&target, "RUNDIR_MADE=/etc\n").unwrap();
+    mode(&target, 0o600);
+    std::fs::remove_file(&marker).unwrap();
+    symlink(&target, &marker).unwrap();
+    assert_eq!(check(me), "unsafe");
+    // A dangling one too: `exists` sees it (`-e` alone does not), so b1 refuses to go on.
+    std::fs::remove_file(&marker).unwrap();
+    symlink(dir.join("nothing"), &marker).unwrap();
+    assert_eq!(check(me), "unsafe");
+    let (ok, out) = with_common(&format!("exists '{}' && echo there || echo absent", marker.display()));
+    assert!(ok && out.trim() == "there", "{out}");
+    // No marker yet is fine for the directory check (b1 has not written it).
+    std::fs::remove_file(&marker).unwrap();
+    assert_eq!(check(me), "safe");
+    // The directory itself being a link is not accepted.
+    let linked = dir.join("linked");
+    symlink(&state, &linked).unwrap();
+    let (_, out) = with_common(&format!(
+        "TRUSTED_UID={me}; STATEDIR='{}'; MARKER=\"$STATEDIR/b-state\"; marker_safe && echo safe || echo unsafe",
+        linked.display()
+    ));
+    assert_eq!(out.trim(), "unsafe");
+    // The paths read back are absolute, plain and not near the top.
+    for (path, sane) in [
+        ("/run/pledge-alice", true),
+        ("/home/alice/.local/state/pledge", true),
+        ("/etc", false),
+        ("/", false),
+        ("relative/dir", false),
+        ("/home/../etc", false),
+        ("/a/b\n/c", false),
+    ] {
+        let (_, out) = with_common(&format!("sane_path \"$(printf '%s' '{}')\" && echo yes || echo no", path));
+        assert_eq!(out.trim() == "yes", sane, "{path:?}");
+    }
+}
+
+#[test]
+fn undo_b_reads_nothing_before_it_has_checked_the_marker_and_no_script_writes_into_var_tmp() {
+    let undo = std::fs::read_to_string(stage1("undo-b.sh")).unwrap();
+    let check = undo.find("root_only \"$MARKER\" f").expect("the marker is checked");
+    let first_read = undo.find("sed -n").expect("it reads the marker");
+    assert!(check < first_read, "undo-b reads the marker before it has checked it");
+    assert!(undo.contains("sane_path"));
+    for name in ["b-common.sh", "b1-prepare-person.sh", "b2-service.sh", "b3-agent-calls.sh", "undo-b.sh"] {
+        for line in std::fs::read_to_string(stage1(name)).unwrap().lines().filter(|l| !l.trim_start().starts_with('#'))
+        {
+            assert!(!line.contains("/var/tmp"), "{name} uses a world-writable place: {line}");
+        }
+    }
+}
+
+trait UidOf {
+    fn uid_of(&self) -> u32;
+}
+
+impl UidOf for std::fs::Metadata {
+    fn uid_of(&self) -> u32 {
+        std::os::unix::fs::MetadataExt::uid(self)
+    }
 }
