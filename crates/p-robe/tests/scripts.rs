@@ -539,7 +539,7 @@ fn the_installed_probe_must_be_the_build_of_the_checkouts_commit() {
     let (code, text) = canned_kit(0, &old, "require_installed_commit");
     assert_eq!(code, 1);
     assert!(
-        text.contains("does not say which commit") && text.contains("whole") == false && text.contains("exit code"),
+        text.contains("does not say which commit") && !text.contains("whole") && text.contains("exit code"),
         "{text}"
     );
 }
