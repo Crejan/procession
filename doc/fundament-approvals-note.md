@@ -380,9 +380,25 @@ approvals:
 
 ### The two inputs
 
-The same two on every kind of site. A person is enabled for the broker
-exactly if the site file has the person and `active` of `directory.json`
-has the name.
+The same two on every kind of site. Each file is checked on its own and
+replaces its predecessor when it is valid in itself; neither is refused for
+a name the other does not know, and there is no rule about which arrives
+first. The broker decides from the intersection, computed at load:
+
+- a person is enabled exactly if the site file has the person and `active`
+  of `directory.json` has the name;
+- a group's members are the names under its key that are enabled persons;
+- a name in `active` or `members` that is no person of the site file is
+  ignored;
+- a key in `members` that is no group of the site file is ignored;
+- a group of the site file with no key in `members` is treated as empty.
+
+Each of these only restricts. So no order of arrival admits what neither
+file admits, and a converge that removes a person or a group never waits on
+the directory. `page status` prints the counts and the names of the three
+kinds (names not in the site file, groups not in the site file, groups of
+the site file without a key in `members`), and the audit log gets a line
+when they change.
 
 **The site file**, from the model, by the converge of the broker's host.
 One derivation, `approval_view(site)`, pure and byte-stable;
@@ -413,11 +429,24 @@ designer). A host whose public half the store has not written is left out of
 ```
 
 `source` is `model`, `freeipa` or `hosted-ldap`; it is shown and decides
-nothing. Every group the site file names is a key of `members`, possibly
-empty, and holds only persons that are in `active`. Refused, with the old
-file left standing: an unknown member, an unknown or repeated name, an
-`as_of` more than 60 seconds ahead. The file is 0644 and replaced by
-writing a new one and renaming it.
+nothing. The file is 0644 and replaced by writing a new one and renaming
+it.
+
+The writers stay strict, though the reader is lenient about the other
+file: `page-sync` asks only for what the site file names and writes every
+named group as a key, possibly empty, holding only persons that are in
+`active`; the model's derivation does likewise.
+
+Refused whole, with the old file left standing:
+
+- a missing or unknown `v`;
+- an unknown member of the object;
+- a `source` outside the three;
+- an `as_of` that is not UTC to the second, or more than 60 seconds ahead;
+- a name outside the character rules;
+- a name repeated within one list;
+- a key repeated;
+- a name under `members` that is not in `active`.
 
 | Kind | Writer | `active` | `members` |
 |---|---|---|---|
