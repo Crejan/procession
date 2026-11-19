@@ -254,7 +254,7 @@ mod with_test_verbs {
     #[test]
     fn a_file_in_the_open_place_runs_at_the_harmless_rating_and_is_read_from_the_open_file() {
         let dir = place("read");
-        let out = read(&dir, Some("open,none,none"), &dir.join("open/a"));
+        let out = read(&dir, Some("open,none,none,text"), &dir.join("open/a"));
         assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
         assert!(text(&out.stdout).contains("\"text\":\"hello\""), "{}", text(&out.stdout));
     }
@@ -263,9 +263,9 @@ mod with_test_verbs {
     fn a_file_elsewhere_is_rated_secret_and_runs_only_if_the_approved_rating_allows() {
         let dir = place("elsewhere");
         let secret = dir.join("private/s");
-        refused_above(&read(&dir, Some("open,none,none"), &secret));
-        refused_above(&read(&dir, Some("internal,none,none"), &secret));
-        assert_eq!(read(&dir, Some("secret,none,none"), &secret).status.code(), Some(0));
+        refused_above(&read(&dir, Some("open,none,none,text"), &secret));
+        refused_above(&read(&dir, Some("internal,none,none,text"), &secret));
+        assert_eq!(read(&dir, Some("secret,none,none,text"), &secret).status.code(), Some(0));
         // A person at the dispatcher passes no flag and needs no approval.
         assert_eq!(read(&dir, None, &secret).status.code(), Some(0));
         let log = audit(&dir);
@@ -278,12 +278,12 @@ mod with_test_verbs {
         let link = dir.join("open/link");
         symlink(dir.join("open/a"), &link).unwrap();
         // The service rates the name (harmless) and passes that as --within.
-        assert_eq!(read(&dir, Some("open,none,none"), &link).status.code(), Some(0));
+        assert_eq!(read(&dir, Some("open,none,none,text"), &link).status.code(), Some(0));
         // Before the same call reaches the dispatcher, the link is replaced.
         std::fs::remove_file(&link).unwrap();
         symlink(dir.join("private/s"), &link).unwrap();
         let before = audit(&dir).len();
-        refused_above(&read(&dir, Some("open,none,none"), &link));
+        refused_above(&read(&dir, Some("open,none,none,text"), &link));
         let log = audit(&dir);
         assert_eq!(log.len(), before + 1);
         assert!(log.last().unwrap().starts_with("event=refused "));
@@ -297,17 +297,17 @@ mod with_test_verbs {
         std::fs::create_dir(&loose).unwrap();
         std::fs::write(loose.join("f"), "x").unwrap();
         std::fs::set_permissions(&loose, std::fs::Permissions::from_mode(0o777)).unwrap();
-        refused_above(&read(&dir, Some("open,none,none"), &loose.join("f")));
+        refused_above(&read(&dir, Some("open,none,none,text"), &loose.join("f")));
         std::fs::set_permissions(&loose, std::fs::Permissions::from_mode(0o755)).unwrap();
-        assert_eq!(read(&dir, Some("open,none,none"), &loose.join("f")).status.code(), Some(0));
+        assert_eq!(read(&dir, Some("open,none,none,text"), &loose.join("f")).status.code(), Some(0));
         std::fs::set_permissions(&loose, std::fs::Permissions::from_mode(0o775)).unwrap();
-        refused_above(&read(&dir, Some("open,none,none"), &loose.join("f")));
+        refused_above(&read(&dir, Some("open,none,none,text"), &loose.join("f")));
     }
 
     #[test]
     fn dot_dot_does_not_get_out_of_the_open_place_unrated() {
         let dir = place("dotdot");
-        refused_above(&read(&dir, Some("open,none,none"), &dir.join("open/../private/s")));
+        refused_above(&read(&dir, Some("open,none,none,text"), &dir.join("open/../private/s")));
     }
 
     #[test]
@@ -317,17 +317,17 @@ mod with_test_verbs {
         let c = std::ffi::CString::new(fifo.to_str().unwrap()).unwrap();
         // SAFETY: a valid NUL-terminated path.
         assert_eq!(unsafe { libc::mkfifo(c.as_ptr(), 0o600) }, 0);
-        let out = read(&dir, Some("secret,none,none"), &fifo);
+        let out = read(&dir, Some("secret,none,none,text"), &fifo);
         assert_eq!(out.status.code(), Some(64));
         assert!(text(&out.stderr).contains("not a regular file"));
         // A file that is not there cannot be rated: the worst, and then the verb fails.
-        refused_above(&read(&dir, Some("open,none,none"), &dir.join("open/absent")));
+        refused_above(&read(&dir, Some("open,none,none,text"), &dir.join("open/absent")));
         assert_eq!(
-            read(&dir, Some("secret,none,none"), &dir.join("open/absent")).status.code(),
+            read(&dir, Some("secret,none,none,text"), &dir.join("open/absent")).status.code(),
             Some(70),
             "a verb that was started and did not read is a failed call, not the verb's own code"
         );
-        let out = probe(&["--within", "secret,none,none", "test", "read", "open/a"], Some(&dir));
+        let out = probe(&["--within", "secret,none,none,text", "test", "read", "open/a"], Some(&dir));
         assert_eq!(out.status.code(), Some(64));
     }
 
@@ -338,7 +338,7 @@ mod with_test_verbs {
             let out = probe(&["--within", bad, "test", "echo"], Some(&dir));
             assert_eq!(out.status.code(), Some(64), "{bad:?}");
         }
-        let out = probe(&["test", "echo", "--within", "open,none,none"], Some(&dir));
+        let out = probe(&["test", "echo", "--within", "open,none,none,text"], Some(&dir));
         assert_eq!(out.status.code(), Some(64), "an argument may not start with -");
         let catalogue = text(&probe(&["catalog", "--format", "json"], Some(&dir)).stdout);
         assert!(

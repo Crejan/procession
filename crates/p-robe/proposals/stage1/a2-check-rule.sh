@@ -16,6 +16,8 @@ U4=3f2b6c1e-8a57-4d0e-9b1a-5c2e7d9f0a14
 U5=3f2b6c1e-8a57-4d0e-9b1a-5c2e7d9f0a15
 U6=3f2b6c1e-8a57-4d0e-9b1a-5c2e7d9f0a16
 U7=3f2b6c1e-8a57-4d0e-9b1a-5c2e7d9f0a17
+U8=3f2b6c1e-8a57-4d0e-9b1a-5c2e7d9f0a18
+U9=3f2b6c1e-8a57-4d0e-9b1a-5c2e7d9f0a19
 LOCK=/var/lib/probe/locks/probe-svc.lock
 
 [ "$(id -u)" = 0 ] || { echo "FAIL: run as root"; exit 1; }
@@ -40,7 +42,7 @@ run() {
 }
 
 run "a verb of the table runs as root through the rule" 0 \
-  "sudo -n $PROBE --within open,none,none --call $U1 --until $(( $(date +%s) + 300 )) sys kit"
+  "sudo -n $PROBE --within open,none,none,text --call $U1 --until $(( $(date +%s) + 300 )) sys kit"
 if grep -q '"euid":0' "$LOG.out"; then echo "PASS: sys kit says it ran as euid 0"; else echo "FAIL: sys kit did not say euid 0"; FAILED=1; fi
 # sys kit was the last to write $LOG.out; the next run overwrites it.
 # The positive control: if this first call did not run through the rule, none of the refusals below means anything
@@ -51,34 +53,39 @@ if [ "$FAILED" != 0 ]; then
 fi
 
 run "above the approved rating: refused (64)" 64 \
-  "sudo -n $PROBE --within open,none,none --call $U2 --until $(( $(date +%s) + 300 )) test peak"
+  "sudo -n $PROBE --within open,none,none,plain --call $U2 --until $(( $(date +%s) + 300 )) test peak"
 run "at the approved rating: runs" 0 \
-  "sudo -n $PROBE --within open,none,outage --call $U3 --until $(( $(date +%s) + 300 )) test peak"
+  "sudo -n $PROBE --within open,none,outage,plain --call $U3 --until $(( $(date +%s) + 300 )) test peak"
 run "run command is refused by the dispatcher (64)" 64 \
-  "sudo -n $PROBE --within secret,lasting,outage --call $U4 --until $(( $(date +%s) + 300 )) run command"
+  "sudo -n $PROBE --within secret,lasting,outage,text --call $U4 --until $(( $(date +%s) + 300 )) run command"
 run "the same flag twice is refused by the dispatcher (64)" 64 \
-  "sudo -n $PROBE --within open,none,none --call $U4 --until $(( $(date +%s) + 300 )) --call $U4 sys kit"
+  "sudo -n $PROBE --within open,none,none,text --call $U4 --until $(( $(date +%s) + 300 )) --call $U4 sys kit"
 run "the form without --within is not in the rule (sudo refuses, 1)" 1 \
   "sudo -n $PROBE sys kit"
 run "the form without --until is not in the rule (sudo refuses, 1)" 1 \
-  "sudo -n $PROBE --within open,none,none --call $U4 sys kit"
+  "sudo -n $PROBE --within open,none,none,text --call $U4 sys kit"
 run "a deadline more than ten minutes ahead is refused, so that it cannot park a process (64)" 64 \
-  "sudo -n $PROBE --within open,none,none --call $U5 --until $(( $(date +%s) + 3600 )) sys kit"
+  "sudo -n $PROBE --within open,none,none,text --call $U5 --until $(( $(date +%s) + 3600 )) sys kit"
 run "a deadline already past: the verb is not started (76)" 76 \
-  "sudo -n $PROBE --within open,none,none --call $U5 --until 1 sys kit"
+  "sudo -n $PROBE --within open,none,none,text --call $U5 --until 1 sys kit"
+# The value of --within has four tokens: the rating and whether the verb's output may carry text from the host.
+run "a --within of three tokens is refused by the dispatcher (64): one form, no reading as plain" 64 \
+  "sudo -n $PROBE --within open,none,none --call $U8 --until $(( $(date +%s) + 300 )) sys kit"
+run "a verb that can carry text from the host, approved as plain: refused like one above the rating (64)" 64 \
+  "sudo -n $PROBE --within secret,lasting,outage,plain --call $U9 --until $(( $(date +%s) + 300 )) sys kit"
 
 # The lock: held by someone else (flock, as root) for 3 seconds. A call with --call waits for it and runs.
 flock "$LOCK" sleep 3 &
 sleep 1
 run "a call waits for the identity's lock and then runs (0)" 0 \
-  "sudo -n $PROBE --within open,none,none --call $U6 --until $(( $(date +%s) + 300 )) sys kit"
+  "sudo -n $PROBE --within open,none,none,text --call $U6 --until $(( $(date +%s) + 300 )) sys kit"
 wait
 # Held for 6 seconds, the deadline 2 seconds away: the wait is cut at the deadline and the verb is not started.
 flock "$LOCK" sleep 6 &
 sleep 1
 DEADLINE=$(( $(date +%s) + 2 ))
 run "the deadline passes while waiting for the lock: expired, not started (76)" 76 \
-  "sudo -n $PROBE --within open,none,none --call $U7 --until $DEADLINE sys kit"
+  "sudo -n $PROBE --within open,none,none,text --call $U7 --until $DEADLINE sys kit"
 wait
 run "another program is not in the rule (sudo refuses, 1)" 1 \
   "sudo -n /bin/true"
@@ -93,7 +100,7 @@ fi
 for f in /var/log/auth.log /var/log/syslog /var/log/messages /var/log/secure; do
   [ -r "$f" ] && grep ' probe\[\| probe:' "$f" >> "$LOG.syslog" 2>/dev/null
 done
-for pair in "$U1:event=start" "$U1:event=done" "$U2:event=refused" "$U3:event=start" "$U4:event=refused" "$U5:event=expired" "$U6:event=start" "$U7:event=expired"; do
+for pair in "$U1:event=start" "$U1:event=done" "$U2:event=refused" "$U3:event=start" "$U4:event=refused" "$U5:event=expired" "$U6:event=start" "$U7:event=expired" "$U8:event=refused" "$U9:event=refused"; do
   id=${pair%%:*}; what=${pair#*:}
   if grep "$what" "$LOG.syslog" | grep -q "call=$id"; then
     echo "PASS: syslog has $what with call=$id"
@@ -105,6 +112,16 @@ if grep "call=$U6" "$LOG.syslog" | grep -q 'waited=[1-9]\|waited=[0-9]*\.[5-9]\|
   echo "PASS: the line of the call that waited says for how long (waited=...)"
 else
   echo "FAIL: the line of $U6 does not say how long it waited"; FAILED=1
+fi
+if grep "call=$U9" "$LOG.syslog" | grep -q 'text from the host'; then
+  echo "PASS: the refusal of plain against a marked verb says so (text from the host)"
+else
+  echo "FAIL: the refusal of $U9 does not say that the verb can carry text from the host"; FAILED=1
+fi
+if grep "call=$U8" "$LOG.syslog" | grep -q 'four tokens'; then
+  echo "PASS: the refusal of three tokens says four tokens"
+else
+  echo "FAIL: the refusal of $U8 does not say four tokens"; FAILED=1
 fi
 if grep "call=$U2" "$LOG.syslog" | grep -q 'above-approved'; then
   echo "PASS: the refusal line says above-approved"

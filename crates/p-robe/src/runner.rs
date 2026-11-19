@@ -7,9 +7,7 @@ use std::io::Read;
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
 
-use p_act::rating::Rating;
-
-use crate::table::format_rating;
+use crate::table::{Within, format_within};
 
 /// How long a verb may run before it is killed. The deadline bounds the start of
 /// an action, not its run (`doc/approvals.md`, R7), so the service bounds the run
@@ -51,7 +49,7 @@ pub trait Runner: Send + Sync {
     /// [`RunError::NotStarted`] when it certainly did not start, [`RunError::Lost`] when it may have.
     fn run(
         &self,
-        within: Rating,
+        within: Within,
         call_id: &str,
         until: i64,
         action: &str,
@@ -63,7 +61,7 @@ pub trait Runner: Send + Sync {
 #[must_use]
 pub fn argv(
     probe: &std::path::Path,
-    within: Rating,
+    within: Within,
     call_id: &str,
     until: i64,
     action: &str,
@@ -72,7 +70,7 @@ pub fn argv(
     let mut argv = vec![
         probe.display().to_string(),
         "--within".into(),
-        format_rating(within),
+        format_within(within),
         "--call".into(),
         call_id.into(),
         "--until".into(),
@@ -96,7 +94,7 @@ pub struct SudoRunner {
 impl Runner for SudoRunner {
     fn run(
         &self,
-        within: Rating,
+        within: Within,
         call_id: &str,
         until: i64,
         action: &str,
@@ -191,7 +189,7 @@ pub struct InProcess {
 impl Runner for InProcess {
     fn run(
         &self,
-        within: Rating,
+        within: Within,
         call_id: &str,
         until: i64,
         action: &str,
@@ -203,7 +201,7 @@ impl Runner for InProcess {
         }
         let mut words: Vec<OsString> = vec![
             "--within".into(),
-            format_rating(within).into(),
+            format_within(within).into(),
             "--call".into(),
             call_id.into(),
             "--until".into(),
@@ -223,7 +221,7 @@ impl Runner for InProcess {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use p_act::rating::{Damage, Disruption, Exposure};
+    use p_act::rating::{Damage, Disruption, Exposure, Rating};
 
     use std::os::unix::fs::PermissionsExt;
 
@@ -237,7 +235,7 @@ mod tests {
     }
 
     fn run(runner: &SudoRunner) -> Result<RunOutput, RunError> {
-        let within = Rating::new(Exposure::Open, Damage::None, Disruption::None);
+        let within = Within { rating: Rating::new(Exposure::Open, Damage::None, Disruption::None), host_text: false };
         runner.run(within, ID, 1_794_409_565, "sys kit", &[])
     }
 
@@ -283,7 +281,8 @@ mod tests {
 
     #[test]
     fn the_command_is_the_dispatcher_with_the_signed_rating_before_the_words() {
-        let within = Rating::new(Exposure::Internal, Damage::None, Disruption::Brief);
+        let within =
+            Within { rating: Rating::new(Exposure::Internal, Damage::None, Disruption::Brief), host_text: true };
         assert_eq!(
             argv(
                 std::path::Path::new("/usr/local/bin/probe"),
@@ -296,7 +295,7 @@ mod tests {
             [
                 "/usr/local/bin/probe",
                 "--within",
-                "internal,none,brief",
+                "internal,none,brief,text",
                 "--call",
                 ID,
                 "--until",

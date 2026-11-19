@@ -54,7 +54,7 @@ fn a_c1_control_and_a_bidirectional_mark_are_visible_in_every_output_and_in_none
     std::fs::write(&target, HOSTILE).unwrap();
     symlink(&target, plain.join("open/link")).unwrap();
     let read = probe(
-        &["--within", "open,none,none", "test", "read", &plain.join("open/link").display().to_string()],
+        &["--within", "open,none,none,text", "test", "read", &plain.join("open/link").display().to_string()],
         Some(&plain),
     );
     assert_eq!(read.status.code(), Some(0), "{}", text(&read.stderr));

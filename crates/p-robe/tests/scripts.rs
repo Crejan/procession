@@ -204,3 +204,40 @@ fn a3_does_not_look_in_a_directory_for_the_newest_file_and_is_valid_shell() {
         assert!(status.success(), "{script} is not valid shell");
     }
 }
+
+// -- the value of --within has four tokens everywhere (the dispatcher refuses three) ---------------------------
+
+#[test]
+fn every_within_in_the_scripts_has_four_tokens_except_the_one_check_that_it_is_refused() {
+    let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("proposals/stage1");
+    let mut three = Vec::new();
+    for entry in std::fs::read_dir(&dir).unwrap() {
+        let path = entry.unwrap().path();
+        if path.extension().is_none_or(|e| e != "sh") {
+            continue;
+        }
+        for line in std::fs::read_to_string(&path).unwrap().lines().filter(|l| !l.trim_start().starts_with('#')) {
+            let mut words = line.split_whitespace();
+            while let Some(word) = words.next() {
+                if word != "--within" {
+                    continue;
+                }
+                let value = words.next().unwrap_or("");
+                // A mention in a sentence ("the form without --within is ...") has no value of the form.
+                // (and a1's sudoers pattern, which is a wildcard: its `*` matches commas, so it admits four tokens too)
+                if !value.contains(',') || value.contains(['[', '*']) {
+                    continue;
+                }
+                let tokens = value.split(',').count();
+                if tokens == 3 {
+                    three.push(format!("{}: {line}", path.file_name().unwrap().to_string_lossy()));
+                } else {
+                    assert_eq!(tokens, 4, "{}: {line}", path.display());
+                    assert!(value.ends_with(",text") || value.ends_with(",plain"), "{}: {line}", path.display());
+                }
+            }
+        }
+    }
+    assert_eq!(three.len(), 1, "only the check that three tokens are refused may have three: {three:?}");
+    assert!(three[0].contains("$U8"), "{three:?}");
+}

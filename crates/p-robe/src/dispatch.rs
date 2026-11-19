@@ -23,7 +23,6 @@ use crate::lock::{self, Fault, Taken};
 use crate::rate::{self, Mode};
 use crate::rules::{ARG_MAX, IDENTITY_LEN_MAX, check_argument, is_token};
 use crate::table::{self, Availability, Env, Verb};
-use p_act::rating::Rating;
 
 pub const RC_UNAVAILABLE: u8 = 3;
 pub const RC_REFUSED: u8 = 64;
@@ -75,7 +74,7 @@ pub struct Caller {
 pub struct Admitted {
     pub identity: String,
     /// The rating the call was approved at (`--within`), if one was given.
-    pub within: Option<Rating>,
+    pub within: Option<table::Within>,
     /// The call's identifier (`--call`), if the service gave one.
     pub call: Option<String>,
     /// The call's deadline in seconds since the epoch (`--until`): the verb is not started at or after it.
@@ -135,10 +134,9 @@ pub fn admit(caller: &Caller, argv: &[OsString]) -> Result<Admitted, Refusal> {
     loop {
         match rest {
             [flag, value, tail @ ..] if flag == "--within" && within.is_none() => {
-                within = Some(
-                    table::parse_rating(value)
-                        .ok_or_else(|| refuse("bad --within: expected exposure,damage,disruption", who))?,
-                );
+                within = Some(table::parse_within(value).ok_or_else(|| {
+                    refuse("bad --within: expected exposure,damage,disruption,text|plain (four tokens)", who)
+                })?);
                 rest = tail;
             }
             [flag, value, tail @ ..] if flag == "--call" && call.is_none() => {
@@ -333,12 +331,18 @@ impl<'a> Dispatcher<'a> {
         // verb reads these, not the names again.
         let rated = rate::rate(call.verb, &call.args, Mode::Open)
             .map_err(|why| Stop::Refused(refuse(why.0, Some(&call.identity))))?;
-        if let Some(approved) = call.within.filter(|approved| !rated.rating.within(*approved)) {
+        if let Some(approved) = call.within.filter(|approved| !rated.rating.within(approved.rating)) {
             let reason = format!(
                 "above-approved: rated {} against approved {}",
                 table::format_rating(rated.rating),
-                table::format_rating(approved)
+                table::format_rating(approved.rating)
             );
+            return Err(Stop::Refused(refuse(reason, Some(&call.identity))));
+        }
+        // The mark binds like the rating: a verb whose output can carry text from the host is not run on an
+        // approval that said there would be none.
+        if call.verb.host_text && call.within.is_some_and(|approved| !approved.host_text) {
+            let reason = "above-approved: the verb's output can carry text from the host, approved as plain";
             return Err(Stop::Refused(refuse(reason, Some(&call.identity))));
         }
         let identity = call.identity.as_str();
@@ -1071,18 +1075,18 @@ mod tests {
 
     #[test]
     fn nothing_that_starts_with_a_dash_gets_past_the_flags() {
-        const FLAGS: [&str; 4] = ["--within", "secret,lasting,outage", "--call", CALL];
+        const FLAGS: [&str; 4] = ["--within", "secret,lasting,outage,text", "--call", CALL];
         fn with<'a>(rest: &[&'a str]) -> Vec<&'a str> {
             FLAGS.iter().copied().chain(rest.iter().copied()).collect()
         }
         for rest in [
             &["-x", "sys", "kit"][..],
             &["--help"],
-            &["--within", "open,none,none", "sys", "kit"],
+            &["--within", "open,none,none,text", "sys", "kit"],
             &["--call", CALL, "sys", "kit"],
             &["-", "sys", "kit"],
             &["sys", "-x"],
-            &["sys", "kit", "--within", "open,none,none"],
+            &["sys", "kit", "--within", "open,none,none,text"],
             &["rt", "irq", "--call", CALL],
             &["rt", "irq", "-"],
             &["--", "sys", "kit"],
@@ -1148,20 +1152,43 @@ mod tests {
 
     #[test]
     fn within_is_read_before_the_noun_and_only_there() {
-        let call = admit(&sudo("jan"), &words(&["--within", "internal,none,brief", "sys", "kit"])).unwrap();
-        assert_eq!(call.within, table::parse_rating("internal,none,brief"));
+        let call = admit(&sudo("jan"), &words(&["--within", "internal,none,brief,text", "sys", "kit"])).unwrap();
+        assert_eq!(call.within, table::parse_within("internal,none,brief,text"));
         assert_eq!(call.verb.label(), "sys kit");
         assert!(admit(&sudo("jan"), &words(&["sys", "kit"])).unwrap().within.is_none());
         for bad in [
             &["--within"][..],
             &["--within", "sys", "kit"],
             &["--within", "open,none", "sys", "kit"],
-            &["--within", "open,none,none"],
-            &["sys", "--within", "open,none,none"],
-            &["rt", "irq", "--within", "open,none,none"],
+            &["--within", "open,none,none,text"],
+            &["sys", "--within", "open,none,none,text"],
+            &["rt", "irq", "--within", "open,none,none,text"],
         ] {
             assert!(admit(&sudo("jan"), &words(bad)).is_err(), "{bad:?}");
         }
+    }
+
+    #[test]
+    fn within_has_four_tokens_and_a_marked_verb_is_not_run_on_an_approval_that_said_plain() {
+        // Three tokens are refused: one form everywhere, an old caller fails clearly and is not read as `plain`.
+        let three = refused(&["--within", "secret,lasting,outage", "sys", "kit"]);
+        assert!(three.err.contains("four tokens"), "{}", three.err);
+        for bad in ["open,none,none,", "open,none,none,yes", "open,none,none,Text", "open,none,none,text,plain"] {
+            refused(&["--within", bad, "sys", "kit"]);
+        }
+        // `sys kit` can carry text from the host: approved as `plain`, it is refused like a call above the rating.
+        let plain = refused(&["--within", "secret,lasting,outage,plain", "sys", "kit"]);
+        assert!(plain.err.contains("above-approved") && plain.err.contains("text from the host"), "{}", plain.err);
+        assert!(plain.lines[0].contains("reason="), "{:?}", plain.lines);
+        // As `text` it runs; a verb that is not marked runs on either (`test echo`).
+        assert_eq!(call(&sudo("jan"), &["--within", "secret,lasting,outage,text", "sys", "kit"]).rc, 0);
+        #[cfg(feature = "test-verbs")]
+        for mark in ["plain", "text"] {
+            let value = format!("open,none,none,{mark}");
+            assert_eq!(call(&sudo("jan"), &["--within", &value, "test", "echo"]).rc, 0, "{mark}");
+        }
+        // The call without `--within` is the person's own (not through the service) and is not held to a mark.
+        assert_eq!(call(&sudo("jan"), &["sys", "kit"]).rc, 0);
     }
 
     #[test]
@@ -1169,14 +1196,14 @@ mod tests {
         // A call that rates at or below what is approved runs, with the flag or without it.
         for argv in [
             &["sys", "kit"][..],
-            &["--within", "open,none,none", "sys", "kit"],
-            &["--within", "secret,lasting,outage", "sys", "kit"],
+            &["--within", "open,none,none,text", "sys", "kit"],
+            &["--within", "secret,lasting,outage,text", "sys", "kit"],
         ] {
             assert_eq!(call(&sudo("jan"), argv).rc, 0, "{argv:?}");
         }
         // The flag does not make a refused call run.
-        assert_eq!(call(&sudo("jan"), &["--within", "secret,lasting,outage", "run", "command"]).rc, RC_REFUSED);
-        assert_eq!(call(&sudo("jan"), &["--within", "secret,lasting,outage", "rt", "jitter"]).rc, RC_UNAVAILABLE);
+        assert_eq!(call(&sudo("jan"), &["--within", "secret,lasting,outage,text", "run", "command"]).rc, RC_REFUSED);
+        assert_eq!(call(&sudo("jan"), &["--within", "secret,lasting,outage,text", "rt", "jitter"]).rc, RC_UNAVAILABLE);
     }
 
     const CALL: &str = "3f2b6c1e-8a57-4d0e-9b1a-5c2e7d9f0a11";
@@ -1185,8 +1212,8 @@ mod tests {
     fn call_is_read_with_within_in_either_order_once_each_and_only_before_the_noun() {
         for argv in [
             &["--call", CALL, "sys", "kit"][..],
-            &["--call", CALL, "--within", "open,none,none", "sys", "kit"],
-            &["--within", "open,none,none", "--call", CALL, "sys", "kit"],
+            &["--call", CALL, "--within", "open,none,none,text", "sys", "kit"],
+            &["--within", "open,none,none,text", "--call", CALL, "sys", "kit"],
         ] {
             let call = admit(&sudo("jan"), &words(argv)).unwrap();
             assert_eq!(call.call.as_deref(), Some(CALL), "{argv:?}");

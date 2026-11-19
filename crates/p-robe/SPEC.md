@@ -200,7 +200,7 @@ installed beside `probe` by the roll-out. `sys kit` reports the path and, if it 
 
 **`host_text` through sudo (decided, to build).** A row whose output can carry text that is not the service's (`rt procs`,
 `rt irq`, `test read`, `sys kit`; later `run command`; not `rt jitter`) is marked `host_text: true` in the table, in
-`probe catalog` and in the tool's description. The request carries the mark, signed with the rating, and it goes through sudo as
+`probe catalog` and in the tool's `_meta` (`procession/host_text`, required, for every tool; `pact` words the warning, not the description). The request carries the mark, signed with the rating, and it goes through sudo as
 the **fourth token of `--within`**: `--within open,none,none,text|plain`. Four tokens are required: a value of three is refused
 (64) so that an old caller fails clearly, and the sudoers line, which has `--within *`, does not change. The dispatcher refuses (64) a call whose row is marked
 when the approved value is `plain`, as it refuses one above the approved rating.

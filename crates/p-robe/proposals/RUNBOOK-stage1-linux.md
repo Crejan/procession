@@ -97,6 +97,9 @@ programs have today, and what is not yet there is marked.
   that call at its `--until` check, which comes after its root check, so it ran as root under `probe-svc`; but
   **no verb has yet run as root through the rule** (the next run shows it). `a1` checks the rule with `visudo -cf`
   before it changes anything.
+- **The fourth token of `--within`** (`text` or `plain`: whether the verb's output may carry text that is not the
+  service's, signed in the request with the rating): the rule above is **unchanged**, since its `*` slots match commas too (`[a-z]*` is one letter and then anything), so the
+  four-token value passes the rule and the dispatcher does the checking: four tokens are required (three: 64), and a verb marked `host_text` is not run on `plain` (64). `a2` shows both.
 - **What the wildcards match, and what they do not pin.** `[a-z]*` is not "letters": it is one
   letter followed by **anything**, spaces included, and so is every `*` slot (the rating, the
   digits after `--until`, the noun and the verb). The rule pins only the prefix shape: the
@@ -202,9 +205,11 @@ checks, each with its own line:
 
 | Check | Passed means |
 |---|---|
-| `sys kit` through the rule | exit 0, and its answer says `"euid":0`: the dispatcher ran as root |
-| `test peak` with `--within open,none,none` | exit 64: the dispatcher rated it above the approved rating and refused |
-| `test peak` with `--within open,none,outage` | exit 0 |
+| `sys kit` through the rule, `--within open,none,none,text` | exit 0, and its answer says `"euid":0`: the dispatcher ran as root |
+| `test peak` with `--within open,none,none,plain` | exit 64: the dispatcher rated it above the approved rating and refused |
+| `test peak` with `--within open,none,outage,plain` | exit 0 |
+| `--within open,none,none` (three tokens) | exit 64: the value has four tokens, `text` or `plain` last; one form, never read as `plain` |
+| `sys kit` with `--within secret,lasting,outage,plain` | exit 64: `sys kit` can carry text from the host (`host_text`), and the approval said plain; refused like one above the rating |
 | `run command` | exit 64: refused by the dispatcher, even with the widest rating |
 | `--call` given twice | exit 64: refused by the dispatcher |
 | `sudo -n /usr/local/bin/probe sys kit` (no flags), and the form without `--until` | exit 1: sudo itself refuses, the form is not in the rule |
