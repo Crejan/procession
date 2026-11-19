@@ -160,7 +160,7 @@ fn a_status_answer_whose_lists_break_the_rule_is_refused_not_printed() {
     let fp = "SHA256:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
     let good = |names: &str, keys: &str, uncovered: &str| {
         format!(
-            r#"{{"schema_version":1,"type":"status","degraded":false,"pledges":0,"held":0,"delegations":0,"withdrawn":0,"blocked_persons":{names},"blocked_keys":{keys},"broker_certificate_path":"/x","broker_certificate_valid":true,"broker_certificate_days":3,"certificates_carried":0,"certificates_not_carried":0,"certificates_directory_refused":false,"uncovered":{uncovered}}}"#
+            r#"{{"schema_version":1,"type":"status","degraded":false,"pledges":0,"held":0,"delegations":0,"withdrawn":0,"broker_uid":501,"blocked_persons":{names},"blocked_keys":{keys},"broker_certificate_path":"/x","broker_certificate_valid":true,"broker_certificate_days":3,"certificates_carried":0,"certificates_not_carried":0,"certificates_directory_refused":false,"uncovered":{uncovered}}}"#
         )
     };
     let fine = good(r#"["jan"]"#, &format!(r#"["{fp}"]"#), r#"["eva:automatic"]"#);

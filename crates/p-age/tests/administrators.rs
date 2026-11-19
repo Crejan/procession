@@ -118,7 +118,8 @@ fn status_says_who_may_administer_and_page_says_when_it_runs_as_root() {
     let text = |s: &p_age::core::Status| {
         p_age::admin::render(&p_age::admin::Command::Status, &p_age::admin::Reply::Status(Box::new(s.clone()))).0
     };
-    assert!(text(&status(None)).contains("administrators: root only"));
+    assert!(text(&status(None)).contains("administrators: root and the broker's account (uid 501)"));
+    assert!(!text(&status(None)).contains("root only"));
     assert!(text(&status(Some(group(900)))).contains("administrators: group page-admins (gid 900)"));
     assert!(p_age::admin::recorded_as_root(true, 0));
     assert!(!p_age::admin::recorded_as_root(true, 501) && !p_age::admin::recorded_as_root(false, 0));
@@ -128,6 +129,7 @@ fn status_says_who_may_administer_and_page_says_when_it_runs_as_root() {
 fn base_status() -> p_age::core::Status {
     p_age::core::Status {
         administrators: None,
+        broker_uid: 501,
         keygen_unusable: None,
         degraded: None,
         pledges: 0,
@@ -181,4 +183,59 @@ fn linux_a_connection_of_the_brokers_own_user_is_refused_even_when_its_group_is_
     let admitted =
         p_age::admin::admitted_uid_for(&a, Some(&group(gid)), &mut throttle, &mut |l| lines.push(l.to_owned()));
     assert_eq!(admitted, None);
+}
+
+/// What one account can show of the order: at every step the state directory is the broker's own and exactly 0700
+/// until the socket has been given to the group, so that whatever mode the socket has meanwhile (the process umask's
+/// at `bind`: run this under `umask 000` too) no other user can reach it. It does **not** show another uid failing to
+/// connect (that is the owner's two-account check on Debian), and it cannot set a umask of its own (no libc here): the
+/// umask is the shell's.
+#[tokio::test]
+async fn the_directory_is_the_guard_at_every_step_of_bind() {
+    use p_age::admin::{BindStep, bind_for_watched};
+    let base = tempfile::tempdir_in(socket_base()).unwrap();
+    let dir = base.path().join("state");
+    std::fs::create_dir(&dir).unwrap();
+    // a 0710 left by a former run is made 0700 before anything is bound
+    std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o710)).unwrap();
+    let own_gid = std::fs::metadata(&dir).unwrap().gid();
+    let sock = dir.join("admin.sock");
+    let mut seen: Vec<(BindStep, u32, Option<u32>)> = Vec::new();
+    let mode = |p: &std::path::Path| std::fs::symlink_metadata(p).ok().map(|m| m.mode() & 0o7777);
+    let _listener = bind_for_watched(&dir, Some(&group(own_gid)), &mut |step| {
+        seen.push((step, mode(&dir).unwrap(), mode(&sock)));
+    })
+    .unwrap();
+    let steps: Vec<_> = seen.iter().map(|s| s.0).collect();
+    assert_eq!(
+        steps,
+        [
+            BindStep::DirectoryChecked,
+            BindStep::Bound,
+            BindStep::SocketPrivate,
+            BindStep::SocketToGroup,
+            BindStep::DirectoryToGroup,
+            BindStep::Checked
+        ]
+    );
+    for (step, dir_mode, socket_mode) in &seen {
+        match step {
+            BindStep::DirectoryToGroup | BindStep::Checked => assert_eq!(*dir_mode, 0o710, "{step:?}"),
+            _ => assert_eq!(*dir_mode, 0o700, "{step:?}: nobody else can enter yet"),
+        }
+        match step {
+            BindStep::DirectoryChecked => assert_eq!(*socket_mode, None),
+            BindStep::Bound => {}
+            BindStep::SocketPrivate => assert_eq!(*socket_mode, Some(0o600)),
+            _ => assert_eq!(*socket_mode, Some(0o660), "{step:?}"),
+        }
+    }
+    // a directory that is not the broker's own plain 0700 (or a link to one) refuses the start
+    let wide = base.path().join("wide");
+    std::fs::create_dir(&wide).unwrap();
+    std::fs::set_permissions(&wide, std::fs::Permissions::from_mode(0o755)).unwrap();
+    assert!(bind_for(&wide, None).is_err());
+    let link = base.path().join("link");
+    std::os::unix::fs::symlink(&dir, &link).unwrap();
+    assert!(bind_for(&link, None).is_err());
 }

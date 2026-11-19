@@ -56,6 +56,49 @@ pub fn open_dir_to_group(path: &Path, gid: u32) -> Result<(), PermError> {
     give_to_group(path, gid, 0o710, true)
 }
 
+/// The state directory as the socket needs it before anything is bound: a real directory (not a link), owned by the
+/// broker's user, mode exactly 0700. A 0710 left by a former run (this broker's own) is made 0700 first; anything
+/// else that is wrong is refused.
+pub fn seal_state_dir(path: &Path) -> Result<(), PermError> {
+    let why = |w: String| PermError::Group { path: path.display().to_string(), why: w };
+    let look = || std::fs::symlink_metadata(path).map_err(|e| why(format!("cannot look at it: {e}")));
+    let meta = look()?;
+    if !meta.file_type().is_dir() {
+        return Err(why("it is not a directory of its own (a link, or not a directory)".to_owned()));
+    }
+    if meta.uid() != p_ermit::peer::own_uid() {
+        return Err(why(format!("it is owned by user {}, not the broker's", meta.uid())));
+    }
+    let mode = meta.mode() & 0o7777;
+    if mode != 0o700 && mode != 0o710 {
+        return Err(why(format!("it is mode {mode:o}; it must be exactly 700")));
+    }
+    if mode == 0o710 {
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700))
+            .map_err(|e| why(format!("cannot make it 0700: {e}")))?;
+        let mode = look()?.mode() & 0o7777;
+        if mode != 0o700 {
+            return Err(why(format!("it is mode {mode:o} after making it 0700")));
+        }
+    }
+    Ok(())
+}
+
+/// The last look, after the socket and then the directory were given to the group: both are what was set.
+pub fn verify_group_access(dir: &Path, socket: &Path, gid: u32) -> Result<(), PermError> {
+    let why = |p: &Path, w: String| PermError::Group { path: p.display().to_string(), why: w };
+    let d = std::fs::symlink_metadata(dir).map_err(|e| why(dir, e.to_string()))?;
+    let s = std::fs::symlink_metadata(socket).map_err(|e| why(socket, e.to_string()))?;
+    let own = p_ermit::peer::own_uid();
+    if !d.file_type().is_dir() || d.uid() != own || d.gid() != gid || d.mode() & 0o7777 != 0o710 {
+        return Err(why(dir, "it is not the broker's directory, group 0710, on the last look".to_owned()));
+    }
+    if !s.file_type().is_socket() || s.uid() != own || s.gid() != gid || s.mode() & 0o7777 != 0o660 {
+        return Err(why(socket, "it is not the broker's socket, group 0660, on the last look".to_owned()));
+    }
+    Ok(())
+}
+
 /// Give `path` (the socket) to the group `gid`: group `gid`, mode 0660, checked afterwards on the file itself (not
 /// through a link).
 pub fn open_socket_to_group(path: &Path, gid: u32) -> Result<(), PermError> {

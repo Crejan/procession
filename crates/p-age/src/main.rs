@@ -200,6 +200,8 @@ fn run(path: &std::path::Path) -> Result<(), String> {
         for listener in listeners {
             tokio::spawn(listen(listener, acceptor.clone(), broker.clone(), limits.clone()));
         }
+        // Everything is bound and checked, and accepting has begun: from here the administrators' socket answers.
+        eprintln!("page: ready: the administrators' socket and the listeners are up");
         tokio::signal::ctrl_c().await.map_err(|e| e.to_string())
     })
 }

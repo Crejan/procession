@@ -224,6 +224,8 @@ struct ReplyWire {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     administrators_gid: Option<u32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    broker_uid: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     broker_certificate_path: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     broker_certificate_valid: Option<bool>,
@@ -259,6 +261,7 @@ impl Reply {
                 w.keygen_unusable = s.keygen_unusable.clone();
                 w.administrators_group = s.administrators.as_ref().map(|g| g.name.clone());
                 w.administrators_gid = s.administrators.as_ref().map(|g| g.gid);
+                w.broker_uid = Some(s.broker_uid);
                 let b = &s.broker_certificate;
                 w.broker_certificate_path = Some(b.path.clone());
                 w.broker_certificate_valid = Some(b.valid);
@@ -318,6 +321,7 @@ impl Reply {
                     blocked_persons: w.blocked_persons?,
                     blocked_keys: w.blocked_keys?,
                     keygen_unusable: w.keygen_unusable,
+                    broker_uid: w.broker_uid?,
                     administrators: match (w.administrators_group, w.administrators_gid) {
                         (Some(name), Some(gid)) => Some(AdminGroup { name, gid }),
                         (None, None) => None,
@@ -533,13 +537,44 @@ pub fn bind(state_dir: &Path) -> Result<UnixListener, BindError> {
     bind_for(state_dir, None)
 }
 
-/// As [`bind`]. With an administrators' group the directory is given to it for traversal (group, 0710) and the
-/// socket is group `gid` mode 0660, each **checked afterwards**; a broker that cannot do that does not start. The
-/// umask is 077 while the socket is made, so it is never open for an instant.
+/// The steps of [`bind_for`], in order, for a test that watches the modes at each.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BindStep {
+    /// The state directory was checked: the broker's own, a real directory, mode exactly 0700.
+    DirectoryChecked,
+    /// The socket exists: its mode is the process umask's.
+    Bound,
+    /// The socket is 0600.
+    SocketPrivate,
+    /// The socket is the group's, 0660.
+    SocketToGroup,
+    /// The directory is the group's, 0710.
+    DirectoryToGroup,
+    /// Both were looked at again and are what was set.
+    Checked,
+}
+
+/// As [`bind`]. The **directory is the guard**, in this order, and nothing is accepted before the last step:
+/// the state directory is checked (the broker's own, a real directory and not a link, mode exactly 0700: a 0710 left
+/// by a former run is made 0700 first); the socket is bound (it carries the process umask's mode for an instant, inside
+/// a directory no one else can enter) and made 0600; with a group, the socket is given to it (0660) and **only then**
+/// the directory (0710); at the end both are looked at again, and any difference refuses the start.
 pub fn bind_for(state_dir: &Path, group: Option<&AdminGroup>) -> Result<UnixListener, BindError> {
+    bind_for_watched(state_dir, group, &mut |_| {})
+}
+
+/// As [`bind_for`], calling `watch` after each step.
+pub fn bind_for_watched(
+    state_dir: &Path,
+    group: Option<&AdminGroup>,
+    watch: &mut dyn FnMut(BindStep),
+) -> Result<UnixListener, BindError> {
     let path = state_dir.join(SOCKET_NAME);
     let shown = path.display().to_string();
     let io = |source| BindError::Io { path: shown.clone(), source };
+    let refuse = |e: crate::perm::PermError| BindError::Group(e.to_string());
+    crate::perm::seal_state_dir(state_dir).map_err(refuse)?;
+    watch(BindStep::DirectoryChecked);
     if path.exists() {
         if StdStream::connect(&path).is_ok() {
             return Err(BindError::InUse(shown));
@@ -547,12 +582,17 @@ pub fn bind_for(state_dir: &Path, group: Option<&AdminGroup>) -> Result<UnixList
         std::fs::remove_file(&path).map_err(io)?;
     }
     let listener = UnixListener::bind(&path).map_err(io)?;
+    watch(BindStep::Bound);
     std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).map_err(io)?;
+    watch(BindStep::SocketPrivate);
     if let Some(g) = group {
-        crate::perm::open_socket_to_group(&path, g.gid)
-            .and_then(|()| crate::perm::open_dir_to_group(state_dir, g.gid))
-            .map_err(|e| BindError::Group(e.to_string()))?;
+        crate::perm::open_socket_to_group(&path, g.gid).map_err(refuse)?;
+        watch(BindStep::SocketToGroup);
+        crate::perm::open_dir_to_group(state_dir, g.gid).map_err(refuse)?;
+        watch(BindStep::DirectoryToGroup);
+        crate::perm::verify_group_access(state_dir, &path, g.gid).map_err(refuse)?;
     }
+    watch(BindStep::Checked);
     Ok(listener)
 }
 
@@ -720,7 +760,7 @@ pub fn render(command: &Command, reply: &Reply) -> (String, u8) {
             out.push_str(&format!("blocked keys: {}\n", list(&s.blocked_keys)));
             out.push_str(&match &s.administrators {
                 Some(g) => format!("administrators: group {} (gid {})", crate::util::shown(&g.name), g.gid),
-                None => "administrators: root only".to_owned(),
+                None => format!("administrators: root and the broker's account (uid {})", s.broker_uid),
             });
             let b = &s.broker_certificate;
             match (b.valid, b.days_left) {

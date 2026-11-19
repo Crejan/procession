@@ -77,7 +77,7 @@ pub struct Config {
     #[serde(default)]
     pub certificates: Option<PathBuf>,
     /// A group whose members may use `admin.sock` as themselves (so that the register says who blocked). Absent: the
-    /// broker's own user and root only. Resolved to a gid once at start; unknown, group 0 and the broker's own primary
+    /// broker's own user and root. Resolved to a gid once at start; unknown, group 0 and the broker's own primary
     /// group are refused. Linux only. In stage 3 the name comes from the site file.
     #[serde(default)]
     pub administrators_group: Option<String>,

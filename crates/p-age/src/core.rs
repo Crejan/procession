@@ -191,9 +191,11 @@ pub struct Status {
     /// Why `ssh-keygen` cannot be used, if it cannot (`p_act`'s `Keygen::system`): the broker can then verify and sign
     /// nothing.
     pub keygen_unusable: Option<String>,
-    /// The group whose members may use `admin.sock` besides root, if one is configured: `administrators: root only`
-    /// otherwise.
+    /// The group whose members may use `admin.sock` besides root, if one is configured; otherwise root and the broker's
+    /// own account are admitted.
     pub administrators: Option<AdminGroup>,
+    /// The user id the broker runs as (what `page status` names when there is no group).
+    pub broker_uid: u32,
 }
 
 /// What `page status` says of the broker's own certificate.
@@ -1196,6 +1198,7 @@ impl Core {
             blocked_keys: self.register.blocked_keys(),
             keygen_unusable: self.crypto.keygen_usable().err(),
             administrators: self.administrators.clone(),
+            broker_uid: p_ermit::peer::own_uid(),
             broker_certificate: {
                 let secs = u64::try_from(unix(now)).unwrap_or(0);
                 let path = self.crypto.broker_certificate_file().display().to_string();
