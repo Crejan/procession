@@ -140,7 +140,7 @@ impl Service {
     }
 
     fn ask(&mut self, call: &Call, call_sig: &str, rating: Rating) -> (Request, Answer) {
-        let request = Request::compose(call, call_sig, rating).expect("request");
+        let request = Request::compose(call, call_sig, rating, false).expect("request");
         let sig = sign_request(&self.signer, &request).expect("sign request");
         let submit = Submit::new(request.clone(), &sig).expect("submit");
         write_message(&mut self.stream, &Message::Submit(submit), ClearancePolicy::Refused).expect("write");
@@ -324,7 +324,7 @@ fn a_kill_with_a_dialog_open_leaves_received_and_the_next_start_records_lost() {
     make_keys(&mut server);
     let (agent, _) = agent(&mut server, &[]);
     let (c, sig) = call(&agent, 20, &["pid=20"], 300);
-    let request = Request::compose(&c, &sig, INTERNAL).expect("request");
+    let request = Request::compose(&c, &sig, INTERNAL, false).expect("request");
     let mut service = Service::connect(&server);
     let request_sig = sign_request(&service.signer, &request).expect("sign request");
     let submit = Submit::new(request.clone(), &request_sig).expect("submit");
