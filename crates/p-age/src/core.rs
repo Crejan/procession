@@ -196,6 +196,12 @@ pub struct Status {
     pub administrators: Option<AdminGroup>,
     /// The user id the broker runs as (what `page status` names when there is no group).
     pub broker_uid: u32,
+    /// Where the directory part of the view came from and when (`directory.json`); decides nothing.
+    pub directory: Option<crate::site::DirectoryInfo>,
+    /// What the two files say that the other does not know (ignored or empty, never refused).
+    pub directory_sets: crate::site::Mismatch,
+    /// Why there is no `directory.json` in the view (missing or refused on its own), if that is so.
+    pub directory_problem: Option<String>,
 }
 
 /// What `page status` says of the broker's own certificate.
@@ -393,10 +399,11 @@ impl Core {
         log: Box<dyn LogSink>,
         trust: Trust,
     ) -> Core {
+        let trust_now = trust.now;
         let result = crypto.check_broker_certificate(&trust.site_ca, trust.now);
         report_broker_certificate(None, &result);
         let broker_cert = BrokerCertState { site_ca: trust.site_ca, last_check: trust.now, result };
-        Core {
+        let mut core = Core {
             site,
             settings,
             register,
@@ -410,6 +417,35 @@ impl Core {
             certs: None,
             administrators: None,
             broker_cert,
+        };
+        core.report_directory(trust_now);
+        core
+    }
+
+    /// What the two input files say that the other does not know, and why there is no `directory.json` if there is
+    /// none: one line on standard error and one in the audit log, when the view is made (a later reload that changes
+    /// the sets writes one again; `page load` is not built). Nothing here refuses anything.
+    fn report_directory(&mut self, now: SystemTime) {
+        if let Some(problem) = self.site.directory_problem() {
+            eprintln!("page: nobody is active: {problem}");
+        }
+        let m = self.site.mismatch().clone();
+        if !m.is_empty() {
+            let result = format!(
+                "directory-sets:names={},groups={},empty={}",
+                m.names_not_in_site.len(),
+                m.groups_not_in_site.len(),
+                m.groups_without_members.len()
+            );
+            self.log.write(&LogEntry {
+                at: stamp(now),
+                host: "-".to_owned(),
+                service: "-".to_owned(),
+                person: None,
+                request: None,
+                delegation: None,
+                result,
+            });
         }
     }
 
@@ -1199,6 +1235,9 @@ impl Core {
             keygen_unusable: self.crypto.keygen_usable().err(),
             administrators: self.administrators.clone(),
             broker_uid: p_ermit::peer::own_uid(),
+            directory: self.site.directory().cloned(),
+            directory_sets: self.site.mismatch().clone(),
+            directory_problem: self.site.directory_problem().map(str::to_owned),
             broker_certificate: {
                 let secs = u64::try_from(unix(now)).unwrap_or(0);
                 let path = self.crypto.broker_certificate_file().display().to_string();
@@ -1362,11 +1401,12 @@ mod tests {
     }
 
     fn site() -> Arc<Site> {
-        // `off` is not enabled and so has no keys; `jan` has keys 1 to 4 and `eva` 9 to 12.
+        // `off` is in the site file and not active, so it is not enabled; `jan` has keys 1 to 4, `eva` 9 to 12 and
+        // `off` 17 to 20.
         let person = |name: &str, first: u8| {
             let row = |n: u8| format!(r#"{{"key":"{}"}}"#, key_line(first + n));
             format!(
-                r#"{{"name":"{name}","enabled":true,"groups":["ops"],"keys":{{"confirmed":{},"automatic":{},"delegation":{},"connection":{}}}}}"#,
+                r#"{{"name":"{name}","keys":{{"confirmed":{},"automatic":{},"delegation":{},"connection":{}}}}}"#,
                 row(0),
                 row(1),
                 row(2),
@@ -1374,12 +1414,14 @@ mod tests {
             )
         };
         let json = format!(
-            r#"{{"v":1,"persons":[{},{{"name":"off","enabled":false}},{}],"hosts":[{{"name":"a.example","key":"{}"}}]}}"#,
+            r#"{{"v":1,"persons":[{},{},{}],"hosts":[{{"name":"a.example","key":"{}"}}],"groups":["ops"]}}"#,
             person("jan", 1),
+            person("off", 17),
             person("eva", 9),
             key_line(30)
         );
-        Arc::new(Site::from_json(&json).unwrap())
+        let directory = r#"{"v":1,"source":"model","as_of":"2026-11-19T10:00:00Z","active":["jan","eva"],"members":{"ops":["eva","jan"]}}"#;
+        Arc::new(Site::from_texts(&json, directory, std::time::SystemTime::now()).unwrap())
     }
 
     struct Fixture {
@@ -1593,6 +1635,45 @@ mod tests {
         assert_eq!((conditions[0].code, conditions[0].name), (7, "ssh-keygen-unusable"));
         // with a usable one there is none
         assert_eq!(fixture(5).core.status(now(0)).keygen_unusable, None);
+    }
+
+    #[test]
+    fn the_audit_log_gets_one_line_when_the_two_files_disagree_and_none_when_they_agree() {
+        let make = |directory: &str| {
+            let log = MemoryLog::default();
+            let site = {
+                let row = |n: u8| format!(r#"{{"key":"{}"}}"#, key_line(n));
+                let json = format!(
+                    r#"{{"v":1,"persons":[{{"name":"jan","keys":{{"confirmed":{},"automatic":{},"delegation":{},"connection":{}}}}}],"hosts":[],"groups":["ops","new"]}}"#,
+                    row(1),
+                    row(2),
+                    row(3),
+                    row(4)
+                );
+                Arc::new(Site::from_texts(&json, directory, std::time::SystemTime::now()).unwrap())
+            };
+            let core = Core::new(
+                site,
+                Settings::default(),
+                Register::default(),
+                None,
+                Arc::new(Fake::default()),
+                Box::new(log.clone()),
+                Trust { site_ca: PublicKey::parse(&key_line(40)).unwrap(), now: now(0) },
+            );
+            (core, log)
+        };
+        let (core, log) = make(
+            r#"{"v":1,"source":"model","as_of":"2026-11-19T10:00:00Z","active":["jan","x"],"members":{"ops":["jan"],"old":[]}}"#,
+        );
+        let entries = log.entries();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].result, "directory-sets:names=1,groups=1,empty=1");
+        assert_eq!(core.status(now(0)).directory_sets.groups_without_members, ["new"]);
+        let (_, quiet) = make(
+            r#"{"v":1,"source":"model","as_of":"2026-11-19T10:00:00Z","active":["jan"],"members":{"ops":["jan"],"new":[]}}"#,
+        );
+        assert!(quiet.entries().is_empty());
     }
 
     #[test]
