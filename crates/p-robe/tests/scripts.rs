@@ -241,3 +241,113 @@ fn every_within_in_the_scripts_has_four_tokens_except_the_one_check_that_it_is_r
     assert_eq!(three.len(), 1, "only the check that three tokens are refused may have three: {three:?}");
     assert!(three[0].contains("$U8"), "{three:?}");
 }
+
+// -- Stage B scripts: b1, b2, b3, undo-b and what they share ---------------------------------------------------
+
+fn stage1(name: &str) -> std::path::PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR")).join("proposals/stage1").join(name)
+}
+
+/// Runs `body` in `sh` with b-common.sh sourced, and returns (success, stdout).
+fn with_common(body: &str) -> (bool, String) {
+    let script = format!(". '{}'\n{body}", stage1("b-common.sh").display());
+    let out = std::process::Command::new("sh").arg("-c").arg(script).output().unwrap();
+    (out.status.success(), String::from_utf8(out.stdout).unwrap())
+}
+
+#[test]
+fn the_stage_b_scripts_are_valid_shell_and_guess_no_path() {
+    for name in ["b-common.sh", "b1-prepare-person.sh", "b2-service.sh", "b3-agent-calls.sh", "undo-b.sh"] {
+        let path = stage1(name);
+        let status = std::process::Command::new("sh").arg("-n").arg(&path).status().unwrap();
+        assert!(status.success(), "{name} is not valid shell");
+        let text = std::fs::read_to_string(&path).unwrap();
+        for guess in ["ls -t", "deps/", "target/debug/", "jq ", "python"] {
+            assert!(!text.contains(guess), "{name} guesses or needs something it should not: {guess}");
+        }
+    }
+    // The executables are found from cargo's own output, by the helper that is tested above.
+    let common = std::fs::read_to_string(stage1("b-common.sh")).unwrap();
+    assert!(common.contains("find-artifact.sh") && common.contains("--message-format=json"));
+}
+
+#[test]
+fn every_script_that_changes_the_host_says_what_to_do_next_and_what_passing_looks_like() {
+    for (name, next) in [("b1-prepare-person.sh", "b2-service.sh"), ("b2-service.sh", "b3-agent-calls.sh")] {
+        let text = std::fs::read_to_string(stage1(name)).unwrap();
+        assert!(text.contains(next), "{name} does not name the next step");
+        assert!(text.contains("pass ") && text.contains("stop "), "{name}");
+    }
+    let b3 = std::fs::read_to_string(stage1("b3-agent-calls.sh")).unwrap();
+    assert!(b3.contains("ALL PASSED") && b3.contains("undo-b.sh"));
+}
+
+#[test]
+fn undo_b_knows_every_mark_that_b1_to_b3_write() {
+    let undo = std::fs::read_to_string(stage1("undo-b.sh")).unwrap();
+    let mut marks = std::collections::BTreeSet::new();
+    for name in ["b1-prepare-person.sh", "b2-service.sh", "b3-agent-calls.sh"] {
+        for line in std::fs::read_to_string(stage1(name)).unwrap().lines() {
+            let line = line.trim_start();
+            if let Some(rest) = line.strip_prefix("mark ").or_else(|| line.split("&& mark ").nth(1)) {
+                marks.insert(rest.split_whitespace().next().unwrap().trim_matches('"').to_string());
+            }
+        }
+    }
+    assert!(marks.len() >= 10, "{marks:?}");
+    for mark in &marks {
+        // `ADDED_$member` is read as a pattern.
+        let key = if mark.starts_with("ADDED_") { "ADDED_" } else { mark.as_str() };
+        assert!(undo.contains(key), "undo-b.sh does not know {mark}");
+    }
+}
+
+#[test]
+fn the_marker_round_trips_and_the_public_key_is_taken_from_pledges_list() {
+    let dir = std::env::temp_dir().join(format!("probe-bscripts-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let marker = dir.join("marker");
+    let (ok, out) = with_common(&format!(
+        "MARKER='{}'; mark A 1; mark PARENT_MADE /x/y; mark PARENT_MADE /x; marked A && echo yes; marked B || echo no; marker_value PARENT_MADE",
+        marker.display()
+    ));
+    assert!(ok && out.lines().collect::<Vec<_>>() == ["yes", "no", "/x"], "{out}");
+    // The list as `pledge keys list` prints it: purpose, fingerprint, key and its comment.
+    let list = "delegation SHA256:aaa  ssh-ed25519 AAAAdel pledge delegation\\nconfirmed SHA256:bbb  ssh-ed25519 AAAAconf pledge confirmed\\nautomatic SHA256:ccc  ssh-ed25519 AAAAauto pledge automatic";
+    let (ok, out) = with_common(&format!(
+        "L=$(printf '{list}'); public_key_of \"$L\" confirmed; public_key_of \"$L\" automatic; public_key_of \"$L\" nothing; echo end"
+    ));
+    assert!(ok);
+    assert_eq!(
+        out.lines().collect::<Vec<_>>(),
+        ["ssh-ed25519 AAAAconf pledge confirmed", "ssh-ed25519 AAAAauto pledge automatic", "end"]
+    );
+}
+
+#[test]
+fn the_settings_and_pledge_configuration_the_scripts_write_are_read_by_the_programs_that_read_them() {
+    // /etc/probe.json, by probe's own reader (`Config::parse`: unknown members, member given twice, types).
+    let (ok, json) = with_common("probe_settings_json alice testhost /run/pledge-alice/service.sock 1000");
+    assert!(ok);
+    let config = p_robe::config::Config::parse(&json).unwrap_or_else(|e| panic!("{e}\n{json}"));
+    assert_eq!(
+        (config.person.as_str(), config.pledge_uid, config.listen.as_str()),
+        ("alice", Some(1000), "127.0.0.1:8765")
+    );
+    assert_eq!(config.pledge_socket, Path::new("/run/pledge-alice/service.sock"));
+    assert_eq!(config.confirmed_key, Path::new("/etc/probe/alice-confirmed.pub"));
+    // pledge's config.json: valid JSON with the members p-ledge's `Config` has (checked there against the real
+    // pledge by the author's rehearsal: it started, made the socket directory 0710 and the socket 0660 of the group).
+    let (ok, json) = with_common(
+        "pledge_config_json alice testhost 'ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA' pledge-svc http://127.0.0.1:8765/mcp",
+    );
+    assert!(ok);
+    let value: serde_json::Value = serde_json::from_str(&json).unwrap();
+    assert_eq!(value["person"], "alice");
+    assert_eq!(value["service_group"], "pledge-svc");
+    assert_eq!(value["hosts"][0]["host"], "testhost");
+    assert_eq!(value["services"][0]["host"], "testhost");
+    assert_eq!(value["services"][0]["url"], "http://127.0.0.1:8765/mcp");
+    let members: Vec<&str> = value.as_object().unwrap().keys().map(String::as_str).collect();
+    assert_eq!(members, ["hosts", "person", "service_group", "services"]);
+}

@@ -30,7 +30,8 @@ service over HTTP. Nothing in it has been run on Linux. Terms are those of
 | `pact`'s HTTP client | p-act's, `ureq` 3 (`pact::http::HttpTransport`), merged; its socket tests never ran over a real socket either |
 | the cross run through `SudoRunner` | **run and passed** by the owner on 2026-11-18 at `2a38839` (Debian 13, unprivileged LXC container; writer: p-act): `tests/stage1_sudo.rs`, 1.13 s |
 | the cross run over real HTTP with the real `pact` | **run and passed** by the owner on 2026-11-18 at `51920c2` (Debian 13, unprivileged LXC, as root, `PROBE_PLEDGE_BIN`/`PROBE_PACT_BIN` set by hand): `tests/stage1_http.rs`, 0.26 s. Shown for the first time: the HTTP transport on a real TCP port; the real `pact` (ureq) reading the stream; pledge and the service starting `/usr/bin/ssh-keygen` under the `Keygen` rule (OpenSSH 10.0p2); `pact`'s bundle and peer checks. **Not shown:** the verb through sudo (not run with `PROBE_STAGE1_SUDO`); a wait long enough for a keepalive comment (15 s) or the 45 s idle timeout; the service as its own account and unit; a person at the dialog; the account split and the group on `service.sock` (everything ran as root) |
-| the scripts of Stage A (`stage1/*.sh`) | **run and passed** by the owner on 2026-11-18 at `2a38839`, unedited: a1, a2 (23 PASS lines), a3 ("PASSED (exit 0)"). a3 has since changed (it names the test executable from cargo's JSON; `ac1fcba`) and is not yet run in that form |
+| the scripts of Stage B (`stage1/b1`, `b2`, `b3`, `undo-b.sh`) | **written, `sh -n` and the pieces tested here** (the config and settings they write are read by the real readers; the pledge part was rehearsed with the real `pledge` on macOS); **never run on Linux** |
+| the scripts of Stage A (`stage1/a1` to `a3`, `undo.sh`) | **run and passed** by the owner on 2026-11-18 at `2a38839`, unedited: a1, a2 (23 PASS lines), a3 ("PASSED (exit 0)"). a3 has since changed (it names the test executable from cargo's JSON; `ac1fcba`) and is not yet run in that form |
 
 So the runbook has two stages. **Stage A runs today on a Linux machine**: the
 sudo rule, the dispatcher as root, the audit lines, and the whole cross run
@@ -169,7 +170,13 @@ programs have today, and what is not yet there is marked.
 | lines in syslog or the journal (tag `probe`, facility `auth`) | the dispatcher, on every call | not undone: they are history |
 | files in `/var/tmp` (`probe-stage1-run`, `probe-stage1.check.log*`) | `a2`, `a3` | `a3` removes its own; `undo.sh` the rest |
 | temporary files under `/tmp` for pledge's state and sockets | the test | the test removes them when it passes; on a failure `rm -rf /tmp/s1-*` |
-| Stage B only: `/etc/probe/` (service key and certificate), `/etc/probe.json`, the units `probe-serve.service`, `probe-setup.service` and `probe-setup.timer`, pledge's state in your home, a TCP port on 127.0.0.1 | Stage B steps | the undo lines of Stage B |
+| Stage B: an Ed25519 host key if the host had none (`/etc/ssh/ssh_host_ed25519_key{,.pub}`) | `b1` | `undo-b.sh`, only if `b1` made it |
+| Stage B: the group `pledge-svc` and the memberships of the person and `probe-svc` | `b1` | `undo-b.sh`, only what `b1` added |
+| Stage B: `/run/pledge-<person>` (the person's, 0700; pledge makes it 0710 of the group), pledge's state `~/.local/state/pledge` (0700) with `config.json` (0600) and, once pledge runs, its keys and record | `b1`, pledge | `undo-b.sh` |
+| Stage B: `/etc/probe/` (the person's two public keys; the service's key and its certificate), `/etc/probe.json` (root, 0644) | `b1` (the directory), `b2` | `undo-b.sh` |
+| Stage B: the units `probe-serve.service`, `probe-setup.service`, `probe-setup.timer` in `/etc/systemd/system`, enabled | `b2` | `undo-b.sh` |
+| Stage B: the agent's bundle `~/probe-stage1-bundle` (0600, the person's) and `/var/tmp/probe-stage1.*` helper files, the marker `/var/tmp/probe-stage1.b-state` | `b3`, `b1` | `undo-b.sh` |
+| a TCP port on 127.0.0.1 (8765) | `probe serve` | the unit stops |
 
 `undo.sh` is safe to run at any time and does nothing to what is not on this list.
 
@@ -283,14 +290,58 @@ sh stage1/undo.sh
 
 ## 5. Stage B: pledge as the person, `probe serve` as its own account, `pact`, over HTTP
 
-`probe serve` now listens (`hyper`; the owner fetched the crates, section 6).
-`pact`'s HTTP client is merged too (p-act's): all of B1 to B5 can be followed. Nothing of Stage B has been run on Linux, and the
-HTTP transport has never been run over TCP by its author.
+Stage B is **scripts**, like Stage A, from one checkout (`CHECKOUT` below is its path, e.g. `/home/alice/CHECKOUT`; the user who owns it
+is **the person**: he builds it and runs pledge; the examples say `alice`). The scripts find `pledge` and `pact` from cargo's own
+messages (`--message-format=json`, `stage1/find-artifact.sh`), build them as the person, and print the checkout's commit first; nothing is guessed.
+Each prints PASS or FAIL lines, STOPs where the rest would mean nothing, and ends with the next command. Everything they change is in section 3,
+and `undo-b.sh` takes it away (only what `b1` made).
+
+**Where pledge's socket directory is, and how the service's account reaches it.** pledge accepts its socket directory only if it is owned by the person
+and mode 0700 (0710 once it has been given to a group); `/run/user/<uid>` exists only for a login session, which `su` in a container does not make. So `b1`
+(root) makes **`/run/pledge-<person>`**, owned by the person, 0700, and a group **`pledge-svc`** with the person and `probe-svc` in it; pledge's
+`config.json` has `"service_group": "pledge-svc"` (p-ledge, `config.rs`, `serve.rs`), and pledge itself then gives the directory to that group at **0710** and `service.sock` **0660**, so
+the service's account can search the directory and write the socket and nothing else of pledge's (`agent.sock` and `control.sock` stay the person's:
+they drop another user). The person must be in `pledge-svc` **in the login that starts pledge** (`su - alice`: a fresh login; an old shell does not have it),
+else pledge's `chown` to the group is refused. `/run` is a tmpfs: after a reboot run `b1` again (after `undo-b.sh`). *Rehearsed with the real `pledge` on macOS with another group: the
+configuration `b1` writes is accepted, the directory becomes 0710 and the socket 0660 of the group, `keys create` asks in pledge's terminal, and `keys list` has the form `b2` reads.*
+
+### What you do, in order
+
+0. **Before:** Stage A passed (`a1`, `a2`, `a3`), and `undo.sh` was not run since. The person's cargo works in a login shell. `systemd` runs (`/run/systemd/system` exists).
+1. As root: `sh stage1/b1-prepare-person.sh CHECKOUT`. It checks everything first (Stage A in place, no leftovers, the host name's characters, cargo), then makes: an Ed25519 host key if the host has none, the group and the memberships, `/run/pledge-<person>`, `/etc/probe`,
+   pledge's state directory and `config.json` (the person, this host and its key, the service `probe` at `http://127.0.0.1:8765/mcp`, the group), and **prints the two things you do by hand**. Passed: `PASS: prepared ...`. Did not pass: `STOP: ...` with the reason; nothing after it was changed.
+2. **By hand, terminal 1** (leave it open; it is pledge's terminal and the person's dialogs appear in it): the command `b1` printed, `su - alice -c "<pledge> serve --state-dir ... --socket-dir /run/pledge-alice"`. Passed: a warning, then
+   `pledge: serving. SSH agent socket: ...`. Did not pass: it names the directory, its mode or the group (then `alice` is not in `pledge-svc` in that login).
+3. **By hand, terminal 2**, as alice (`su - alice`): the three commands `b1` printed, `pledge keys create delegation`, `... confirmed`, `... automatic` (with the same `--state-dir` and `--socket-dir`). Each prints a public key line after you answer **`y`** to its question **in terminal 1**.
+4. As root: `sh stage1/b2-service.sh CHECKOUT`. It checks that pledge serves (three sockets; `service.sock` `660 alice pledge-svc`, the directory `710`; `probe-svc` can reach it), copies the person's confirmed and automatic public keys from `pledge keys list` to `/etc/probe/`, checks `sys kit` says `ssh_keygen_usable`
+   (**the first run of the `Keygen` rule through the rule and sudo on this host**), runs `probe setup` (the service's key and its 30-day certificate by the host key), writes `/etc/probe.json` (0644), installs the three units, runs `systemd-analyze verify`, starts the renewal timer and `probe-serve`, and checks that it listens on `127.0.0.1:8765` and reaches pledge.
+   Passed: `ALL PASSED`. Did not pass: the FAIL or STOP line and, for the unit, the end of `systemctl status`.
+5. As root: `sh stage1/b3-agent-calls.sh CHECKOUT`, **with terminal 1 in front of you**. It starts an agent (answer `y` in terminal 1), hands the bundle to the person (0600, his), and runs the real `pact` as him against the service. It says before each call what to answer in terminal 1:
+
+   | Call | In terminal 1 | Passed means |
+   |---|---|---|
+   | `pact tools` | nothing | `sys_kit`, `test_echo`, `test_peak`, `test_read` are listed |
+   | `sys_kit` | nothing (automatic) | `done`; its answer says `"euid":0`: the verb ran as root through the sudo rule |
+   | `test_echo ["hello"]` | nothing (automatic) | `done`, the argument in the answer |
+   | `test_peak` | **`y`**, then **`y`** (the presence check) | `done` |
+   | `test_peak` | **`n`** | `declined`, and the verb did not run |
+   | `test_read ["/etc/hostname"]` | **`y`**, **`y`** | `done`, a `file` record (a file outside the test's open place is rated secret, so it is asked) |
+   | `test_peak`, the long one | **wait 60 seconds**, then **`y`**, **`y`** | `done` after at least 50 s: `pact` gives up on a silent stream after 45 s, so the service's keepalive comments arrived |
+
+   Then it checks, by call identifier: `pledge history --verify`; pledge's record has `approved` or `declined` for each call, received from `probe-svc`'s uid; the journal has the dispatcher's start and done for the calls that ran and nothing for the declined one; the service's own line says the same outcome.
+   Passed: `ALL PASSED`.
+6. **Undo:** Ctrl-C in terminal 1, then as root `sh stage1/undo-b.sh` (Stage A is undone by `undo.sh`, separately).
+
+**What Stage B shows when it passes, and what it does not.** *Shown:* the service as its own account under systemd, certified by the host key, listening over TCP; `pact` as an agent through it; pledge as the person with real dialogs, and the group on `service.sock` (a peer that is not the person) with the peer lookup; the verbs through the sudo rule from the unit;
+the renewal unit; the three logs agreeing by call identifier. *Not shown:* a broker or a site CA (stage 2), TLS, a person on another machine, anything off `127.0.0.1`, a service in a sandboxed unit (the unit has no sandboxing: it needs nesting in a container), `prover` (`rt irq` and `rt procs` need `/usr/local/bin/prover`; `sys kit` warns while it is missing).
+
+### Reference: the steps by hand
+The same steps as commands, for when a script stops and you want to do the step yourself. (The scripts are the form that was meant to be run.)
 
 ### B1. Pledge, as `alice`
 
 ```
-pledge serve --state-dir /home/alice/.local/state/pledge --socket-dir /run/user/1000/pledge --known-hosts /home/alice/.ssh/known_hosts
+pledge serve --state-dir /home/alice/.local/state/pledge --socket-dir /run/pledge-alice --known-hosts /home/alice/.ssh/known_hosts
 ```
 
 **A note on the umask, for every file below that a program judges.** On Debian an account
@@ -300,7 +351,7 @@ is group-writable (0664), and `pledge` and `probe` **refuse** a settings file th
 file below is created with its mode written out (`install -m`, or `chmod` straight after), never left to the
 umask. (A container's `su -s /bin/sh probe-svc -c umask` printed 0002 on the owner's run.)
 
-(`1000` is alice's uid; `id -u alice`.) Before the first start, as `alice`, put
+(`1000` is alice's uid; `id -u alice`; the directory `/run/pledge-alice` is the one `b1` makes.) Before the first start, as `alice`, put
 `/home/alice/.local/state/pledge/config.json` in place with mode 0600 (`install -m 0600 -d
 /home/alice/.local/state/pledge` first for the directory; then write the file and `chmod 600` it, or
 `install -m 0600 config.json /home/alice/.local/state/pledge/config.json` from a file you made), with:
@@ -329,7 +380,7 @@ and `service.sock` one after another and prints that line only after all three. 
 or `pledge agents start` in the gap fails with `pledge serve is not running (no answer on its control socket)`
 though nothing is wrong: run it again once the line is there. Keep `pledge serve` in a terminal of its own (its
 dialogs are answered there). Passed: the line `pledge: serving. SSH agent socket: ...`, and `ls -l
-/run/user/1000/pledge` shows `service.sock` as `srw-rw----` with group
+/run/pledge-alice` shows `service.sock` as `srw-rw----` with group
 `pledge-svc`. Did not pass: it refuses to start naming the directory or its
 mode.
 
@@ -441,7 +492,7 @@ text and a byte order mark; the reading is `p_act::settings`'s, the same for all
   "confirmed_key": "/etc/probe/alice-confirmed.pub",
   "automatic_key": "/etc/probe/alice-automatic.pub",
   "service_key": "/etc/probe/service-key",
-  "pledge_socket": "/run/user/1000/pledge/service.sock",
+  "pledge_socket": "/run/pledge-alice/service.sock",
   "pledge_uid": 1000,
   "used_dir": "/var/lib/probe/used",
   "listen": "127.0.0.1:8765",

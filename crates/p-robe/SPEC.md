@@ -219,6 +219,12 @@ output** with `"clipped": {"<field>": <full length in bytes>}` on its record (a 
 the bytes `test read` returns, has the row's own limit and is data in a field, never spliced into anything). So a worst-case thread record is about 3 KB and **about 340 of them still
 fill the 1 MiB answer**: on a host with a process built to do that the answer is truncated, its trailer has the true counts, and that is the bound, not a fault.
 
+**The double escape (decided: it stays for stage 1).** The dispatcher trusts no tool: it does not recognise a tool's own escape form as already clean (a dispatcher that did would be a
+parser of untrusted input with a reason to let things through). So **what an agent sees** of a character the tool already escaped is its form with the backslash doubled: a thread name that `prover` wrote as `\u{202e}` arrives
+as `\\u{202e}`. **Reversing takes two steps**: `p_ermit::text::unescape` once for the dispatcher's layer, then again for the tool's. **The two counts differ by construction**: the trailer's `escaped_records` (and `clipped_records`) is the dispatcher's own, of the records in which *it* found
+something the rule refuses; the `tool_escaped_records` and `tool_clipped_records` are the tool's claim, of what *it* escaped or cut. A tool that did its work leaves the dispatcher nothing to escape (its count is 0 and the tool's is not), and
+`tool_missed: true` says the dispatcher had to escape or cut something the tool did not. If the doubling hurts in use, the way to revisit it is a **row-declared field type that the dispatcher validates strictly**, not a general "looks escaped already".
+
 **What the dispatcher does not check:** that the action and parameters are the approved ones; it checks the rating (it re-rates a call's paths where it opens
 the files), the deadline, the call identifier and, with the above, `host_text`. That is accepted (`doc/approvals.md`, the trust table).
 
