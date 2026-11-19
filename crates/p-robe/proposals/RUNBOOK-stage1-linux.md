@@ -57,7 +57,7 @@ programs have today, and what is not yet there is marked.
   `git bundle create probe.bundle integration` (on the Mac) and `git clone
   probe.bundle checkout` (on the Linux machine). The runbook assumes the
   checkout is at `/home/alice/CHECKOUT`.
-- Build, as `alice`, in the checkout:
+- Build, as `alice`, in the checkout (**only needed for the by-hand forms, `stage1_http` and `pact`: `a1` and `a3` and `b1` to `b3` build what they use themselves**):
   ```
   cargo build --workspace --features p-robe/test-verbs,p-act/pact
   ```
@@ -164,7 +164,7 @@ programs have today, and what is not yet there is marked.
 | Change | By | Undone by |
 |---|---|---|
 | the account `probe-svc` and its home `/var/lib/probe-svc` | `a1-prepare.sh` | `undo.sh` (`userdel -r`; not if the account existed before) |
-| `/usr/local/bin/probe` (root, 0755) | `a1-prepare.sh` | `undo.sh` |
+| `/usr/local/bin/probe` (root, 0755): **the build of the checkout's commit, made by `a1` itself** | `a1-prepare.sh` | `undo.sh` |
 | `/var/lib/probe/locks` (root, 0755), `/var/lib/probe/used` (probe-svc, 0700) | `a1-prepare.sh` | `undo.sh` (removes `/var/lib/probe`) |
 | `/etc/sudoers.d/probe-svc` (0440) | `a1-prepare.sh`, after `visudo -cf` | `undo.sh` |
 | lines in syslog or the journal (tag `probe`, facility `auth`) | the dispatcher, on every call | not undone: they are history |
@@ -194,14 +194,15 @@ check anything unless a1 passed), but a wrong order would only confuse the outpu
 ### A1. Prepare
 
 ```
-sh stage1/a1-prepare.sh /home/alice/CHECKOUT/target/debug/probe
+sh stage1/a1-prepare.sh /home/alice/CHECKOUT
 ```
 
-Passed: the last lines are `PASS: /etc/sudoers.d/probe-svc installed (visudo -cf
-accepted it)` and `PASS: prepared`. Did not pass: it prints `FAIL:` and why
-(a missing `logger`, `visudo`, `ssh-keygen`, a leftover file from before, or
-`visudo -cf` refusing the rule, in which case **nothing was put into
-`/etc/sudoers.d`**). Run `undo.sh` before trying again.
+**It takes the checkout, not a binary** (a file as the argument is refused with a line that says so). a1 **builds `probe` with `--features test-verbs` itself**, as the checkout's owner in a login shell,
+takes the path of the binary from cargo's own messages (`stage1/find-artifact.sh`) and installs that: no binary is named by hand, so none can be an old one. It checks everything first, **the build included**
+(the tools `visudo`, `logger`, `ssh-keygen`, `useradd`; cargo for the owner; no leftover `/etc/sudoers.d/probe-svc`, `/usr/local/bin/probe` or `/var/lib/probe`), and only then changes the machine; the rule is checked with `visudo -cf` first.
+**If it stops after its first change it takes back what it did** (an EXIT trap: the account if it made it, the program, `/var/lib/probe`, the rule, the temporary file, the state directory if it made that), so a stopped run leaves nothing behind.
+Passed: the last lines are `PASS: /etc/sudoers.d/probe-svc installed, and the whole sudoers configuration checks` and `PASS: prepared: probe built from <commit> is installed.` Did not pass: it prints `STOP:` or `FAIL:` and why
+(a missing `logger`, `visudo`, `ssh-keygen`, a build that failed, a leftover from before, or `visudo -cf` refusing the rule, in which case **nothing was put into `/etc/sudoers.d`**). Run `undo.sh` before trying again if it says a leftover exists.
 
 ### A2. Check the rule
 
@@ -314,7 +315,7 @@ it that is not absolute, has `..`, or is near the top of the file system. Guards
 ### What you do, in order
 
 0. **Before:** Stage A passed (`a1`, `a2`, `a3`), and `undo.sh` was not run since. The person's cargo works in a login shell. `systemd` runs (`/run/systemd/system` exists).
-1. As root: `sh stage1/b1-prepare-person.sh CHECKOUT`. It checks everything first (Stage A in place, no leftovers, the host name's characters, cargo), then makes: an Ed25519 host key if the host has none, the group and the memberships, `/run/pledge-<person>`, `/etc/probe`,
+1. As root: `sh stage1/b1-prepare-person.sh CHECKOUT`. It checks everything first (**the probe installed in `/usr/local/bin` is the build of this checkout's commit**, asked through the sudo rule with `sys kit`, whose record now says `built_from`; if not, it stops and says to run `undo.sh`, build, and run `a1` again; Stage A in place, no leftovers, the host name's characters, cargo), then makes: an Ed25519 host key if the host has none, the group and the memberships, `/run/pledge-<person>`, `/etc/probe`,
    pledge's state directory and `config.json` (the person, this host and its key, the service `probe` at `http://127.0.0.1:8765/mcp`, the group), and **prints the two things you do by hand**. Passed: `PASS: prepared ...`. Did not pass: `STOP: ...` with the reason; nothing after it was changed.
 2. **By hand, terminal 1** (leave it open; it is pledge's terminal and the person's dialogs appear in it): the command `b1` printed, `su - alice -c "<pledge> serve --state-dir ... --socket-dir /run/pledge-alice"`. Passed: a warning, then
    `pledge: serving. SSH agent socket: ...`. Did not pass: it names the directory, its mode or the group (then `alice` is not in `pledge-svc` in that login).

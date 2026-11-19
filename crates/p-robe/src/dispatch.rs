@@ -739,6 +739,11 @@ mod tests {
         assert!(lines.iter().any(|l| l.contains("\"type\":\"installation\"") && l.contains("\"identity\":\"jan\"")));
         assert!(lines.iter().any(|l| l.contains("\"noun\":\"rt\",\"verb\":\"jitter\",\"status\":\"unavailable\"")));
         assert!(lines.last().unwrap().contains("\"type\":\"summary\""));
+        // The commit this binary was built from, which a script compares with the checkout's.
+        assert!(
+            lines.iter().any(|l| l.contains("\"type\":\"installation\"") && l.contains("\"built_from\":\"")),
+            "{lines:?}"
+        );
         // The program that makes and checks signatures: the fixed path, and whether it can be used.
         assert!(
             lines
@@ -1131,6 +1136,7 @@ mod tests {
                 "SSH_CONNECTION",
                 "PROBE_TEST_SANDBOX",
                 "PROBE_TEST_PROVER",
+                "PROBE_BUILT_FROM",
                 "CARGO_MANIFEST_DIR",
             ]
             .iter()
