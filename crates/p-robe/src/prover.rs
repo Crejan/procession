@@ -749,19 +749,24 @@ mod tests {
         );
     }
 
+    /// A `procs` object of the tool's shape with one thread of this name, and `extra` members after `findings`' place.
+    fn tool_object(comm: &str, extra: &str) -> String {
+        format!(
+            "{{\"schema_version\": 1, \"subcommand\": \"procs\", \"host\": \"h\", \"started_at\": \"t\", \"mode\": \"observe\", \"cost\": \"light\", \"unreadable\": [], \"records\": [{{\"type\":\"thread\",\"pid\":1,\"comm\":{comm}}}], \"restored\": []{extra}, \"findings\": []}}"
+        )
+    }
+
     #[test]
     fn what_a_tool_passes_through_unchecked_is_made_visible_by_the_dispatcher_and_counted_as_its_own_work() {
         // A thread's name chosen by a local user, at depth, in a record the tool did not escape; and a finding's
         // evidence. The tool says it escaped nothing (its counts are 0) and claims `escaped` on a record.
-        let object = golden("procs").replacen("\"cyclic (app)\"", "\"cyc\\u0085lic\\u202e (app)\"", 1).replacen(
-            "\"findings\"",
-            "\"escaped_records\": 0, \"clipped_records\": 0, \"findings\"",
-            1,
-        );
+        // The object is this test's own (not a golden file, which the tool's authors may change): one thread whose name
+        // has a C1 control and a bidi override, and the tool's own counts, both 0.
+        let object = tool_object("\"cyc\\u0085lic\\u202e (app)\"", ", \"escaped_records\": 0, \"clipped_records\": 0");
         assert!(object.contains("\\u202e"), "the object was changed");
         let (lines, cause) = ran(&PROCS, &Fake::code(1, &object), &[]);
         assert_eq!(cause, None, "{lines:?}");
-        let thread = lines.iter().find(|l| l.contains("cyc")).expect("the record");
+        let thread = lines.iter().find(|l| l.contains("\"thread\"")).expect("the record");
         let record: serde_json::Value = serde_json::from_str(thread).unwrap();
         assert_eq!(record["comm"], "cyc\\u{85}lic\\u{202e} (app)", "{thread}");
         assert_eq!(record["escaped"], true);
@@ -775,7 +780,7 @@ mod tests {
         );
         assert_eq!(trailer["tool_missed"], true);
         // A tool that says nothing of its own counts gets no such members; one that missed nothing says so.
-        let (clean, _) = ran(&PROCS, &Fake::code(1, &golden("procs")), &[]);
+        let (clean, _) = ran(&PROCS, &Fake::code(1, &tool_object("\"cyclic\"", "")), &[]);
         let trailer: serde_json::Value = serde_json::from_str(clean.last().unwrap()).unwrap();
         assert_eq!((trailer["escaped_records"].as_u64(), trailer.get("tool_missed")), (Some(0), None));
     }
