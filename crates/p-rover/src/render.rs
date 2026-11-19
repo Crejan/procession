@@ -4,12 +4,15 @@ use std::fmt::Write;
 
 use serde_json::Value;
 
-use crate::report::{Report, Severity};
+use crate::report::Report;
 
+/// One value as text. Strings are already through the rule of `sanitize` (nothing in them can
+/// act on a terminal), so the only quoting left is for readability: a string with a space or a
+/// quote, or an empty one, is put in double quotes with `"` as `\"`; a backslash stays as the
+/// escape form wrote it.
 fn scalar(v: &Value) -> String {
     match v {
-        Value::String(s) if s.is_empty() => "\"\"".into(),
-        Value::String(s) if s.contains(' ') => format!("{s:?}"),
+        Value::String(s) if s.is_empty() || s.contains([' ', '"']) => format!("\"{}\"", s.replace('"', "\\\"")),
         Value::String(s) => s.clone(),
         other => other.to_string(),
     }
@@ -33,18 +36,21 @@ pub fn text(r: &Report) -> String {
         }
         o.push('\n');
     }
-    let mut findings: Vec<_> = r.findings.iter().collect();
-    findings.sort_by_key(|f| std::cmp::Reverse(f.severity));
-    for f in findings {
-        let tag = match f.severity {
-            Severity::Info => "INFO",
-            Severity::Warn => "WARN",
-            Severity::Crit => "CRIT",
-        };
-        let subject = serde_json::to_value(&f.subject).unwrap_or(Value::Null);
-        let _ = writeln!(o, "[{tag}] {} {} - {}", f.id, scalar(&subject), f.recommendation);
-        for m in &f.evidence {
-            let _ = writeln!(o, "    {} = {}", m.name, scalar(&m.value));
+    // The findings as written: after the rule.
+    let mut findings: Vec<Value> = r.findings_json.iter().filter_map(|f| serde_json::from_str(f.get()).ok()).collect();
+    let rank = |f: &Value| match f["severity"].as_str() {
+        Some("crit") => 0,
+        Some("warn") => 1,
+        _ => 2,
+    };
+    findings.sort_by_key(rank);
+    for f in &findings {
+        let tag = ["CRIT", "WARN", "INFO"][rank(f)];
+        let id = f["id"].as_str().unwrap_or("?");
+        let text = f["recommendation"].as_str().unwrap_or("");
+        let _ = writeln!(o, "[{tag}] {id} {} - {text}", scalar(&f["subject"]));
+        for m in f["evidence"].as_array().into_iter().flatten() {
+            let _ = writeln!(o, "    {} = {}", m["name"].as_str().unwrap_or("?"), scalar(&m["value"]));
         }
     }
     o

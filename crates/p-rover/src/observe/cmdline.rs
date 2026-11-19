@@ -93,7 +93,7 @@ pub fn replay_grub(etc: &std::path::Path) -> Declared {
     let mut vars: BTreeMap<&str, String> = KEYS.iter().map(|k| (*k, String::new())).collect();
     let (mut assignments, mut read_files) = (Vec::new(), Vec::new());
     for f in files {
-        let Ok(text) = std::fs::read_to_string(&f) else { continue };
+        let Ok(text) = p_roc::text::read_to_string(&f) else { continue };
         read_files.push(shown(&f));
         for line in text.lines() {
             let Some((key, mut value)) = assignment(line) else { continue };
@@ -253,9 +253,9 @@ pub fn run(env: &Env) -> Result<Report, Error> {
         });
     }
 
-    let read = |p: &str| std::fs::read_to_string(env.root.proc.join(p)).ok().map(|s| s.trim().to_string());
+    let read = |p: &str| p_roc::text::read_to_string(env.root.proc.join(p)).ok().map(|s| s.trim().to_string());
     let version = read("sys/kernel/version");
-    let realtime = std::fs::read_to_string(env.root.sys.join("kernel/realtime")).is_ok_and(|s| s.trim() == "1");
+    let realtime = p_roc::text::read_to_string(env.root.sys.join("kernel/realtime")).is_ok_and(|s| s.trim() == "1");
     report.push(&Record::Kernel {
         release: read("sys/kernel/osrelease"),
         preempt_rt: realtime || version.as_deref().is_some_and(|v| v.contains("PREEMPT_RT")),

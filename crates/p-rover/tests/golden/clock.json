@@ -5,6 +5,8 @@
   "started_at": "2026-11-06T21:20:00Z",
   "mode": "observe",
   "cost": "light",
+  "escaped_records": 0,
+  "clipped_records": 0,
   "unreadable": [],
   "records": [
     {"type":"chrony_tracking","fields":{"leap_status":"Normal","reference_id":"0A000001 (ntp.lab)","stratum":"3","system_time":"0.000001234 seconds fast of NTP time"}},

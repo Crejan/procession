@@ -134,7 +134,7 @@ struct CState {
 }
 
 fn first_line(p: &std::path::Path) -> Option<String> {
-    std::fs::read_to_string(p).ok().map(|s| s.trim().to_string())
+    p_roc::text::read_to_string(p).ok().map(|s| s.trim().to_string())
 }
 
 /// `lan0-TxRx-3` is queue 3.
@@ -263,13 +263,14 @@ pub fn run(env: &Env, args: &Args) -> Result<Report, Error> {
     }
 
     // Process and threads.
-    let status = std::fs::read_to_string(env.root.proc.join(args.pid.to_string()).join("status")).unwrap_or_default();
+    let status =
+        p_roc::text::read_to_string(env.root.proc.join(args.pid.to_string()).join("status")).unwrap_or_default();
     let vm = task::parse_vm(&status);
     let main = threads.iter().find(|t| t.tid == args.pid).unwrap_or(&threads[0]);
     report.push(&Record::Process {
         pid: args.pid,
         comm: main.stat.comm.clone(),
-        exe: task::exe(&env.root, args.pid).map(|p| p.display().to_string()),
+        exe: task::exe(&env.root, args.pid).map(|p| p_roc::text::from_os(p.as_os_str())),
         uid: main.status.uid,
         vm_rss_kb: vm.map(|v| v.rss_kb),
         vm_lck_kb: vm.map(|v| v.locked_kb),
@@ -288,7 +289,7 @@ pub fn run(env: &Env, args: &Args) -> Result<Report, Error> {
         other_shown += usize::from(!(rt || is_critical));
         listed += 1;
         let sc_path = env.root.proc.join(args.pid.to_string()).join("task").join(t.tid.to_string()).join("syscall");
-        let sc = match std::fs::read_to_string(&sc_path) {
+        let sc = match p_roc::text::read_to_string(&sc_path) {
             Ok(s) => task::parse_syscall(&s),
             Err(_) => {
                 syscall_denied += 1;

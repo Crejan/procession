@@ -110,5 +110,5 @@ fn hostname() -> String {
         return "unknown".into();
     }
     let end = buf.iter().position(|b| *b == 0).unwrap_or(buf.len());
-    String::from_utf8_lossy(&buf[..end]).into_owned()
+    p_roc::text::from_bytes(&buf[..end])
 }

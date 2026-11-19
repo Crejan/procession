@@ -9,6 +9,7 @@ use serde_json::Value;
 use serde_json::value::RawValue;
 
 use crate::env::Env;
+use crate::sanitize;
 
 /// Version of the JSON layout; bumped on an incompatible change.
 pub const SCHEMA_VERSION: u32 = 1;
@@ -118,6 +119,10 @@ pub struct Report {
     pub mode: Mode,
     /// Light or heavy.
     pub cost: Cost,
+    /// Records, findings and `unreadable` entries that had a string escaped (see `sanitize`).
+    pub escaped_records: usize,
+    /// Records and findings that had a field cut.
+    pub clipped_records: usize,
     /// Every source the run could not read.
     pub unreadable: Vec<Unreadable>,
     /// Flat typed records, one per observed object; written with their fields in struct order.
@@ -127,8 +132,12 @@ pub struct Report {
     pub values: Vec<Value>,
     /// What a probe restored; empty for observe.
     pub restored: Vec<Value>,
-    /// The findings.
+    /// The findings, as the program built them (not serialized: see `findings_json`).
+    #[serde(skip)]
     pub findings: Vec<Finding>,
+    /// The findings as written: after the rule, with their flags. Filled by [`Report::sanitize`].
+    #[serde(rename = "findings")]
+    pub findings_json: Vec<Box<RawValue>>,
 }
 
 impl Report {
@@ -142,20 +151,61 @@ impl Report {
             started_at: rfc3339(env.clock.now()),
             mode: Mode::Observe,
             cost,
+            escaped_records: 0,
+            clipped_records: 0,
             unreadable: Vec::new(),
             records: Vec::new(),
             values: Vec::new(),
             restored: Vec::new(),
             findings: Vec::new(),
+            findings_json: Vec::new(),
         }
     }
 
-    /// Appends a record (an enum tagged with `type`).
+    /// Appends a record (an enum tagged with `type`), after the rule for strings from outside.
     pub fn push(&mut self, record: &impl Serialize) {
-        let raw = serde_json::to_string(record).ok().and_then(|s| RawValue::from_string(s).ok());
-        let raw = raw.unwrap_or_else(|| RawValue::NULL.to_owned());
-        self.values.push(serde_json::from_str(raw.get()).unwrap_or(Value::Null));
-        self.records.push(raw);
+        let text = serde_json::to_string(record).unwrap_or_else(|_| "null".into());
+        let (text, flags) = sanitize::json(sanitize::record_type(&text), &text);
+        self.escaped_records += usize::from(flags.escaped);
+        self.clipped_records += usize::from(!flags.clipped.is_empty());
+        let value: Value = serde_json::from_str(&text).unwrap_or(Value::Null);
+        self.records.push(RawValue::from_string(text).unwrap_or_else(|_| RawValue::NULL.to_owned()));
+        // An odd name is information: say it, once per escaped name field.
+        for (key, raw) in &flags.escaped_values {
+            if let Some(subject) = odd_subject(&value, key, raw) {
+                self.findings.push(Finding {
+                    id: "odd-characters",
+                    severity: Severity::Info,
+                    subject,
+                    evidence: vec![Metric::new("field", key), Metric::new("value", raw)],
+                    recommendation: "this name contains characters that do not display as written (control or direction characters, or bytes that are not UTF-8); it is shown escaped".into(),
+                    changes: Vec::new(),
+                });
+            }
+        }
+        self.values.push(value);
+    }
+
+    /// Applies the rule to what is not a record: the host name, the `unreadable` entries and the
+    /// findings (written to `findings_json`). Called once, by `observe::finish`.
+    pub fn sanitize(&mut self) {
+        let host = sanitize::clean(&self.host, 255);
+        self.escaped_records += usize::from(host.flagged > 0);
+        self.host = host.text;
+        for u in &mut self.unreadable {
+            let (s, r) = (sanitize::clean(&u.source, 512), sanitize::clean(&u.reason, 512));
+            self.escaped_records += usize::from(s.flagged + r.flagged > 0);
+            self.clipped_records += usize::from(s.clipped.is_some() || r.clipped.is_some());
+            (u.source, u.reason) = (s.text, r.text);
+        }
+        for f in &self.findings {
+            let text = serde_json::to_string(f).unwrap_or_else(|_| "null".into());
+            let (text, flags) = sanitize::json("finding", &text);
+            self.escaped_records += usize::from(flags.escaped);
+            self.clipped_records += usize::from(!flags.clipped.is_empty());
+            self.findings_json
+                .push(RawValue::from_string(sanitize::pretty(&text, 4)).unwrap_or_else(|_| RawValue::NULL.to_owned()));
+        }
     }
 
     /// Appends the unreadable sources of a scan.
@@ -206,6 +256,20 @@ pub fn rfc3339(t: SystemTime) -> String {
     let m = if mp < 10 { mp + 3 } else { mp - 9 };
     let y = yoe + era * 400 + i64::from(m <= 2);
     format!("{y:04}-{m:02}-{d:02}T{:02}:{:02}:{:02}Z", rem / 3600, rem % 3600 / 60, rem % 60)
+}
+
+/// Who an odd name belongs to: the thread, IRQ or interface of the record it was found in.
+fn odd_subject(record: &Value, key: &str, raw: &str) -> Option<Subject> {
+    if !matches!(key, "comm" | "name" | "iface" | "interface") {
+        return None;
+    }
+    if let Some(tid) = record.get("tid").and_then(Value::as_i64) {
+        return Some(Subject::Thread { tid: i32::try_from(tid).ok()?, comm: raw.to_string() });
+    }
+    if let Some(irq) = record.get("irq").and_then(Value::as_u64) {
+        return Some(Subject::Irq { irq: u32::try_from(irq).ok()?, name: raw.to_string() });
+    }
+    Some(Subject::Interface { name: raw.to_string() })
 }
 
 #[cfg(test)]

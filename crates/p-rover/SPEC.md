@@ -139,6 +139,24 @@ records and 100 findings (`procs`); at most `--top` unflagged IRQ records,
 100 flagged ones and 100 IRQ findings (`irq`); the summary record says
 `truncated`.
 
+**Strings from outside.** Every string `prover` writes, in text and in JSON,
+passes through `p_ermit::text` (the workspace rule): a control character or
+bidirectional mark becomes visible literal text (`\u{202e}`), a backslash
+is doubled, a byte that is not UTF-8 becomes `\x{ff}` (names, command lines and
+link targets are read as bytes, so one bad byte no longer makes a thread
+unreadable). The escape is in the string's content, so a JSON parser does not
+turn it back into the character. A record or finding with an escaped string has
+`"escaped": true`; one with a cut field has `"clipped": {"<field>": <full length
+in bytes>}`; both members are absent otherwise. The top level counts them:
+`escaped_records` (records, findings and `unreadable` entries) and
+`clipped_records`. The finding `odd-characters` (info) names an escaped thread,
+IRQ or interface name. Bounds count **characters of the escaped text**: comm 64;
+interface, IRQ, driver, tty and wait-channel names 128; paths and a process's
+command line 4096; a kernel stack frame, a sysctl, `chronyc` or ethtool value 256;
+a journal line 1024; the kernel and bootloader command lines 8192; the host name
+255; error text in `unreadable` 512; any other field 4096. The text form quotes a
+value with a space or quote in double quotes and prints nothing raw.
+
 ## Configuration
 
 `/etc/p-rover.toml`, every key optional; without it every subcommand runs

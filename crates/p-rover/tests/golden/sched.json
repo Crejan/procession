@@ -5,6 +5,8 @@
   "started_at": "2026-11-06T21:20:00Z",
   "mode": "observe",
   "cost": "light",
+  "escaped_records": 0,
+  "clipped_records": 0,
   "unreadable": [],
   "records": [
     {"type":"thread","pid":10,"tid":10,"comm":"cyclic (app)","kthread":false,"policy":"fifo","rtprio":50,"cpu":2,"cpus_allowed":"0-3","run_ms_per_s":900.0,"wait_ms_per_s":100.0,"slices_per_s":1000.0,"switches_per_s":100.0,"voluntary_per_s":20.0,"involuntary_per_s":80.0,"migrations_per_s":0.0,"polling":false,"busy":true},

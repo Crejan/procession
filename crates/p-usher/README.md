@@ -219,6 +219,17 @@ functional_users = ["build"]
 alice = "alice.smith@example.org"   # wins over the recipient template
 ```
 
+### Strings from outside
+
+A thread name, a path, a user name, the host name and the text of an error from
+a mail relay are not p-usher's own. In the log, in e-mails (subject and body)
+and in the metrics file they are shown through the rule of `p-ermit`: control
+characters and direction marks become visible text such as `\u{202e}`, a byte
+that is not UTF-8 becomes `\x{ff}`, a backslash is doubled, and each is cut to
+a bound (thread name 64 characters, names 255, paths 4096, error text 512). A
+thread named to break an e-mail header or to rewrite a terminal line shows as
+what it is.
+
 ### The configuration file is checked
 
 The file is read by `p-ermit`. p-usher runs with privileges, so a config

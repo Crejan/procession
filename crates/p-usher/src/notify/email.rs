@@ -152,7 +152,7 @@ impl EmailNotifier {
             let _ = crate::sys::set_normal(0);
             for mail in rx {
                 if let Err(e) = mailer.send(&mail) {
-                    log_warn!("email to {}: {e:#}", mail.to);
+                    log_warn!("email to {}: {}", crate::text::clean(&mail.to, crate::text::NAME_MAX), crate::text::clean_error(&e));
                 }
             }
         })?;

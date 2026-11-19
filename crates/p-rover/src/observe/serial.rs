@@ -80,24 +80,24 @@ pub fn run(env: &Env) -> Result<Report, Error> {
         .map(|c| c.tokens().iter().filter_map(|t| t.strip_prefix("console=").map(str::to_string)).collect())
         .unwrap_or_default();
     report.push(&Record::Cmdline { console });
-    let active = std::fs::read_to_string(env.root.sys.join("class/tty/console/active")).unwrap_or_default();
+    let active = p_roc::text::read_to_string(env.root.sys.join("class/tty/console/active")).unwrap_or_default();
     report.push(&Record::ActiveConsole { ttys: active.split_whitespace().map(str::to_string).collect() });
 
-    match std::fs::read_to_string(env.root.proc.join("tty/driver/serial")) {
+    match p_roc::text::read_to_string(env.root.proc.join("tty/driver/serial")) {
         Ok(text) => text.lines().filter_map(parse_port).for_each(|r| report.push(&r)),
         Err(e) => report.unreadable([Unreadable::new("proc/tty/driver/serial", &e)]),
     }
 
     let tty_dir = env.root.sys.join("class/tty");
     let mut names: Vec<String> = std::fs::read_dir(&tty_dir)
-        .map(|rd| rd.filter_map(|e| Some(e.ok()?.file_name().to_string_lossy().into_owned())).collect())
+        .map(|rd| rd.filter_map(|e| Some(p_roc::text::entry_name(&e.ok()?))).collect())
         .unwrap_or_default();
     names.retain(|n| n.starts_with("ttyS"));
     names.sort();
     for tty in names {
         let dir = tty_dir.join(&tty);
         let Ok(link) = std::fs::read_link(dir.join("device")) else { continue };
-        let read = |f: &str| std::fs::read_to_string(dir.join(f)).ok().map(|s| s.trim().to_string());
+        let read = |f: &str| p_roc::text::read_to_string(dir.join(f)).ok().map(|s| s.trim().to_string());
         report.push(&Record::Sysfs {
             pci: link
                 .components()

@@ -125,7 +125,7 @@ struct Snap {
 
 fn wchan(env: &Env, tgid: i32, tid: i32) -> String {
     let p = env.root.proc.join(tgid.to_string()).join("task").join(tid.to_string()).join("wchan");
-    let w = std::fs::read_to_string(p).unwrap_or_default();
+    let w = p_roc::text::read_to_string(p).unwrap_or_default();
     let w = w.trim();
     if w == "0" { String::new() } else { w.to_string() }
 }
@@ -133,7 +133,7 @@ fn wchan(env: &Env, tgid: i32, tid: i32) -> String {
 /// The kernel stack of a task (root only), cut to `lines`.
 fn stack(env: &Env, tgid: i32, tid: i32, lines: usize) -> Option<Vec<String>> {
     let p = env.root.proc.join(tgid.to_string()).join("task").join(tid.to_string()).join("stack");
-    let text = std::fs::read_to_string(p).ok()?;
+    let text = p_roc::text::read_to_string(p).ok()?;
     Some(text.lines().map(|l| l.trim().to_string()).filter(|l| !l.is_empty()).take(lines).collect())
 }
 
@@ -173,7 +173,7 @@ fn sample(env: &Env, args: &Args, report: &mut Report) -> Result<BTreeMap<i32, S
 
 /// `(mount point, fstype)` of the mounts, from `/proc/mounts`; `\040` escapes decoded.
 fn mounts(env: &Env) -> Vec<(PathBuf, String)> {
-    let text = std::fs::read_to_string(env.root.proc.join("mounts")).unwrap_or_default();
+    let text = p_roc::text::read_to_string(env.root.proc.join("mounts")).unwrap_or_default();
     text.lines()
         .filter_map(|l| {
             let mut f = l.split_whitespace();
@@ -189,7 +189,7 @@ fn nfs_mount(mounts: &[(PathBuf, String)], path: &Path) -> Option<String> {
         .iter()
         .filter(|(mp, ty)| ty.starts_with("nfs") && path.starts_with(mp))
         .max_by_key(|(mp, _)| mp.components().count())
-        .map(|(mp, _)| mp.display().to_string())
+        .map(|(mp, _)| p_roc::text::from_os(mp.as_os_str()))
 }
 
 fn link(env: &Env, pid: i32, name: &str) -> Option<PathBuf> {
@@ -208,8 +208,9 @@ pub fn run(env: &Env, args: &Args) -> Result<Report, Error> {
         )));
     }
     let mut report = Report::new(env, "hung", Cost::Light);
-    let sysctl =
-        |n: &str| std::fs::read_to_string(env.root.proc.join("sys/kernel").join(n)).ok().map(|s| s.trim().to_string());
+    let sysctl = |n: &str| {
+        p_roc::text::read_to_string(env.root.proc.join("sys/kernel").join(n)).ok().map(|s| s.trim().to_string())
+    };
     report.push(&Record::Detector {
         hung_task_timeout_secs: sysctl("hung_task_timeout_secs"),
         hung_task_warnings: sysctl("hung_task_warnings"),
@@ -263,8 +264,8 @@ pub fn run(env: &Env, args: &Args) -> Result<Report, Error> {
                 ppid: s.ppid,
                 wait_class: class,
                 d_for_at_least_s: (in_d && continuous).then_some(args.duration.as_secs()),
-                exe: exe.map(|p| p.display().to_string()),
-                cwd: cwd.map(|p| p.display().to_string()),
+                exe: exe.map(|p| p_roc::text::from_os(p.as_os_str())),
+                cwd: cwd.map(|p| p_roc::text::from_os(p.as_os_str())),
                 mount,
                 samples: vec![
                     Sample {

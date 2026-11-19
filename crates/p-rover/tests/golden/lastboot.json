@@ -5,6 +5,8 @@
   "started_at": "2026-11-06T21:20:00Z",
   "mode": "observe",
   "cost": "light",
+  "escaped_records": 0,
+  "clipped_records": 0,
   "unreadable": [],
   "records": [
     {"type":"boots","known":2,"last":["-1 aaaa Tue 2026-11-03 08:00:00 UTC—Wed 2026-11-04 09:10:00 UTC"," 0 bbbb Wed 2026-11-04 09:12:00 UTC—Wed 2026-11-04 12:00:00 UTC"]},

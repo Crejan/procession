@@ -26,7 +26,10 @@ fn load(dir: &Path) -> BTreeMap<String, Output> {
         let Some(opts) = name.strip_suffix(".txt") else { continue };
         let read = |ext: &str| fs::read_to_string(dir.join(format!("{opts}.{ext}"))).unwrap_or_default();
         let code = read("code").trim().parse().unwrap_or(0);
-        m.insert(opts.to_string(), Output { code: Some(code), stdout: fs::read_to_string(e.path()).unwrap(), stderr: read("err") });
+        m.insert(
+            opts.to_string(),
+            Output { code: Some(code), stdout: fs::read_to_string(e.path()).unwrap(), stderr: read("err") },
+        );
     }
     m
 }

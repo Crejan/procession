@@ -12,6 +12,7 @@ pub mod observe;
 pub mod render;
 pub mod report;
 pub mod runner;
+pub mod sanitize;
 
 pub use config::Config;
 pub use env::{Clock, Env, FakeClock, SystemClock};

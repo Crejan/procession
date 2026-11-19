@@ -47,12 +47,17 @@ pub fn cpus(env: &Env, report: &mut Report) -> Cpus {
 /// Adds what every subcommand reports: `stale-probe` while an unrestored
 /// probe ledger exists.
 pub fn finish(env: &Env, report: &mut Report) {
+    finish_findings(env, report);
+    report.sanitize();
+}
+
+fn finish_findings(env: &Env, report: &mut Report) {
     let dir = &env.config.probe.ledger_dir;
     let Ok(rd) = std::fs::read_dir(dir) else { return };
     let mut stale: Vec<String> = rd
         .filter_map(Result::ok)
         .filter(|e| e.path().join("plan.json").is_file() && !e.path().join("restored").exists())
-        .map(|e| e.file_name().to_string_lossy().into_owned())
+        .map(|e| p_roc::text::entry_name(&e))
         .collect();
     stale.sort();
     if !stale.is_empty() {
