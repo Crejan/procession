@@ -380,28 +380,52 @@ by its writer, read with the usual file checks of `p_act::settings`):
 
 `source` is `model`, `freeipa` or `hosted-ldap`; it is shown by `page status`
 and decides nothing. `as_of` is the writer's time, UTC to the second; it is
-shown. **Every group the site file names is a key of `members`**, possibly with
-an empty list, and `members` holds only persons that are in `active`. R10's
-membership comes from `members`.
+shown. A writer gives **every group the site file names as a key of `members`**,
+possibly with an empty list, and `members` holds only persons that are in
+`active`; the broker does not need the first to hold (below). R10's membership
+comes from `members`.
 
-**Refused, and what the broker holds stands:** a missing `v` or one it does
-not know; an unknown member; a `source` that is none of the three; an `as_of`
-that is not a UTC time to the second, or more than 60 seconds ahead of the
-clock; a group of the site file that is not a key of `members`; a key of
-`members` that is no group of the site file; a name in `active` or in `members`
-that is no person of the site file, or one that is repeated (in `active`, or in
-one group's list); a member that is not in `active`.
+**Each file is read and checked on its own, and replaces its predecessor when it
+is valid in itself.** Nothing waits for the other: a converge that removes a
+person or a group from the site file must not be held back until a fitting
+`directory.json` arrives (a restricting change waiting on an outside system).
 
-**One pair, both or neither.** `page load` (and the broker at start) reads the
-two files and applies them **together**: if either is refused, nothing is
-applied, the pair the broker holds stands, the error names the file that was
-refused (`the site file: ...` or `directory.json: ...`), and at start the
-broker does not start. Why: a half applied pair would be a view nobody wrote.
-A site file that names a new group with the old `directory.json` is exactly
-refused (`GroupMissing`), and a directory that has a person the old site file
-lacks is refused (`UnknownName`), so the order two writers put their files in
-must not matter: the first file to arrive is refused until its partner does, and
-the pair the broker holds stands meanwhile.
+- **Refused whole, the file the broker holds standing** (the file contradicts
+  itself or its form): the site file: a missing or unknown `v`, an unknown
+  member of the object (`enabled` and `members` among them), a name outside the
+  character rules, a person's keys that are not four different Ed25519 or
+  ECDSA P-256 keys, a name or a group twice. `directory.json`: a missing or
+  unknown `v`; an unknown member of the object; a `source` outside the three;
+  an `as_of` that is not a UTC time to the second, or is more than 60 seconds
+  ahead of the clock; a name outside the character rules; a name repeated
+  within one list (`active`, or one group's); a key of `members` repeated; a
+  name under `members` that is not in `active`.
+- **What the broker decides from is the intersection, computed at load.** A
+  person is enabled if the site file has the row **and** `active` has the
+  name. A group's members are the names under its key that are enabled
+  persons. A name in `active` or `members` that is no person of the site file
+  is **ignored**; a key of `members` that is no group of the site file is
+  **ignored**; a group of the site file that has no key in `members` is
+  **empty**. Each of these only restricts, so no order of arrival admits what
+  neither file admits, and nothing waits.
+- **So that the tolerance does not hide a writer's fault**, `page status`
+  prints, beside `directory: source S, as of T`, the counts and (escaped, the
+  first ten) the names of the three kinds: `names not in the site file`,
+  `groups not in the site file`, `groups of the site file without members key`;
+  the audit log gets one line, `directory-sets:names=N,groups=N,empty=N`, when
+  the view is made and these sets are not all empty (a reload that changes the
+  sets writes one again: `page load` is not built), and so does standard
+  error. **The exit code is unchanged by them.**
+- **At start:** the site file is required (missing or refused, there is no
+  broker). `directory.json` is not: without a valid one (missing, or refused
+  on its own faults) **nobody is active**; the broker starts, issues no
+  sign-in and no clearance to anyone, and clears nothing (blocks and
+  withdrawals are the register's and stand); `page status` says
+  `directory: none (why)` and standard error says it. Why start rather than
+  refuse: that only restricts, and a broker that cannot start because an
+  outside system's file is late is a worse failure for the persons waiting
+  than a broker that refuses everyone and says why. If the designer would
+  rather the broker refuse to start, that is one line in `Site::load`.
 
 **Stage 2** reads both files by hand: `directory.json` with `source: model`,
 beside the site file (no member in the configuration names it). **Without the

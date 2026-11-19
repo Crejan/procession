@@ -105,7 +105,36 @@ struct DirectoryFile {
     /// When the writer made it, UTC to the second. Shown; stage 2 does not age the file.
     as_of: String,
     active: Vec<String>,
-    members: BTreeMap<String, Vec<String>>,
+    /// group -> names. A key repeated is an error of the file's own (read in order, so that it can be seen).
+    members: UniqueKeys,
+}
+
+/// A JSON object read as a list of its members in order, refusing a key that is there twice (a map would keep the last
+/// and say nothing).
+#[derive(Debug)]
+struct UniqueKeys(Vec<(String, Vec<String>)>);
+
+impl<'de> Deserialize<'de> for UniqueKeys {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<UniqueKeys, D::Error> {
+        struct V;
+        impl<'de> serde::de::Visitor<'de> for V {
+            type Value = UniqueKeys;
+            fn expecting(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                f.write_str("an object of lists of names")
+            }
+            fn visit_map<A: serde::de::MapAccess<'de>>(self, mut map: A) -> Result<UniqueKeys, A::Error> {
+                let mut out: Vec<(String, Vec<String>)> = Vec::new();
+                while let Some((k, v)) = map.next_entry::<String, Vec<String>>()? {
+                    if out.iter().any(|(seen, _)| *seen == k) {
+                        return Err(serde::de::Error::custom("a key of `members` is there twice"));
+                    }
+                    out.push((k, v));
+                }
+                Ok(UniqueKeys(out))
+            }
+        }
+        d.deserialize_map(V)
+    }
 }
 
 /// A person's four keys: the purposes are a closed vocabulary, each exactly once, and four different keys.
@@ -142,17 +171,63 @@ pub struct DirectoryInfo {
     pub as_of: String,
 }
 
-/// The broker's view of the site: the site file and `directory.json`, **together** (both or neither).
+/// What the two files say that the other does not know. Each only **restricts** (the broker decides from the
+/// intersection), so nothing here is a refusal; it is shown, so that a writer's fault is not hidden by the tolerance.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Mismatch {
+    /// Names in `active` or under `members` that are no person of the site file: ignored.
+    pub names_not_in_site: Vec<String>,
+    /// Keys of `members` that are no group of the site file: ignored.
+    pub groups_not_in_site: Vec<String>,
+    /// Groups of the site file that have no key in `members`: treated as empty.
+    pub groups_without_members: Vec<String>,
+}
+
+impl Mismatch {
+    /// Whether the two files agree on every name.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.names_not_in_site.is_empty()
+            && self.groups_not_in_site.is_empty()
+            && self.groups_without_members.is_empty()
+    }
+}
+
+/// The site file, checked **on its own**: persons with their four keys, hosts, the groups the site names.
+#[derive(Debug, Clone, Default)]
+pub struct SiteBase {
+    persons: BTreeMap<String, PersonKeysRow>,
+    hosts: BTreeMap<String, PublicKey>,
+    groups: std::collections::BTreeSet<String>,
+}
+
+#[derive(Debug, Clone)]
+struct PersonKeysRow(PersonKeys);
+
+/// `directory.json`, checked **on its own**: it contradicts neither itself nor its form. It says nothing of the site
+/// file, which it is never refused for.
+#[derive(Debug, Clone)]
+pub struct Directory {
+    info: DirectoryInfo,
+    active: std::collections::BTreeSet<String>,
+    members: BTreeMap<String, Vec<String>>,
+}
+
+/// The broker's view of the site: the site file and `directory.json` **intersected** at load.
 #[derive(Debug, Clone, Default)]
 pub struct Site {
     persons: BTreeMap<String, Person>,
     hosts: BTreeMap<String, PublicKey>,
-    /// Who is in which group, from `directory.json`: every group the site file names is a key.
+    /// Who is in which group: every group the site file names is a key, with the names under it that are enabled
+    /// persons (so a group `directory.json` does not know is empty).
     members: Option<BTreeMap<String, Vec<String>>>,
     directory: Option<DirectoryInfo>,
+    mismatch: Mismatch,
+    /// Why there is no `directory.json` in this view (missing, or refused on its own), if that is so.
+    directory_problem: Option<String>,
 }
 
-/// Why the pair of files was not used: which of the two, and why.
+/// Why a file was not used: which of the two, and why.
 #[derive(Debug, Error)]
 pub enum LoadError {
     #[error("the site file: {0}")]
@@ -161,7 +236,7 @@ pub enum LoadError {
     Directory(#[from] DirectoryError),
 }
 
-/// Why `directory.json` was refused. The file the broker holds stands.
+/// Why `directory.json` was refused: it contradicts itself or its form. The file the broker holds stands.
 #[derive(Debug, Error)]
 pub enum DirectoryError {
     #[error(transparent)]
@@ -174,12 +249,8 @@ pub enum DirectoryError {
     AsOf(String),
     #[error("`as_of` is more than 60 seconds ahead of the clock")]
     AsOfAhead,
-    #[error("the site file names the group `{}` and `members` has no key for it", shown(.0))]
-    GroupMissing(String),
-    #[error("`members` has a key `{}` that is no group of the site file", shown(.0))]
-    GroupUnknown(String),
-    #[error("`{}` in {place} is not a person of the site file", shown(name))]
-    UnknownName { place: &'static str, name: String },
+    #[error("`{}` in {place} is not a name the character rules take", shown(name))]
+    BadName { place: &'static str, name: String },
     #[error("`{}` is repeated in {place}", shown(name))]
     Repeated { place: &'static str, name: String },
     #[error("`{}` is in `members` of `{}` and not in `active`", shown(name), shown(group))]
@@ -206,41 +277,22 @@ fn group_name_ok(name: &str) -> bool {
     Standing::compose(&probe).is_ok()
 }
 
-impl Site {
-    /// Read the pair: the site file and `directory.json`, each with the usual file checks (`p_act::settings`: JSON,
-    /// one object, an unknown member refused, nobody but the owner or root can write it). **Both or neither**: if
-    /// either is refused there is no `Site`, and the caller keeps the one it holds. `now` judges `as_of`.
-    pub fn read_pair(site: &Path, directory: &Path, now: std::time::SystemTime) -> Result<Site, LoadError> {
-        let site_file: SiteFile = p_act::settings::read(site).map_err(SiteError::from)?;
-        let directory_file: DirectoryFile = p_act::settings::read(directory).map_err(DirectoryError::from)?;
-        Site::from_files(site_file, directory_file, now)
+impl SiteBase {
+    /// Read the site file with the usual file checks (`p_act::settings`). Refused whole on its own faults.
+    pub fn read(path: &Path) -> Result<SiteBase, SiteError> {
+        SiteBase::from_file(p_act::settings::read(path)?)
     }
 
-    /// From the texts of the two files (tests, and the checks of `page load`).
-    pub fn from_texts(site: &str, directory: &str, now: std::time::SystemTime) -> Result<Site, LoadError> {
-        let site_file: SiteFile = p_act::settings::parse(site.as_bytes()).map_err(SiteError::from)?;
-        let directory_file: DirectoryFile =
-            p_act::settings::parse(directory.as_bytes()).map_err(DirectoryError::from)?;
-        Site::from_files(site_file, directory_file, now)
+    /// From the text of the file.
+    pub fn from_text(text: &str) -> Result<SiteBase, SiteError> {
+        SiteBase::from_file(p_act::settings::parse(text.as_bytes())?)
     }
 
-    /// Where `directory.json` is: beside the site file.
-    #[must_use]
-    pub fn directory_path(site: &Path) -> std::path::PathBuf {
-        site.with_file_name("directory.json")
-    }
-
-    fn from_files(file: SiteFile, directory: DirectoryFile, now: std::time::SystemTime) -> Result<Site, LoadError> {
-        let mut site = Site::from_site_file(file)?;
-        site.apply_directory(directory, now)?;
-        Ok(site)
-    }
-
-    fn from_site_file(file: SiteFile) -> Result<Site, SiteError> {
+    fn from_file(file: SiteFile) -> Result<SiteBase, SiteError> {
         if file.v != 1 {
             return Err(SiteError::Version(file.v));
         }
-        let mut site = Site::default();
+        let mut base = SiteBase::default();
         for p in file.persons {
             if !valid_name(&p.name) {
                 return Err(SiteError::BadName(p.name));
@@ -273,8 +325,7 @@ impl Site {
                     });
                 }
             }
-            let person = Person { enabled: false, keys: Some(parsed), groups: Vec::new() };
-            if site.persons.insert(p.name.clone(), person).is_some() {
+            if base.persons.insert(p.name.clone(), PersonKeysRow(parsed)).is_some() {
                 return Err(SiteError::Duplicate(p.name));
             }
         }
@@ -283,31 +334,30 @@ impl Site {
                 return Err(SiteError::BadName(h.name));
             }
             let k = key("host key", &h.name, &h.key)?;
-            if site.hosts.insert(h.name.clone(), k).is_some() {
+            if base.hosts.insert(h.name.clone(), k).is_some() {
                 return Err(SiteError::Duplicate(h.name));
             }
         }
-        let mut groups = BTreeMap::new();
         for g in file.groups {
             // A group name is whatever a standing may carry as one.
             if !group_name_ok(&g) {
                 return Err(SiteError::BadMembers { group: g, why: "not a group name".to_owned() });
             }
-            if groups.insert(g.clone(), Vec::new()).is_some() {
+            if !base.groups.insert(g.clone()) {
                 return Err(SiteError::Duplicate(g));
             }
         }
-        site.members = Some(groups);
         // No key is another person's, and none is a host's.
         let mut seen: BTreeMap<String, String> = BTreeMap::new();
-        for (name, person) in &site.persons {
-            for fp in person.key_fingerprints() {
-                if let Some(other) = seen.insert(fp.to_string(), name.clone()) {
+        for (name, row) in &base.persons {
+            let keys = &row.0;
+            for k in [&keys.confirmed, &keys.automatic, &keys.delegation, &keys.connection] {
+                if let Some(other) = seen.insert(k.fingerprint().to_string(), name.clone()) {
                     return Err(SiteError::KeysClash { name: name.clone(), why: format!("a key is also `{other}`'s") });
                 }
             }
         }
-        for (host, k) in &site.hosts {
+        for (host, k) in &base.hosts {
             if let Some(owner) = seen.get(&k.fingerprint().to_string()) {
                 return Err(SiteError::KeysClash {
                     name: owner.clone(),
@@ -315,12 +365,24 @@ impl Site {
                 });
             }
         }
-        Ok(site)
+        Ok(base)
+    }
+}
+
+impl Directory {
+    /// Read `directory.json` with the usual file checks. `now` judges `as_of`.
+    pub fn read(path: &Path, now: std::time::SystemTime) -> Result<Directory, DirectoryError> {
+        Directory::from_file(p_act::settings::read(path)?, now)
     }
 
-    /// Put `directory.json` over the site file: who is enabled, who is in which group. Every refusal leaves nothing
-    /// half applied: the caller holds the old `Site` and this one is dropped.
-    fn apply_directory(&mut self, d: DirectoryFile, now: std::time::SystemTime) -> Result<(), DirectoryError> {
+    /// From the text of the file.
+    pub fn from_text(text: &str, now: std::time::SystemTime) -> Result<Directory, DirectoryError> {
+        Directory::from_file(p_act::settings::parse(text.as_bytes())?, now)
+    }
+
+    /// The checks a file makes **on its own**: its version and form, its names under the character rules, no name
+    /// twice in a list, and every member of a group active. Nothing about the site file.
+    fn from_file(d: DirectoryFile, now: std::time::SystemTime) -> Result<Directory, DirectoryError> {
         if d.v != 1 {
             return Err(DirectoryError::Version(d.v));
         }
@@ -328,62 +390,144 @@ impl Site {
             return Err(DirectoryError::Source(d.source));
         }
         let as_of: p_act::Timestamp = d.as_of.parse().map_err(|_| DirectoryError::AsOf(d.as_of.clone()))?;
-        let ahead = as_of.unix()
-            - i64::try_from(now.duration_since(std::time::UNIX_EPOCH).map_or(0, |t| t.as_secs())).unwrap_or(0);
-        if ahead > 60 {
+        let now_secs = i64::try_from(now.duration_since(std::time::UNIX_EPOCH).map_or(0, |t| t.as_secs())).unwrap_or(0);
+        if as_of.unix() - now_secs > 60 {
             return Err(DirectoryError::AsOfAhead);
         }
-        // `active`: persons of the site file, each once.
         let mut active = std::collections::BTreeSet::new();
-        for name in &d.active {
-            if !self.persons.contains_key(name) {
-                return Err(DirectoryError::UnknownName { place: "`active`", name: name.clone() });
+        for name in d.active {
+            if !valid_name(&name) {
+                return Err(DirectoryError::BadName { place: "`active`", name });
             }
-            if !active.insert(name.as_str()) {
-                return Err(DirectoryError::Repeated { place: "`active`", name: name.clone() });
-            }
-        }
-        // `members`: exactly the groups the site file names; persons of the file, each once per group, all active.
-        let named: Vec<String> = self.members.iter().flat_map(|m| m.keys().cloned()).collect();
-        for group in &named {
-            if !d.members.contains_key(group) {
-                return Err(DirectoryError::GroupMissing(group.clone()));
+            if !active.insert(name.clone()) {
+                return Err(DirectoryError::Repeated { place: "`active`", name });
             }
         }
         let mut members = BTreeMap::new();
-        for (group, logins) in &d.members {
-            if !named.contains(group) {
-                return Err(DirectoryError::GroupUnknown(group.clone()));
+        for (group, logins) in d.members.0 {
+            if !group_name_ok(&group) {
+                return Err(DirectoryError::BadName { place: "the keys of `members`", name: group });
             }
             let mut seen = std::collections::BTreeSet::new();
-            for login in logins {
-                if !self.persons.contains_key(login) {
-                    return Err(DirectoryError::UnknownName { place: "`members`", name: login.clone() });
+            for login in &logins {
+                if !valid_name(login) {
+                    return Err(DirectoryError::BadName { place: "`members`", name: login.clone() });
                 }
                 if !seen.insert(login.as_str()) {
                     return Err(DirectoryError::Repeated { place: "`members`", name: login.clone() });
                 }
-                if !active.contains(login.as_str()) {
+                if !active.contains(login) {
                     return Err(DirectoryError::NotActive { group: group.clone(), name: login.clone() });
                 }
             }
-            let mut logins = logins.clone();
+            let mut logins = logins;
             logins.sort_unstable();
-            members.insert(group.clone(), logins);
+            members.insert(group, logins);
         }
-        for (name, person) in &mut self.persons {
-            person.enabled = active.contains(name.as_str());
+        Ok(Directory { info: DirectoryInfo { source: d.source, as_of: d.as_of }, active, members })
+    }
+}
+
+impl Site {
+    /// Where `directory.json` is: beside the site file.
+    #[must_use]
+    pub fn directory_path(site: &Path) -> std::path::PathBuf {
+        site.with_file_name("directory.json")
+    }
+
+    /// The view **at start**: the site file is required (refused or missing, there is no broker). `directory.json` is
+    /// not: without a valid one nobody is active, the broker starts, and `page status` says why. That only restricts:
+    /// no sign-in and no clearance for anyone until a good file arrives.
+    pub fn load(site: &Path, directory: &Path, now: std::time::SystemTime) -> Result<Site, SiteError> {
+        let base = SiteBase::read(site)?;
+        Ok(match Directory::read(directory, now) {
+            Ok(d) => Site::combine(&base, Some(&d)),
+            Err(e) => {
+                let mut view = Site::combine(&base, None);
+                view.directory_problem = Some(shown(&format!("directory.json: {e}")));
+                view
+            }
+        })
+    }
+
+    /// Both files from their texts, each refused on its own faults (tests, and the checks of `page load`).
+    pub fn from_texts(site: &str, directory: &str, now: std::time::SystemTime) -> Result<Site, LoadError> {
+        let base = SiteBase::from_text(site)?;
+        let d = Directory::from_text(directory, now)?;
+        Ok(Site::combine(&base, Some(&d)))
+    }
+
+    /// The **intersection**, computed at load. A person is enabled if the site file has the row and `active` has the
+    /// name; a group's members are the names under its key that are enabled persons; a name that is no person of the
+    /// site file, and a key of `members` that is no group of the site file, are ignored; a group of the site file with
+    /// no key in `members` is empty. Each only restricts, so no order of arrival admits what neither file admits.
+    #[must_use]
+    pub fn combine(base: &SiteBase, directory: Option<&Directory>) -> Site {
+        let mut mismatch = Mismatch::default();
+        let mut persons: BTreeMap<String, Person> = base
+            .persons
+            .iter()
+            .map(|(n, k)| (n.clone(), Person { enabled: false, keys: Some(k.0.clone()), groups: Vec::new() }))
+            .collect();
+        let mut members: BTreeMap<String, Vec<String>> = base.groups.iter().map(|g| (g.clone(), Vec::new())).collect();
+        if let Some(d) = directory {
+            let mut strangers = std::collections::BTreeSet::new();
+            for name in &d.active {
+                match persons.get_mut(name) {
+                    Some(p) => p.enabled = true,
+                    None => {
+                        strangers.insert(name.clone());
+                    }
+                }
+            }
+            for (group, logins) in &d.members {
+                let Some(slot) = members.get_mut(group) else {
+                    mismatch.groups_not_in_site.push(group.clone());
+                    continue;
+                };
+                for login in logins {
+                    match persons.get(login) {
+                        Some(p) if p.enabled => slot.push(login.clone()),
+                        Some(_) => {}
+                        None => {
+                            strangers.insert(login.clone());
+                        }
+                    }
+                }
+            }
+            mismatch.names_not_in_site = strangers.into_iter().collect();
+            mismatch.groups_without_members =
+                base.groups.iter().filter(|g| !d.members.contains_key(*g)).cloned().collect();
+        }
+        for (name, person) in &mut persons {
             person.groups = members.iter().filter(|(_, l)| l.contains(name)).map(|(g, _)| g.clone()).collect();
         }
-        self.members = Some(members);
-        self.directory = Some(DirectoryInfo { source: d.source, as_of: d.as_of });
-        Ok(())
+        Site {
+            persons,
+            hosts: base.hosts.clone(),
+            members: Some(members),
+            directory: directory.map(|d| d.info.clone()),
+            mismatch,
+            directory_problem: None,
+        }
     }
 
     /// Where the directory part came from and when it was made, as `page status` shows it.
     #[must_use]
     pub fn directory(&self) -> Option<&DirectoryInfo> {
         self.directory.as_ref()
+    }
+
+    /// What the two files say that the other does not know.
+    #[must_use]
+    pub fn mismatch(&self) -> &Mismatch {
+        &self.mismatch
+    }
+
+    /// Why this view has no `directory.json`, if it has none.
+    #[must_use]
+    pub fn directory_problem(&self) -> Option<&str> {
+        self.directory_problem.as_deref()
     }
 
     /// Who is in which group: every group the site file names is a key (possibly with nobody).

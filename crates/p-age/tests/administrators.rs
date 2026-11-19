@@ -128,6 +128,25 @@ fn status_says_who_may_administer_and_page_says_when_it_runs_as_root() {
         ..base_status()
     };
     assert!(text(&with_directory).contains("directory: source hosted-ldap, as of 2026-11-19T10:15:00Z"));
+    // what the two files do not agree on is counted and named (escaped and clipped), and does not change the exit code
+    let sets = p_age::core::Status {
+        directory_sets: p_age::site::Mismatch {
+            names_not_in_site: (0..12).map(|i| format!("n{i}")).collect(),
+            groups_not_in_site: vec!["old".into()],
+            groups_without_members: vec![],
+        },
+        directory_problem: Some("directory.json: missing".into()),
+        ..base_status()
+    };
+    let (shown, code) =
+        p_age::admin::render(&p_age::admin::Command::Status, &p_age::admin::Reply::Status(Box::new(sets)));
+    assert!(shown.contains("names not in the site file: 12 (n0, n1, n2, n3, n4, n5, n6, n7, n8, n9, ...)"), "{shown}");
+    assert!(
+        shown.contains("groups not in the site file: 1 (old)") && shown.contains("without members key: 0\n"),
+        "{shown}"
+    );
+    assert!(shown.contains("directory: none (directory.json: missing)"));
+    assert_eq!(code, 0, "the exit code is not changed by them");
     assert!(!text(&status(None)).contains("root only"));
     assert!(text(&status(Some(group(900)))).contains("administrators: group page-admins (gid 900)"));
     assert!(p_age::admin::recorded_as_root(true, 0));
@@ -139,6 +158,8 @@ fn base_status() -> p_age::core::Status {
     p_age::core::Status {
         administrators: None,
         directory: None,
+        directory_problem: None,
+        directory_sets: Default::default(),
         broker_uid: 501,
         keygen_unusable: None,
         degraded: None,
