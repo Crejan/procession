@@ -30,7 +30,7 @@ service over HTTP. Nothing in it has been run on Linux. Terms are those of
 | `pact`'s HTTP client | p-act's, `ureq` 3 (`pact::http::HttpTransport`), merged; its socket tests never ran over a real socket either |
 | the cross run through `SudoRunner` | **run and passed** by the owner on 2026-11-18 at `2a38839` (Debian 13, unprivileged LXC container; writer: p-act): `tests/stage1_sudo.rs`, 1.13 s |
 | the cross run over real HTTP with the real `pact` | **run and passed** by the owner on 2026-11-18 at `51920c2` (Debian 13, unprivileged LXC, as root, `PROBE_PLEDGE_BIN`/`PROBE_PACT_BIN` set by hand): `tests/stage1_http.rs`, 0.26 s. Shown for the first time: the HTTP transport on a real TCP port; the real `pact` (ureq) reading the stream; pledge and the service starting `/usr/bin/ssh-keygen` under the `Keygen` rule (OpenSSH 10.0p2); `pact`'s bundle and peer checks. **Not shown:** the verb through sudo (not run with `PROBE_STAGE1_SUDO`); a wait long enough for a keepalive comment (15 s) or the 45 s idle timeout; the service as its own account and unit; a person at the dialog; the account split and the group on `service.sock` (everything ran as root) |
-| the scripts of Stage B (`stage1/b1`, `b2`, `b3`, `undo-b.sh`) | **written, `sh -n` and the pieces tested here** (the config and settings they write are read by the real readers; the pledge part was rehearsed with the real `pledge` on macOS); **never run on Linux** |
+| the scripts of Stage B (`stage1/b1`, `b2`, `b3`, `undo-b.sh`) | **run by the owner on 2026-11-19 at `e78c90a13e5a`: `b3` "ALL PASSED"** (Debian 13 LXC; section 7); `b2` passed but for one grep, fixed since; the scripts have changed since that run (a1 takes the checkout, the marker in `/etc/probe-stage1`, outputs shown whole, the 29/30 fix), so the final run is still to be made on the final commit |
 | the scripts of Stage A (`stage1/a1` to `a3`, `undo.sh`) | **run and passed** by the owner on 2026-11-18 at `2a38839`, unedited: a1, a2 (23 PASS lines), a3 ("PASSED (exit 0)"). a3 has since changed (it names the test executable from cargo's JSON; `ac1fcba`) and is not yet run in that form |
 
 So the runbook has two stages. **Stage A runs today on a Linux machine**: the
@@ -619,6 +619,14 @@ dev-dependency only, for the in-memory streams of the tests. No TLS crate: betwe
 agent and service TLS is open for stage 2. `pact`'s client is p-act's: `ureq` 3, no runtime.
 
 ## 7. What was run, and where
+
+**Stage B, by the owner, 2026-11-19, at `e78c90a13e5a`** (Debian 13, unprivileged LXC; host `probe-test`, person `test`, `probe-svc` uid 999). `b3` ended **"ALL PASSED"**. Shown there:
+the agent was started and its bundle is 0600; `pact tools` lists 7 tools; `sys_kit` and `test_echo` are automatic, `done`, and the answer says `euid` 0 (the verb ran as root through the sudo rule, from the systemd unit);
+`test_peak` asked and confirmed, `done`; `test_peak` declined, and no dispatcher line for it; `test_read /etc/hostname` confirmed, a `file` record; the long `test_peak` lasted **84 s**, past `pact`'s 45 s idle timeout (so the service's keepalive comments arrived);
+`pledge history --verify`: the chain is intact; every call is `approved` or `declined` in pledge's record, **received from uid 999 (`probe-svc`)** (the group on `service.sock`, read by pledge from the socket); the journal has the dispatcher's start and done per call that ran, `identity=probe-svc`; the service's own line says `outcome=done` or `declined` per call.
+`b2` passed except one check: its grep wanted `Not due: 30 days` and the journal said `29 days left` (the product was right; fixed since: 29 or 30 is accepted). **Stated about that run:** the scripts were those of `e78c90a`; `a1` was given the binary path by hand after a rebuild (the form before it took the checkout); pledge was started in a fresh login
+(an earlier start from an older shell failed with "giving /run/pledge-test to the group pledge-svc: Operation not permitted", as the runbook says it would). **Not stated, so not recorded:** whether `a2` and `a3` were rerun and passed at this commit.
+Before that, on the same container at `51920c2`: `stage1_http` passed (section 5 above), and the ssh-keygen rules were met by inspection.
 
 **Stage A, by the owner, 2026-11-18, at `2a38839`, scripts unedited, Debian 13 in an unprivileged LXC container, writer: p-act.**
 a1 and a2 passed (`REPORT-runbook.md` lists the 23 lines). a3, run with the executable cargo named
