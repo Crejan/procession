@@ -70,11 +70,12 @@ placeholders: the software defines its own.
 | who is active and who is in which group: `directory.json`, by the converge on a local site and by the job `page-sync` on the other two | decided (C2), as point 4 has it |
 | an administrator may prolong a stale `directory.json` with `page directory extend` | decided by the owner |
 | on `hosted-ldap`, an account that is only suspended and keeps its groups keeps approving until its groups are removed or it is blocked | decided: the owner accepts the limit (point 7) |
-| C1, J2, J3 (the name `probe`), J4, J6, J7 | decided as recommended |
+| C1, J3 (the name `probe`), J4, J6, J7 | decided as recommended |
+| J2, whether `probe` is a product type from the start or a site type first | open with the owner; both positions under [Open](#open-for-the-owner) |
 | verbs marked `host_text` are not excluded from the automatic mode | decided; not a model matter |
-| whether a hosted site keeps a `persons.yml` row for those who approve | open with the owner (E, under [Open](#open-for-the-owner)) |
+| whether, on a hosted site, `approval_keys` go on the person's `persons.yml` row | open with the owner (E, under [Open](#open-for-the-owner)) |
 | J9, the sync job's bind account on a FreeIPA site | deferred until a FreeIPA site is ported |
-| whether the first sandboxes separate model and signer | open with the owner; not a model question |
+| the first sandboxes do not separate model and signer in stage 1 and do from stage 2 | decided by the owner; not a model question |
 
 ## 1. A person's approval keys
 
@@ -379,9 +380,25 @@ approvals:
 
 ### The two inputs
 
-The same two on every kind of site. A person is enabled for the broker
-exactly if the site file has the person and `active` of `directory.json`
-has the name.
+The same two on every kind of site. Each file is checked on its own and
+replaces its predecessor when it is valid in itself; neither is refused for
+a name the other does not know, and there is no rule about which arrives
+first. The broker decides from the intersection, computed at load:
+
+- a person is enabled exactly if the site file has the person and `active`
+  of `directory.json` has the name;
+- a group's members are the names under its key that are enabled persons;
+- a name in `active` or `members` that is no person of the site file is
+  ignored;
+- a key in `members` that is no group of the site file is ignored;
+- a group of the site file with no key in `members` is treated as empty.
+
+Each of these only restricts. So no order of arrival admits what neither
+file admits, and a converge that removes a person or a group never waits on
+the directory. `page status` prints the counts and the names of the three
+kinds (names not in the site file, groups not in the site file, groups of
+the site file without a key in `members`), and the audit log gets a line
+when they change.
 
 **The site file**, from the model, by the converge of the broker's host.
 One derivation, `approval_view(site)`, pure and byte-stable;
@@ -399,9 +416,8 @@ One derivation, `approval_view(site)`, pure and byte-stable;
 It carries neither `enabled` nor `members`, on any kind. `access`, grants
 and host classes are not in it either. A row the model itself holds
 disabled (`enabled: false`) is left out, so that such a person is not
-enabled for the broker whatever `directory.json` says; this reading of
-"persons = name and approval keys" is this note's and is for the designer to
-confirm. A host whose public half the store has not written is left out of
+enabled for the broker whatever `directory.json` says (confirmed by the
+designer). A host whose public half the store has not written is left out of
 `hosts` and is a finding.
 
 **`directory.json`**, on the broker's host:
@@ -413,11 +429,24 @@ confirm. A host whose public half the store has not written is left out of
 ```
 
 `source` is `model`, `freeipa` or `hosted-ldap`; it is shown and decides
-nothing. Every group the site file names is a key of `members`, possibly
-empty, and holds only persons that are in `active`. Refused, with the old
-file left standing: an unknown member, an unknown or repeated name, an
-`as_of` more than 60 seconds ahead. The file is 0644 and replaced by
-writing a new one and renaming it.
+nothing. The file is 0644 and replaced by writing a new one and renaming
+it.
+
+The writers stay strict, though the reader is lenient about the other
+file: `page-sync` asks only for what the site file names and writes every
+named group as a key, possibly empty, holding only persons that are in
+`active`; the model's derivation does likewise.
+
+Refused whole, with the old file left standing:
+
+- a missing or unknown `v`;
+- an unknown member of the object;
+- a `source` outside the three;
+- an `as_of` that is not UTC to the second, or more than 60 seconds ahead;
+- a name outside the character rules;
+- a name repeated within one list;
+- a key repeated;
+- a name under `members` that is not in `active`.
 
 | Kind | Writer | `active` | `members` |
 |---|---|---|---|
@@ -462,6 +491,24 @@ So on a hosted site the job needs no bind account, no realm CA and no new
 flow. The provider's LDAP client must have "read group information" for
 the units it serves, and a change there "takes up to a day"
 (`doc/linux.md`, ldap_client, Traps).
+
+**The timer and what is watched.** `page-sync`'s timer is not in the type's
+`units`, so it is not in `monitored_units`; the role installs it by the
+site's kind, and on a local site there is none. No backend condition on a
+type's `units` is needed for it. What is watched is the age of
+`directory.json`, by the rule pack of point 8: a warning at twice
+`sync_seconds`, critical at `directory_max_age_seconds`, and no rule on a
+local site, where the file does not age. A dead timer shows as an ageing
+file.
+
+**By stage** (`approvals.md` section 8). The broker takes the split from
+stage 2: the site file without `enabled` and `members`, and
+`directory.json` beside it. In stage 2 both are written by hand,
+`directory.json` with the source `model`, and without
+`directory_max_age_seconds` set the file does not age. Stage 3 only:
+`page-sync`, the age setting, `directory-stale`,
+`page directory extend` and `resume`, and the register's member
+`directory_hold`. Everything this note asks of fundament is stage 3.
 
 **Freshness.** On a local site the file never ages: it changes only with a
 converge, as the model does. On the two directory kinds the broker measures
@@ -686,9 +733,12 @@ what the model lacks for the points above.
    definition of `active` still approves. With the removals first, a failed
    run never leaves that state.
 
-Not covered by either, and not verified: a membership that comes only
-through a nested group. `offboard` lists the user's direct groups;
-`page-sync` follows member DNs under the groups base.
+A membership that comes only through a nested group: `offboard` lists the
+user's direct groups, and `page-sync` follows member DNs under the groups
+base. The designer's reasoning is that this is covered: a membership
+through a nested group rests on a direct membership in the inner group,
+and that direct membership is one `offboard` removes. Expected result
+"covered"; not verified, to be confirmed at the first hosted site.
 
 **What the model lacks:**
 
@@ -702,13 +752,12 @@ through a nested group. `offboard` lists the user's direct groups;
 | `approval_view(site)` without `enabled` and `members` | point 4 |
 | the second derivation `approval_directory(site)` for a local site, and a role that writes it with `as_of` | point 4 |
 | the job's inputs in `bind_approval_broker`: the group list, the provider's `uri`, `users` and `groups` bases, the `Lookup` of `host/<h>/ldap-client` | point 4 |
-| a unit that exists on some kinds only: a type's `units` is one list, and `page-sync`'s timer does not exist on a local site, where `monitored_units` would then watch a unit that is not there | point 4; the same want of a backend condition as J9 |
-| a rule pack over the age of `directory.json`, beside the one over the certificates' days left | points 2 and 4 |
+| a rule pack over the age of `directory.json` (warning at twice `sync_seconds`, critical at `directory_max_age_seconds`, none on a local site), beside the one over the certificates' days left; the role installs `page-sync`'s timer by kind, outside the type's `units` | points 2 and 4 |
 | the flag `agents`, the required `groups` param, the checks on the type's name and one service per host | point 5 |
 | the derived flow `approval-<host>-<service>`; the `hubs_of` reason | point 4 |
 | `approval_hosts(site)`, `approval_signers(site)`, `approval_ca(site)`, `agent_services(site)` | points 2, 5, 6 |
 | the role and its row for a provider of an `agents` type; the kit program that certifies with the host key | point 5 |
-| for a FreeIPA site, later: the bind account's condition (J9), the realm CA flag, the flow to `ldaps` | point 4 |
+| for a FreeIPA site, later: the bind account's condition (J9, the only want of a backend condition), the realm CA flag, the flow to `ldaps` | point 4 |
 
 ## 9. diag-tools
 
@@ -795,35 +844,61 @@ the dispatcher is the role's own file and is not in `grants_on`.
 
 ## Open, for the owner
 
-**E. Whether a hosted site keeps a `persons.yml` row for those who approve.
-Open.** The row would hold `approval_keys` and nothing else of substance.
-The designer recommends yes: the operator certifies the keys at the
-converge, so they must be where the converge reads; the repository gives
-them a reviewed history; and the provider's `sshPublicKeys` is a list of
-login keys, which must never be the same list. From fundament's side: a
-hosted site's `persons.yml` "may be empty", and a row the site keeps "is a
-directory site's: `groups` refused, `uid` a pin inside the range"
-(`doc/model/people.md:36-37`), so such a row is admitted. Two things to
-settle with it. A row needs `given` and `family`, and `profile` unless the
-site has a `default_profile` (`model/README.md#personsyml`, read on `main`;
-not re-read on `develop`), so "nothing else" means those too unless the
-loader is relaxed. And `onboard` takes its person from a `persons.yml` row,
-so a site that onboards through the playbook has the row anyway; the first
-hosted site's file is `{}` today. *This note's recommendation:* yes, the
-row, for the designer's reasons; the alternative is a second home for
-approval keys, which the model has no shape for.
+**E. Whether, on a hosted site, `approval_keys` go on the person's
+`persons.yml` row. Open.** The designer recommends yes: the operator
+certifies the keys at the converge, so they must be where the converge
+reads; the repository gives them a reviewed history; and the provider's
+`sshPublicKeys` is a list of login keys, which must never be the same list.
 
-**Whether the first sandboxes separate model and signer. Open.** Not a
-model question; this note has nothing on it.
+No loader change is needed. An approver's row has what any row needs
+(`given`, `family`, and `profile` or the site's `default_profile`) plus
+`approval_keys`; `groups` is refused as on any directory site, and the row
+says nothing of `enabled` that the broker reads. Re-read on `develop`
+(3d0c177): the person row requires `given` and `family`
+(`load_identity.py:408`), and the profile is the row's or the site's
+default (`people.py:448`). A hosted site's `persons.yml` "may be empty", and
+a row the site keeps "is a directory site's: `groups` refused, `uid` a pin
+inside the range" (`doc/model/people.md:36-37`).
+
+The question is smaller than it looks, because `onboard` takes its person
+from a `persons.yml` row: `hosted.onboard_inputs` (`hosted.py`, from line
+168) refuses a login with no row, refuses a row that is not enabled ("has
+left; onboarding is for an active person"), and reads the row's `given`,
+`family`, `uid`, `keys` and the profile's groups. So a site that onboards
+through the playbook has the rows anyway, and E shrinks to "`approval_keys`
+go on that row". `offboard` needs no row (`hosted.offboard_inputs`). The
+first hosted site's file is `{}` today, so nobody there has been onboarded
+through the playbook yet. *This note's recommendation:* yes, on the row;
+the alternative is a second home for approval keys, which the model has no
+shape for.
+
+**J2. Whether `probe` is a product type from the start. Open:** what the
+owner accepted is not clear, so both positions stand.
+
+- *The designer's:* `probe` aims at the product type from the start.
+- *This note's earlier one:* the flags, the field, the flow and
+  `approval-broker` in the product; `probe` as a site type on the first
+  site, and a product row once a second site binds it. Its basis was "a
+  fact only one site has is site data" (the port workspace's `CLAUDE.md`)
+  and "never designed ahead" (fundament's).
+
+fundament's rules do not forbid the designer's way, and this is no conflict
+for the owner. The rule about one site's facts is about a site's names and
+values, not about mechanism; a type is "added when a ported role or a
+site's inventory needs it", and the first site needs it. Two facts of the
+model speak for the product from the start. "A site row named like a
+product row is refused" (`doc/model/catalogue.md`, Two layers), so a site
+type `probe` would stop the load at the upgrade that ships the product's,
+with the row to delete and the role to move. And the type's name is on the
+wire and in every service certificate (J3), so the product could not take
+another name to avoid that. A second site is already planned. Against it:
+the product then ships a type, a role and a kit program before a second
+site has shown it fits two. *This note now leans to the designer's way.*
 
 **Decided, with what each rested on:**
 
 - **J1.** The operator is the issuer, at a converge. `develop` already
   signs that way for host certificates (`site_ca_sign`).
-- **J2.** The flags, the field, the flow and `approval-broker` in the
-  product; `probe` as a site type on the first site and a product row once
-  a second site binds it. Basis: "a fact only one site has is site data"
-  (the port workspace's `CLAUDE.md`).
 - **J3.** The service's name is `probe`. It is on the wire and in every
   service certificate, so it is settled before the first site binds it.
 - **J4.** One `verified_on` per key, the `keys` row's shape.
@@ -843,7 +918,9 @@ model question; this note has nothing on it.
 
 ## Report
 
-**What was read for this writing**, in fundament at `develop` 8b6fe8f,
+**What was read for this writing**, in fundament at `develop` 8b6fe8f
+(for E, on 2026-11-19, at 3d0c177, one commit later, which touches the
+network only),
 read-only, through `git show` and `git grep` (the checkout itself is on
 `main`): `doc/model/people.md` (The backend is derived, A hosted directory,
 VPN identities, the last section); `doc/linux.md` (ldap_client, and the
@@ -852,7 +929,9 @@ the playbook table); `doc/core.md` (site_ca_sign); `doc/model/secrets.md`
 (The site CA); `model/README.md` (the `site.yml` providers, the backend
 paragraph); `catalogue/slots.yml` (the `ldap-client`, `hosted-ldap` and
 `site-ca` rows) and `catalogue/profiles.yml` (the `ldap_client` row);
-`hosted.py` (its head, `estate_group_mail`); `people.py` (`estate_persons`,
+`hosted.py` (its head, `primary_mail`, `onboard_inputs`, `offboard_inputs`,
+`estate_group_mail`); `load_identity.py:408` and `people.py:448` (what a
+person row needs); `people.py` (`estate_persons`,
 `vpn_identities`); `loader.py:499` and `_check.py:42`; the role
 `ldap_client`'s README; the identity collection's README, `offboard.yml`,
 `module_utils/workspace.py` (group members, the onboard and offboard
@@ -865,8 +944,7 @@ generator table's two CA rows). In the port workspace: `dai/main`'s
 everything else this note cites: the catalogue's blocks and the active
 rule, `doc/model/policy.md`, `inventory.md`, `operations.md`, `roles.md`,
 `doc/converge/index.md`, `doc/observability.md`, the grant check in
-`load_identity.py`, `bind_diag`, the person row's required fields, point 9
-as a whole.
+`load_identity.py`, `bind_diag`, point 9 as a whole.
 
 **Not read at all:** the branches `agent/*`; the port workspace's `tum/`,
 `c-it-work/`, `specs/` and `dai/main/SECRETS.md`; the loader's code for the
@@ -904,10 +982,10 @@ hosted backend beyond `hosted.py`'s head; `site_ca_sign`'s code.
 - That `ssh-keygen -Y verify` accepts, in every detail, the certificates a
   controller-side builder or a host key as issuer would make; the two
   allowed-signers lines.
-- Whether a person row with `approval_keys` and little else loads on a
-  hosted site today (E).
-- Whether `offboard`'s listing of a user's groups misses nested
-  memberships.
+- That a hosted site loads with person rows in it: the rules were read,
+  no such site was loaded (E).
+- Whether `offboard` leaves a membership that comes through a nested
+  group; expected covered (point 8).
 - Whether a failed tier stops the tiers after it, which the local site's
   leaver order assumes as the worst case.
 - Whether fundament's token check, which lives outside the product, admits

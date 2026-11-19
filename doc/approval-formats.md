@@ -75,6 +75,13 @@ reader refuses a `v` it does not know.
   `sha256:<64 hex digits>`.
 - **Unknown members** make a document invalid. Nothing is ignored: what a
   dialog does not show must not be in what is signed.
+- **A repeated member** makes a document invalid, in every object of it,
+  the parameters of a call and what `_meta` carries included. A reader
+  never takes the first or the last of two equal names: two readers that
+  choose differently would verify one signature over two meanings. This was
+  always so (such a document was never a valid one); the rule is written
+  down so that a second implementation does not depend on what the first
+  happened to do.
 - **Size**: a call is at most 16 KiB; a request at most 32 KiB; a clearance
   at most 1 KiB; a connection document at most 1 KiB; a standing at most
   64 KiB (both in `approval-connections.md`, section 5).

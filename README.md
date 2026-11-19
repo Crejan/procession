@@ -59,6 +59,11 @@ specification only.
   test that feeds a C1 control character and a bidirectional mark through
   every output it has. A state file of a program's own that fails
   validation when read back is refused whole.
+- Repeated keys. A reader of JSON that is signed, checked or decided on
+  refuses an object with a repeated key; it never takes the first or the
+  last. A derived struct does that by itself; whatever is read through a
+  map or a generic value (the arguments of a call, `_meta`, a `settings`
+  object, a `members` object, a register) needs the one reader that does.
 - Errors. An error names the file, the member and what was wrong with it,
   and never repeats the offending value, except through the escape form
   with a length bound where an operator needs to see it. The stderr of a
