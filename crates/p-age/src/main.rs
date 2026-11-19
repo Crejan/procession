@@ -115,6 +115,10 @@ fn admin(verb: &str, args: &[&str]) -> ExitCode {
             return ExitCode::from(EXIT_USAGE);
         }
     };
+    // Through `sudo` the peer is uid 0 and the record says root: with a group configured, say so.
+    if p_age::admin::recorded_as_root(config.administrators_group.is_some(), p_ermit::peer::own_uid()) {
+        eprintln!("{}", p_age::admin::ROOT_NOTICE);
+    }
     match ask(&socket_path(&config.state_dir), &command) {
         Ok(reply) => {
             let (mut text, code) = render(&command, &reply);
@@ -183,7 +187,8 @@ fn run(path: &std::path::Path) -> Result<(), String> {
     runtime.block_on(async {
         let limits = ConnLimits::new(config.max_connections, config.max_connections_per_address);
         // The administrator's verbs reach this broker over a socket in the state directory (0600, peer checked).
-        let admin_listener = p_age::admin::bind(&config.state_dir).map_err(|e| e.to_string())?;
+        let admin_listener =
+            p_age::admin::bind_for(&config.state_dir, broker.administrators().as_ref()).map_err(|e| e.to_string())?;
         tokio::spawn(p_age::admin::serve(admin_listener, broker.clone()));
         let mut listeners = Vec::new();
         for address in &config.listen {

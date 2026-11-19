@@ -16,7 +16,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use crate::register::Actor;
-use p_act::peer::{self, Policy, Throttle};
+use p_act::peer::{self, Throttle};
 use p_act::sign::Fingerprint;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -220,6 +220,10 @@ struct ReplyWire {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     keygen_unusable: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    administrators_group: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    administrators_gid: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     broker_certificate_path: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     broker_certificate_valid: Option<bool>,
@@ -253,6 +257,8 @@ impl Reply {
                     (Some(s.pledges), Some(s.held), Some(s.delegations), Some(s.withdrawn));
                 (w.blocked_persons, w.blocked_keys) = (Some(s.blocked_persons.clone()), Some(s.blocked_keys.clone()));
                 w.keygen_unusable = s.keygen_unusable.clone();
+                w.administrators_group = s.administrators.as_ref().map(|g| g.name.clone());
+                w.administrators_gid = s.administrators.as_ref().map(|g| g.gid);
                 let b = &s.broker_certificate;
                 w.broker_certificate_path = Some(b.path.clone());
                 w.broker_certificate_valid = Some(b.valid);
@@ -292,9 +298,14 @@ impl Reply {
                 let clean = |l: &Option<Vec<String>>| l.iter().flatten().all(|x| crate::util::is_clean(x));
                 let names = w.blocked_persons.iter().flatten().all(|n| crate::site::valid_name(n));
                 let keys = w.blocked_keys.iter().flatten().all(|k| k.parse::<Fingerprint>().is_ok());
-                let texts = [&w.keygen_unusable, &w.broker_certificate_path, &w.broker_certificate_failure]
-                    .iter()
-                    .all(|t| t.as_deref().is_none_or(crate::util::is_clean));
+                let texts = [
+                    &w.keygen_unusable,
+                    &w.administrators_group,
+                    &w.broker_certificate_path,
+                    &w.broker_certificate_failure,
+                ]
+                .iter()
+                .all(|t| t.as_deref().is_none_or(crate::util::is_clean));
                 if !(names && keys && clean(&w.uncovered) && texts) {
                     return None;
                 }
@@ -307,6 +318,11 @@ impl Reply {
                     blocked_persons: w.blocked_persons?,
                     blocked_keys: w.blocked_keys?,
                     keygen_unusable: w.keygen_unusable,
+                    administrators: match (w.administrators_group, w.administrators_gid) {
+                        (Some(name), Some(gid)) => Some(AdminGroup { name, gid }),
+                        (None, None) => None,
+                        _ => return None,
+                    },
                     broker_certificate: BrokerCertificateStatus {
                         path: w.broker_certificate_path?,
                         valid: w.broker_certificate_valid?,
@@ -415,11 +431,112 @@ pub enum BindError {
     InUse(String),
     #[error("cannot make {path}: {source}")]
     Io { path: String, source: std::io::Error },
+    #[error("{0}")]
+    Group(String),
+}
+
+/// The group whose members may use `admin.sock` besides root: the config member `administrators_group`, resolved to
+/// a gid once, at start. **Who is in the group is the operating system's matter**; the broker reads membership from
+/// the kernel, per connection, and never from the name service.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AdminGroup {
+    pub name: String,
+    pub gid: u32,
+}
+
+/// Why `administrators_group` cannot be used: the start is refused, naming the member.
+#[derive(Debug, Error, PartialEq, Eq)]
+pub enum GroupError {
+    #[error("`administrators_group`: not supported here (the kernel's list of a peer's groups is read on Linux only)")]
+    Unsupported,
+    #[error("`administrators_group`: not a group name")]
+    BadName,
+    #[error("`administrators_group`: the group could not be looked up: {0}")]
+    Lookup(String),
+    #[error("`administrators_group`: there is no such group")]
+    Unknown,
+    #[error("`administrators_group`: it is group 0, which is root's")]
+    Root,
+    #[error(
+        "`administrators_group`: it is the broker's own primary group, which would admit every process of its user"
+    )]
+    OwnPrimary,
+}
+
+/// Resolve the member to a gid, with the lookups given (so that every refusal is testable anywhere).
+pub fn resolve_group_with(
+    name: &str,
+    supported: bool,
+    lookup: impl FnOnce(&str) -> Result<Option<u32>, String>,
+    own_gid: u32,
+) -> Result<AdminGroup, GroupError> {
+    if !supported {
+        return Err(GroupError::Unsupported);
+    }
+    if name.is_empty() || name.chars().count() > 256 || !crate::util::is_clean(name) {
+        return Err(GroupError::BadName);
+    }
+    let gid = lookup(name).map_err(GroupError::Lookup)?.ok_or(GroupError::Unknown)?;
+    if gid == 0 {
+        return Err(GroupError::Root);
+    }
+    if gid == own_gid {
+        return Err(GroupError::OwnPrimary);
+    }
+    Ok(AdminGroup { name: name.to_owned(), gid })
+}
+
+/// Resolve `administrators_group` with the system's lookups (start only: the lookup may block).
+pub fn resolve_group(name: &str) -> Result<AdminGroup, GroupError> {
+    resolve_group_with(
+        name,
+        peer::groups_supported(),
+        |n| peer::group_id(n).map_err(|e| e.to_string()),
+        peer::own_gid(),
+    )
+}
+
+/// The rule when no administrators' group is configured: the user the broker runs as, or root.
+pub const POLICY: peer::Policy<'static> = peer::Policy::OwnUserOrRoot;
+
+/// What `page` says on standard error when it runs as root while an administrators' group is configured: the
+/// register will say uid 0 and not who it was.
+pub const ROOT_NOTICE: &str = "page: recorded as root; run without sudo to be recorded by name";
+
+/// Whether `page` run by user `uid` says [`ROOT_NOTICE`].
+#[must_use]
+pub fn recorded_as_root(group_configured: bool, uid: u32) -> bool {
+    group_configured && uid == 0
+}
+
+/// Whether a peer may use the socket, from what the kernel said of it. Without a group: root and the broker's own
+/// user. With one: root, or a member of the group by primary group or by supplementary groups; **the broker's own
+/// user is refused** although it is in the group. `supplementary` is read only when it is needed, and an error from it
+/// is a refusal, never an admission.
+pub fn admits<E>(
+    group: Option<&AdminGroup>,
+    (uid, gid): (u32, u32),
+    own_uid: u32,
+    supplementary: impl FnOnce() -> Result<Vec<u32>, E>,
+) -> bool {
+    match group {
+        None => uid == 0 || uid == own_uid,
+        Some(_) if uid == 0 => true,
+        Some(_) if uid == own_uid => false,
+        Some(g) => gid == g.gid || supplementary().is_ok_and(|groups| groups.contains(&g.gid)),
+    }
 }
 
 /// Make `admin.sock` in `state_dir`: 0600 set explicitly after `bind`, whatever the umask. A socket that is
 /// there is removed only if nothing answers on it.
 pub fn bind(state_dir: &Path) -> Result<UnixListener, BindError> {
+    bind_for(state_dir, None)
+}
+
+/// As [`bind`]. With an administrators' group the directory is given to it for traversal (group, 0710) and the
+/// socket is group `gid` mode 0660, each **checked afterwards**; a broker that cannot do that does not start. The
+/// umask is 077 while the socket is made, so it is never open for an instant.
+pub fn bind_for(state_dir: &Path, group: Option<&AdminGroup>) -> Result<UnixListener, BindError> {
     let path = state_dir.join(SOCKET_NAME);
     let shown = path.display().to_string();
     let io = |source| BindError::Io { path: shown.clone(), source };
@@ -431,34 +548,60 @@ pub fn bind(state_dir: &Path) -> Result<UnixListener, BindError> {
     }
     let listener = UnixListener::bind(&path).map_err(io)?;
     std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).map_err(io)?;
+    if let Some(g) = group {
+        crate::perm::open_socket_to_group(&path, g.gid)
+            .and_then(|()| crate::perm::open_dir_to_group(state_dir, g.gid))
+            .map_err(|e| BindError::Group(e.to_string()))?;
+    }
     Ok(listener)
 }
 
-/// The policy for the socket: the user the broker runs as, or root. The broker runs as the owner of its state
-/// directory, so this is "root or the owner of the state directory"; no `Uids` list is needed.
-pub const POLICY: Policy<'static> = Policy::OwnUserOrRoot;
-
-/// Whether to serve this peer: `p_act::peer` reads its credentials and checks them against [`POLICY`]. A peer
-/// whose credentials cannot be read, or who is not admitted, is dropped and told nothing; the refusal is one
-/// throttled line on `sink`.
-pub fn admit_peer<S: AsRawFd>(socket: &S, throttle: &mut Throttle, sink: &mut dyn FnMut(&str)) -> bool {
-    admitted_uid(socket, throttle, sink).is_some()
+/// The admitted peer's user id, or `None` and one throttled line. Read or drop: credentials that cannot be read, a
+/// user the rule refuses, and groups that cannot be read are all a dropped connection, told nothing.
+pub fn admitted_uid_for<S: AsRawFd>(
+    socket: &S,
+    group: Option<&AdminGroup>,
+    throttle: &mut Throttle,
+    sink: &mut dyn FnMut(&str),
+) -> Option<u32> {
+    let drop_with = |throttle: &mut Throttle, text: String, sink: &mut dyn FnMut(&str)| {
+        throttle.report(&text, sink);
+        None
+    };
+    let peer = match peer::Peer::read_credentials(socket) {
+        Ok(p) => p,
+        Err(e) => {
+            return drop_with(
+                throttle,
+                format!("admin socket: could not read the peer's credentials ({e}): dropped"),
+                sink,
+            );
+        }
+    };
+    if admits(group, (peer.uid(), peer.gid()), peer::own_uid(), || peer::peer_groups(socket)) {
+        Some(peer.uid())
+    } else {
+        drop_with(throttle, format!("admin socket: a connection from user {} was dropped", peer.uid()), sink)
+    }
 }
 
-/// As [`admit_peer`], and the admitted peer's user id.
-pub fn admitted_uid<S: AsRawFd>(socket: &S, throttle: &mut Throttle, sink: &mut dyn FnMut(&str)) -> Option<u32> {
-    peer::accept(socket, &POLICY, "admin socket", throttle, sink).map(|p| p.uid())
+/// Whether to serve this peer under the broker's own rule (root and the broker's user): the credentials are read
+/// and checked; anyone else is dropped and told nothing; the refusal is one throttled line on `sink`.
+pub fn admit_peer<S: AsRawFd>(socket: &S, throttle: &mut Throttle, sink: &mut dyn FnMut(&str)) -> bool {
+    admitted_uid_for(socket, None, throttle, sink).is_some()
 }
 
 /// Serve commands for ever.
 pub async fn serve(listener: UnixListener, broker: Arc<Broker>) {
     let mut throttle = Throttle::new("page", peer::LOG_INTERVAL);
+    let group = broker.administrators();
     loop {
         let Ok((stream, _)) = listener.accept().await else {
             tokio::time::sleep(Duration::from_millis(100)).await;
             continue;
         };
-        let Some(uid) = admitted_uid(&stream, &mut throttle, &mut |line| eprintln!("{line}")) else {
+        let Some(uid) = admitted_uid_for(&stream, group.as_ref(), &mut throttle, &mut |line| eprintln!("{line}"))
+        else {
             continue;
         };
         let broker = Arc::clone(&broker);
@@ -574,7 +717,11 @@ pub fn render(command: &Command, reply: &Reply) -> (String, u8) {
                 s.pledges, s.held, s.delegations, s.withdrawn
             ));
             out.push_str(&format!("blocked persons: {}\n", list(&s.blocked_persons)));
-            out.push_str(&format!("blocked keys: {}", list(&s.blocked_keys)));
+            out.push_str(&format!("blocked keys: {}\n", list(&s.blocked_keys)));
+            out.push_str(&match &s.administrators {
+                Some(g) => format!("administrators: group {} (gid {})", crate::util::shown(&g.name), g.gid),
+                None => "administrators: root only".to_owned(),
+            });
             let b = &s.broker_certificate;
             match (b.valid, b.days_left) {
                 (true, Some(days)) => {
