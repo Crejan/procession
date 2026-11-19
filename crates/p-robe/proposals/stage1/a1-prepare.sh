@@ -8,6 +8,9 @@ set -eu
 # first change to the machine. A run that stops leaves nothing behind.
 
 PROBE_SRC="${1:?usage: sh a1-prepare.sh /path/to/probe}"
+# The files root writes live in a directory only root can write (b-common.sh), never under a fixed name in /var/tmp.
+HERE=$(cd "$(dirname "$0")" && pwd)
+. "$HERE/b-common.sh"
 SVC=probe-svc
 RULE=/etc/sudoers.d/probe-svc
 INSTALLED=/usr/local/bin/probe
@@ -26,7 +29,8 @@ command -v ssh-keygen >/dev/null || { echo "FAIL: ssh-keygen is not installed"; 
 # separates commands in a list). Confirmed on Debian 13: visudo -cf accepts this line, and sudo matched a real
 # call of this form (the owner's run of 2026-11-18). If visudo says otherwise on another host, nothing has been
 # changed and the message is the finding.
-CHECK=/var/tmp/probe-svc.sudoers.check
+ensure_statedir
+CHECK=$(mktemp "$STATEDIR/sudoers.XXXXXX")
 cat > "$CHECK" <<'RULE'
 # probe-svc may run the dispatcher of probe, as root, in exactly this form: --within <rating>
 # --call <uuid> --until <seconds> <noun> <verb> [arguments]. --call is the waiting form (the dispatcher waits
@@ -50,7 +54,7 @@ fi
 # 1. The service's account: no login, no shell, its own home.
 if id "$SVC" >/dev/null 2>&1; then
   echo "note: the account $SVC exists already; it is left as it is, and undo.sh will not remove it"
-  : > /var/tmp/probe-stage1.account-existed
+  : > "$STATEDIR/account-existed"
 else
   useradd --system --create-home --home-dir /var/lib/probe-svc --shell /usr/sbin/nologin "$SVC"
   echo "made the account $SVC"

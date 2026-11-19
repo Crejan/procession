@@ -7,9 +7,15 @@ set -u
 HERE=$(cd "$(dirname "$0")" && pwd)
 . "$HERE/b-common.sh"
 need_root
-[ -e "$MARKER" ] || { echo "nothing to undo: $MARKER does not exist (b1 did not run, or this was undone)"; exit 0; }
+exists "$STATEDIR" || { echo "nothing to undo: $STATEDIR does not exist (b1 did not run, or this was undone)"; exit 0; }
+# Root obeys this file: it is read only if it is a regular file of root's that nobody else can write, in a directory of
+# the same kind. Anything else (a name another account made) is not read.
+root_only "$STATEDIR" d || { echo "STOP: $STATEDIR is not a directory of root's that only root can write: not read, not removed; look at it"; exit 1; }
+[ -e "$MARKER" ] || { echo "STOP: $MARKER is missing in $STATEDIR: nothing says what b1 made, so nothing is removed; look at $STATEDIR"; exit 1; }
+root_only "$MARKER" f || { echo "STOP: $MARKER is not a regular file of root's that only root can write: not read; look at it"; exit 1; }
 
 PERSON=$(marker_value PERSON)
+case "$PERSON" in *[!A-Za-z0-9._-]*) echo "STOP: the person in the marker is not a name"; exit 1 ;; esac
 [ -z "$PERSON" ] || RUNDIR=/run/pledge-$PERSON
 # pledge must not be running: its socket directory is what it holds open.
 if [ -n "$PERSON" ] && [ -S "$RUNDIR/control.sock" ] && [ -n "$(command -v fuser)" ] && fuser "$RUNDIR/control.sock" >/dev/null 2>&1; then
@@ -32,15 +38,13 @@ rm -rf /var/lib/probe/used/* 2>/dev/null
 # The key directory: the service's key, its certificate and the person's two public keys, all made by b2.
 marked KEYDIR_MADE && rm -rf "$KEYDIR" && echo "removed $KEYDIR"
 
-for f in $(sed -n 's/^CALLER_MADE=//p' "$MARKER"); do rm -f "$f"; done
-for f in $(sed -n 's/^BUNDLE_MADE=//p' "$MARKER"); do rm -f "$f"; done
-rm -f /var/tmp/probe-stage1.pact-call.sh /var/tmp/probe-stage1.pledge-config.* /var/tmp/probe-stage1.key.* /var/tmp/probe-stage1.settings.*
+for f in $(sed -n 's/^CALLER_MADE=//p' "$MARKER") $(sed -n 's/^BUNDLE_MADE=//p' "$MARKER"); do sane_path "$f" && rm -f "$f"; done
 
 # pledge's state (its keys, its record) and the socket directory, only if b1 made them.
-for d in $(sed -n 's/^STATE_MADE=//p' "$MARKER"); do rm -rf "$d" && echo "removed pledge's state $d (its keys and record)"; done
-for d in $(sed -n 's/^RUNDIR_MADE=//p' "$MARKER"); do rm -rf "$d" && echo "removed $d"; done
+for d in $(sed -n 's/^STATE_MADE=//p' "$MARKER"); do sane_path "$d" && rm -rf "$d" && echo "removed pledge's state $d (its keys and record)"; done
+for d in $(sed -n 's/^RUNDIR_MADE=//p' "$MARKER"); do sane_path "$d" && rm -rf "$d" && echo "removed $d"; done
 # parents of the state directory b1 made, only if empty now.
-for d in $(sed -n 's/^PARENT_MADE=//p' "$MARKER" | sort -r); do rmdir "$d" 2>/dev/null; done
+for d in $(sed -n 's/^PARENT_MADE=//p' "$MARKER" | sort -r); do sane_path "$d" && rmdir "$d" 2>/dev/null; done
 
 # The group and its members, as b1 found them.
 for member in $(sed -n 's/^ADDED_\(.*\)=1$/\1/p' "$MARKER"); do
@@ -49,5 +53,7 @@ done
 marked GROUP_MADE && groupdel "$GROUP" 2>/dev/null && echo "removed the group $GROUP"
 marked HOSTKEY_MADE && rm -f /etc/ssh/ssh_host_ed25519_key /etc/ssh/ssh_host_ed25519_key.pub && echo "removed the host key b1 made"
 
-rm -f "$MARKER"
+# Its own files only: Stage A's (check.log, account-existed) are undone by undo.sh; the directory goes when it is empty.
+rm -f "$MARKER" "$STATEDIR"/pledge-config.* "$STATEDIR"/key.* "$STATEDIR"/settings.* "$STATEDIR"/verify.out
+rmdir "$STATEDIR" 2>/dev/null
 echo "left alone: the audit lines already in the journal (history), Stage A (undo.sh), the build in your checkout"

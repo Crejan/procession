@@ -6,7 +6,11 @@ set -u
 SVC=probe-svc
 PROBE=/usr/local/bin/probe
 FAILED=0
-LOG=/var/tmp/probe-stage1.check.log
+HERE=$(cd "$(dirname "$0")" && pwd)
+. "$HERE/b-common.sh"
+# Nothing root writes lies under a fixed name in /var/tmp: the log is in the directory only root can write (a1 made it).
+root_only "$STATEDIR" d || { echo "STOP: $STATEDIR is missing or is not root's alone: a1-prepare.sh has not passed (or something else made that name); nothing was checked."; exit 1; }
+LOG=$STATEDIR/check.log
 : > "$LOG"
 
 U1=3f2b6c1e-8a57-4d0e-9b1a-5c2e7d9f0a11

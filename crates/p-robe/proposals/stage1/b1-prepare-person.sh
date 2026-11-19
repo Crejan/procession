@@ -13,11 +13,15 @@ identify "${1:-}"
 # -- preconditions (nothing changed yet) ------------------------------------------------------------------------
 [ -x "$PROBE" ] && [ -e /etc/sudoers.d/probe-svc ] || stop "Stage A is not in place ($PROBE or /etc/sudoers.d/probe-svc is missing): run a1 and a2 first"
 id "$SVC" >/dev/null 2>&1 || stop "the account $SVC does not exist: run a1 first"
-[ -e "$MARKER" ] && stop "$MARKER exists: Stage B was prepared before; run undo-b.sh first"
-[ -e "$STATE/config.json" ] && stop "$STATE/config.json exists (pledge state of $PERSON from before): look at it, move it away if it is not wanted, or run undo-b.sh"
-[ -e "$KEYDIR" ] && stop "$KEYDIR exists: look at it (it would hold a service key), move it away or run undo-b.sh"
-[ -e "$SETTINGS" ] && stop "$SETTINGS exists: look at it, move it away or run undo-b.sh"
-[ -e "$RUNDIR" ] && stop "$RUNDIR exists: a pledge of an earlier run? stop it (Ctrl-C in its terminal), then run undo-b.sh"
+# The directory exists from Stage A (a1 made it): then it must be root's alone and hold no Stage B marker.
+if exists "$STATEDIR"; then
+  root_only "$STATEDIR" d || stop "$STATEDIR exists but is not a directory of root's that only root can write: look at it"
+  exists "$MARKER" && stop "$MARKER exists: Stage B was prepared before; run undo-b.sh first"
+fi
+exists "$STATE/config.json" && stop "$STATE/config.json exists (pledge state of $PERSON from before): look at it, move it away if it is not wanted, or run undo-b.sh"
+exists "$KEYDIR" && stop "$KEYDIR exists: look at it (it would hold a service key), move it away or run undo-b.sh"
+exists "$SETTINGS" && stop "$SETTINGS exists: look at it, move it away or run undo-b.sh"
+exists "$RUNDIR" && stop "$RUNDIR exists: a pledge of an earlier run? stop it (Ctrl-C in its terminal), then run undo-b.sh"
 command -v ssh-keygen >/dev/null || stop "ssh-keygen is not installed"
 command -v groupadd >/dev/null && command -v usermod >/dev/null || stop "groupadd/usermod (shadow-utils) are not installed"
 as_owner "command -v cargo >/dev/null" || stop "cargo is not on the PATH of $PERSON (a login shell): the owner builds the checkout"
@@ -26,6 +30,9 @@ commit_of_checkout
 echo "checkout $CHECKOUT at $COMMIT; person $PERSON (uid $PUID, group $PGROUP, home $PHOME); host $HOST"
 echo "pledge: $PLEDGE"
 
+# The directory only root can write: made with mkdir, which fails if the name exists (no race with another account).
+ensure_statedir
+marker_safe || stop "$STATEDIR is not root's alone"
 mark PERSON "$PERSON"
 
 # -- the host key: pledge's configuration names it, and the service's certificate is made with it ---------------------
@@ -75,7 +82,7 @@ done
 install -d -o "$PERSON" -g "$PGROUP" -m 0700 "$STATE" || stop "cannot make $STATE"
 mark STATE_MADE "$STATE"
 # pledge's configuration: its person, this host and its key, the service the agents may reach, the group.
-TMP=$(mktemp /var/tmp/probe-stage1.pledge-config.XXXXXX) || stop "mktemp failed"
+TMP=$(tmpfile pledge-config) || stop "mktemp failed"
 pledge_config_json "$PERSON" "$HOST" "$HOSTPUB" "$GROUP" "http://$LISTEN/mcp" > "$TMP"
 install -o "$PERSON" -g "$PGROUP" -m 0600 "$TMP" "$STATE/config.json"
 rm -f "$TMP"

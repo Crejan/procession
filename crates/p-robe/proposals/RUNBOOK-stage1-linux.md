@@ -168,14 +168,16 @@ programs have today, and what is not yet there is marked.
 | `/var/lib/probe/locks` (root, 0755), `/var/lib/probe/used` (probe-svc, 0700) | `a1-prepare.sh` | `undo.sh` (removes `/var/lib/probe`) |
 | `/etc/sudoers.d/probe-svc` (0440) | `a1-prepare.sh`, after `visudo -cf` | `undo.sh` |
 | lines in syslog or the journal (tag `probe`, facility `auth`) | the dispatcher, on every call | not undone: they are history |
-| files in `/var/tmp` (`probe-stage1-run`, `probe-stage1.check.log*`) | `a2`, `a3` | `a3` removes its own; `undo.sh` the rest |
+| **`/etc/probe-stage1/`** (root:root 0700): made by **`a1`** with `mkdir` (it fails if the name exists, and if it is there it must be root's alone); holds Stage A's `check.log*` (`a2`), the temporary sudoers file (`a1`) and `account-existed` (`a1`), and later Stage B's marker (`b1`) | `a1`, `a2`, `b1` | `undo.sh` removes Stage A's files, `undo-b.sh` Stage B's; **the directory goes when it is empty**, so after only Stage A it goes with `undo.sh`, and after both with whichever runs last |
+| `/run/probe-stage1-run.XXXXXX`: the copies of the test and of `pledge` that `probe-svc` runs. Made by `a3` with `mktemp -d` (root, 0700, in `/run`, where only root writes), filled by root, then **given to `probe-svc`**: it is the account's own directory and copies of programs it runs as itself, and nobody else has a name in it | `a3` | `a3` at its end; `undo.sh` |
 | temporary files under `/tmp` for pledge's state and sockets | the test | the test removes them when it passes; on a failure `rm -rf /tmp/s1-*` |
 | Stage B: an Ed25519 host key if the host had none (`/etc/ssh/ssh_host_ed25519_key{,.pub}`) | `b1` | `undo-b.sh`, only if `b1` made it |
 | Stage B: the group `pledge-svc` and the memberships of the person and `probe-svc` | `b1` | `undo-b.sh`, only what `b1` added |
 | Stage B: `/run/pledge-<person>` (the person's, 0700; pledge makes it 0710 of the group), pledge's state `~/.local/state/pledge` (0700) with `config.json` (0600) and, once pledge runs, its keys and record | `b1`, pledge | `undo-b.sh` |
 | Stage B: `/etc/probe/` (the person's two public keys; the service's key and its certificate), `/etc/probe.json` (root, 0644) | `b1` (the directory), `b2` | `undo-b.sh` |
 | Stage B: the units `probe-serve.service`, `probe-setup.service`, `probe-setup.timer` in `/etc/systemd/system`, enabled | `b2` | `undo-b.sh` |
-| Stage B: the agent's bundle `~/probe-stage1-bundle` (0600, the person's) and `/var/tmp/probe-stage1.*` helper files, the marker `/var/tmp/probe-stage1.b-state` | `b3`, `b1` | `undo-b.sh` |
+| Stage B: **`/etc/probe-stage1/`** (root:root 0700, made by `b1` with `mkdir`, which fails if the name exists): the marker `b-state` (what `b1` made, which `undo-b.sh` obeys) and the scripts' temporary files | `b1` | `undo-b.sh` |
+| Stage B: the agent's bundle `~/probe-stage1-bundle` (0600, the person's) and `~/.probe-stage1-pact-call.sh` (written by the person through `su`, never by root) | `b3` | `undo-b.sh` |
 | a TCP port on 127.0.0.1 (8765) | `probe serve` | the unit stops |
 
 `undo.sh` is safe to run at any time and does nothing to what is not on this list.
@@ -248,7 +250,7 @@ It builds, as the checkout's owner in a login shell, the test (with the checkout
 `grep` and `sed`; no `jq`). It stops if cargo does not name exactly one executable for each. Its first lines say the
 checkout's commit and the two paths; the test's first line says `test binary built from: <commit>`, and the test
 stops with "stale test binary" if that is not the commit the script expected (a working tree with changes counts as
-`<commit>-dirty`, so it is never the commit). It copies the two to `/var/tmp/probe-stage1-run` and runs the
+`<commit>-dirty`, so it is never the commit). It copies the two into a directory of its own in `/run` (`mktemp -d`, handed to `probe-svc`) and runs the
 test **as `probe-svc`**, naming `pledge` in `PROBE_PLEDGE_BIN`. The test starts its own `pledge serve` in a temporary
 directory (keys in files, the person's answers scripted on its standard
 input), makes the service's key and certificate with `probe setup` from a
@@ -304,6 +306,10 @@ the service's account can search the directory and write the socket and nothing 
 they drop another user). The person must be in `pledge-svc` **in the login that starts pledge** (`su - alice`: a fresh login; an old shell does not have it),
 else pledge's `chown` to the group is refused. `/run` is a tmpfs: after a reboot run `b1` again (after `undo-b.sh`). *Rehearsed with the real `pledge` on macOS with another group: the
 configuration `b1` writes is accepted, the directory becomes 0710 and the socket 0660 of the group, `keys create` asks in pledge's terminal, and `keys list` has the form `b2` reads.*
+
+**Nothing root obeys lies where another account could have put it.** The marker (which paths `undo-b.sh` removes as root, which group and host key it takes away) is in `/etc/probe-stage1`, a directory that only root can write
+(`a1` makes it with `mkdir -m 0700`, which fails if the name appears meanwhile; `b1` finds it there, checks that it is root's alone, and uses it; if only Stage B is run it makes it the same way); `b2`, `b3` and `undo-b.sh` read or append to the marker only if the directory and the file are root's, not links and not writable by group or others, and `undo-b.sh` also refuses a path from
+it that is not absolute, has `..`, or is near the top of the file system. Guards use `-e` and `-L` (a dangling link counts as there). The `pact` helper script is written into the person's home by the person, and run by him: root writes and executes nothing in `/var/tmp`. Stage A's scripts are held to the same rule: `a1`, `a2`, `a3` and `undo.sh` write nothing under a fixed name in `/var/tmp` (`/etc/probe-stage1` or `/run/probe-stage1-run.XXXXXX`, above), and a test checks that no script of Stage A or B names `/var/tmp`. **Leftovers of earlier runs** (`/var/tmp/probe-stage1*`, `/var/tmp/probe-svc.sudoers.check`) are not touched by any script (a name in a world-writable directory is not root's to obey): look with `ls -ld /var/tmp/probe-*` and, if they are yours, `rm -rf` them by hand.
 
 ### What you do, in order
 
@@ -616,7 +622,7 @@ agent and service TLS is open for stage 2. `pact`'s client is p-act's: `ureq` 3,
 **Stage A, by the owner, 2026-11-18, at `2a38839`, scripts unedited, Debian 13 in an unprivileged LXC container, writer: p-act.**
 a1 and a2 passed (`REPORT-runbook.md` lists the 23 lines). a3, run with the executable cargo named
 (`target/debug/build/p-robe/0db5897be5b28c37/out/stage1_sudo-0db5897be5b28c37`): "PASSED (exit 0)", test ok in 1.13 s; eight `peer:` lines, all
-`uid=999 pid=8858 program=/var/tmp/probe-stage1-run/debug/deps/stage1_sudo` (that path is where a3 copies the binary): request/approved for `5be41485` and `7c79adb4`;
+`uid=999 pid=8858 program=/var/tmp/probe-stage1-run/debug/deps/stage1_sudo` (the old a3 copied the binary there; the new one uses `/run/probe-stage1-run.XXXXXX/stage1_sudo`): request/approved for `5be41485` and `7c79adb4`;
 received, then request/approved for `a8a72e8d`; received, then request/declined for `66c6c4a9`; received, then request/approved for `76fef447`. The five calls: `sys kit` done (automatic),
 `test echo` done (automatic), `test peak` done (confirmed), `test peak` declined, `test read` done (confirmed). The journal (`journalctl -t probe`) has start and done for `5be41485` (`sys kit`, rc=0, bytes=1472),
 `7c79adb4` (`test echo`, `args=via=sudo`), `a8a72e8d` (`test peak`), `76fef447` (`test read`, `args=/etc/sudoers.d/probe-svc`, bytes=1058), nothing for the declined `66c6c4a9`; each line has `identity=probe-svc from=- call=<id> waited=0.00s`;
