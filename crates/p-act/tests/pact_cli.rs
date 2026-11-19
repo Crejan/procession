@@ -119,7 +119,7 @@ fn tools_and_call_without_a_service_say_so_in_the_closed_list() {
     assert_eq!(result["isError"], true);
     assert!(result["content"][0]["text"].as_str().unwrap().contains("no tool"));
     let (code, _, stderr) = run(&["call", "rt_procs", "{not json"], &good);
-    assert_eq!(code, 1);
+    assert_eq!(code, 2);
     assert!(stderr.contains("not JSON"));
 }
 
@@ -453,7 +453,7 @@ fn call_arguments_with_a_repeated_key_are_refused_never_read_as_the_first_or_the
         (r#"{"params":[{"k":1,"k":2}]}"#, "params[0].k"),
     ] {
         let (code, stdout, stderr) = run(&["call", "rt_procs", arguments], &good);
-        assert_eq!(code, 1, "{arguments}: {stderr}");
+        assert_eq!(code, 2, "a usage error, before anything is connected: {arguments}: {stderr}");
         assert!(stdout.is_empty());
         assert!(stderr.contains(&format!("`{path}` appears twice")), "{arguments}: {stderr}");
     }

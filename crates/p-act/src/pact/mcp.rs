@@ -126,8 +126,15 @@ pub fn serve(ctx: &Arc<Context>, input: impl Read, output: impl Write + Send + '
         // A repeated key at any depth is refused: never read as the first or the last (`p_ermit::json`).
         let message = match p_ermit::json::parse_slice(&line) {
             Ok(message) => message,
-            Err(e) => {
-                out.error(&Value::Null, -32700, &format!("parse error: {e}"));
+            // Not JSON: a parse error. A key twice: an invalid request, with its path in a message of this program's own
+            // and **`id` null**, since the id of such a message is not taken from it (`id` may be the repeated member).
+            // Nothing of it is acted on.
+            Err(e @ p_ermit::json::JsonError::DuplicateKey { .. }) => {
+                out.error(&Value::Null, -32600, &format!("invalid request: {e}"));
+                continue;
+            }
+            Err(_) => {
+                out.error(&Value::Null, -32700, "parse error");
                 continue;
             }
         };
@@ -840,7 +847,8 @@ mod tests {
         ] {
             c.raw(line);
             let r = c.recv();
-            assert_eq!(r["error"]["code"], -32700, "{what}: {r}");
+            assert_eq!(r["error"]["code"], -32600, "{what}: {r}");
+            assert_eq!(r["id"], Value::Null, "the id of such a message is not taken from it: {what}");
             assert!(r["error"]["message"].as_str().unwrap().contains("appears twice"), "{what}: {r}");
         }
         // The same session still answers.

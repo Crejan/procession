@@ -316,5 +316,23 @@ mod tests {
             assert!(!e.to_string().contains('1') || e.to_string().contains(path));
         }
         assert!(parse::<WithMap>(br#"{"map":{"k":1},"any":{"k":2}}"#).is_ok());
+        // A flattened member inside a nested struct: `serde` buffers it and would keep one of two; the reader has refused
+        // the document before `serde` sees it, so no flatten has to be removed.
+        #[derive(Debug, Deserialize)]
+        struct Flat {
+            x: u8,
+        }
+        #[derive(Debug, Deserialize)]
+        struct Nested {
+            #[serde(flatten)]
+            flat: Flat,
+        }
+        #[derive(Debug, Deserialize)]
+        struct Outer {
+            nested: Nested,
+        }
+        let e = parse::<Outer>(br#"{"nested":{"x":1,"x":2}}"#).unwrap_err();
+        assert!(matches!(&e, SettingsError::Invalid(m) if m.contains("`nested.x` appears twice")), "{e}");
+        assert_eq!(parse::<Outer>(br#"{"nested":{"x":1}}"#).unwrap().nested.flat.x, 1);
     }
 }
