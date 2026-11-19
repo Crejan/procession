@@ -5,6 +5,7 @@
 mod common;
 
 use std::fs;
+use std::os::unix::ffi::OsStrExt;
 use std::time::Duration;
 
 use common::Host;
@@ -28,7 +29,9 @@ fn assert_clean(what: &str, r: &Report) {
     }
     fn walk(v: &serde_json::Value, what: &str) {
         match v {
-            serde_json::Value::String(s) => assert!(!is_dirty(s), "{what}: parsed string holds a refused character: {s:?}"),
+            serde_json::Value::String(s) => {
+                assert!(!is_dirty(s), "{what}: parsed string holds a refused character: {s:?}")
+            }
             serde_json::Value::Array(a) => a.iter().for_each(|x| walk(x, what)),
             serde_json::Value::Object(o) => o.iter().for_each(|(k, x)| {
                 assert!(!is_dirty(k), "{what}: key {k:?}");
@@ -218,4 +221,135 @@ fn a_real_private_use_character_and_an_invalid_byte_never_show_alike() {
     }
     assert_ne!(shown[0], shown[1], "two different byte strings showed alike");
     assert!(shown[1].contains("\\x{ff}") || shown[1].contains("\\x{ff}"), "{shown:?}");
+}
+
+// --- The internal markers of p_roc::text never reach an output -----------------------------------
+
+use p_roc::text::{BYTE_BASE, ESC, stands_for_byte};
+
+/// A genuine U+10FFFF, a genuine character of the stand-in range, and an invalid byte, between letters.
+fn marker_bytes() -> Vec<u8> {
+    let mut v = "A\u{10FFFF}B\u{10F7FF}C".as_bytes().to_vec();
+    v.push(0xff);
+    v.push(b'D');
+    v
+}
+
+/// No internal form in `out`: no doubled ESC, no ESC followed by a stand-in, and every ESC in it is
+/// the genuine one of a marker string (so each is followed by `B`).
+fn assert_no_internal(what: &str, out: &str) {
+    let chars: Vec<char> = out.chars().collect();
+    for (i, c) in chars.iter().enumerate().filter(|(_, c)| **c == ESC) {
+        let _ = c;
+        let next = chars.get(i + 1).copied();
+        assert!(next != Some(ESC), "{what}: a doubled ESC (internal form) reached the output");
+        assert!(
+            next.is_none_or(|n| stands_for_byte(n).is_none()),
+            "{what}: an encoded invalid byte (internal form) reached the output"
+        );
+        assert_eq!(next, Some('B'), "{what}: a marker ESC that is not the genuine one");
+    }
+    let _ = BYTE_BASE;
+    assert_eq!(chars.iter().filter(|c| **c == ESC).count(), out.matches("A\u{10FFFF}B").count(), "{what}");
+}
+
+fn assert_no_internal_report(what: &str, r: &Report) {
+    let json = serde_json::to_string_pretty(r).unwrap();
+    assert_no_internal(&format!("{what} json"), &json);
+    assert_no_internal(&format!("{what} text"), &render::text(r));
+    // The invalid byte is shown as its escape wherever the marker string is shown.
+    for out in [&json, &render::text(r)] {
+        assert_eq!(
+            out.matches("C\\\\x{ff}D").count() + out.matches("C\\x{ff}D").count(),
+            out.matches("A\u{10FFFF}B").count(),
+            "{what}"
+        );
+    }
+}
+
+/// `hostile3` with the probes replaced, in every file, by the marker string.
+fn marked3() -> Host {
+    let host = hostile3();
+    fn walk(dir: &std::path::Path) {
+        for e in fs::read_dir(dir).unwrap().filter_map(Result::ok) {
+            let kind = e.file_type().unwrap();
+            if kind.is_dir() {
+                walk(&e.path());
+            } else if kind.is_file() {
+                let b = fs::read(e.path()).unwrap();
+                let from = BAD.as_bytes();
+                if b.windows(from.len()).any(|w| w == from) {
+                    let mut out = Vec::new();
+                    let mut i = 0;
+                    while i < b.len() {
+                        if b[i..].starts_with(from) {
+                            out.extend(marker_bytes());
+                            i += from.len();
+                        } else {
+                            out.push(b[i]);
+                            i += 1;
+                        }
+                    }
+                    fs::write(e.path(), out).unwrap();
+                }
+            }
+        }
+    }
+    walk(host.dir.path());
+    host
+}
+
+#[test]
+fn the_internal_markers_never_reach_any_prover_output() {
+    let hs: Vec<Host> = (0..9).map(|_| marked3()).collect();
+    let d = Duration::from_secs(1);
+    let env = |i: usize| {
+        let mut e = hostile_env(&hs[i]);
+        // the scripted tool outputs carry the markers too
+        let m = p_roc::text::from_bytes(&marker_bytes()); // what the runner hands over for such bytes
+        e.runner = Box::new(
+            Scripted::default()
+                .answer("chronyc tracking", &format!("Reference ID    : {m}\nStratum         : 3\n"))
+                .answer("journalctl --list-boots --no-pager", &format!("-1 {m} Tue\n"))
+                .answer(
+                    &format!("journalctl -b -1 -k --no-pager -o short-iso --grep {} -n 120", lastboot::PATTERN),
+                    &format!("h kernel: rcu: INFO: stall {m}\n"),
+                )
+                .answer("journalctl -b -1 --no-pager -o short-iso -n 40", &format!("h kernel: last {m}\n")),
+        );
+        e
+    };
+    let reports: Vec<(&str, Report)> = vec![
+        ("procs", procs::run(&env(0), &procs::Args::default()).unwrap()),
+        ("sched", sched::run(&env(1), &sched::Args { duration: d, ..Default::default() }).unwrap()),
+        ("irq", irq::run(&env(2), &irq::Args { duration: d, top: 20 }).unwrap()),
+        ("cmdline", cmdline::run(&env(3)).unwrap()),
+        ("nic", nic::run(&env(4), &nic::Args { iface: "lan0".into(), delta: None, all_stats: false }).unwrap()),
+        ("serial", serial::run(&env(5)).unwrap()),
+        ("clock", clock::run(&env(6)).unwrap()),
+        ("lastboot", lastboot::run(&env(7), &lastboot::Args::default()).unwrap()),
+        ("analyze", analyze::run(&env(8), &analyze::Args { pid: 100, tids: vec![], static_only: true }).unwrap()),
+    ];
+    for (name, r) in &reports {
+        assert_no_internal_report(name, r);
+    }
+    // hung, with the markers in the thread name, wait channel, stack and exe link
+    let host = Host::new("host2");
+    let m = marker_bytes();
+    let stat = fs::read(host.path("proc/50/task/50/stat")).unwrap();
+    let from = b"(rsync)";
+    let at = stat.windows(from.len()).position(|w| w == from).unwrap();
+    put(&host, "proc/50/task/50/stat", &[&stat[..at + 1], &m, &stat[at + from.len() - 1..]].concat());
+    put(&host, "proc/50/task/50/wchan", &[b"rpc_wait_bit_killable".as_slice(), &m].concat());
+    put(&host, "proc/50/task/50/stack", &[b"[<0>] rpc_wait_bit_killable+0x24 ".as_slice(), &m, b"\n"].concat());
+    fs::remove_file(host.path("proc/50/exe")).unwrap();
+    std::os::unix::fs::symlink(
+        std::ffi::OsStr::from_bytes(&[b"/usr/bin/".as_slice(), &m].concat()),
+        host.path("proc/50/exe"),
+    )
+    .unwrap();
+    let r = hung::run(&host.env(|_| {}), &hung::Args::default()).unwrap();
+    assert_no_internal_report("hung", &r);
+    let seen = serde_json::to_string(&r).unwrap().matches("A\u{10FFFF}B").count();
+    assert!(seen >= 3, "the markers were fed to hung: {seen}");
 }
