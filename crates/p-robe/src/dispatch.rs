@@ -1136,6 +1136,7 @@ mod tests {
                 "SSH_CONNECTION",
                 "PROBE_TEST_SANDBOX",
                 "PROBE_TEST_PROVER",
+                "PROBE_BUILT_FROM",
                 "CARGO_MANIFEST_DIR",
             ]
             .iter()
