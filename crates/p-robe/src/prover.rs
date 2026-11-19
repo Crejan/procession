@@ -779,10 +779,41 @@ mod tests {
             (Some(0), Some(0))
         );
         assert_eq!(trailer["tool_missed"], true);
-        // A tool that says nothing of its own counts gets no such members; one that missed nothing says so.
-        let (clean, _) = ran(&PROCS, &Fake::code(1, &tool_object("\"cyclic\"", "")), &[]);
+        // A tool that gives counts and missed nothing: its numbers beside ours, and `tool_missed` false.
+        let (clean, _) = ran(
+            &PROCS,
+            &Fake::code(1, &tool_object("\"cyclic\"", ", \"escaped_records\": 0, \"clipped_records\": 0")),
+            &[],
+        );
         let trailer: serde_json::Value = serde_json::from_str(clean.last().unwrap()).unwrap();
-        assert_eq!((trailer["escaped_records"].as_u64(), trailer.get("tool_missed")), (Some(0), None));
+        assert_eq!(
+            (
+                trailer["escaped_records"].as_u64(),
+                trailer["tool_escaped_records"].as_u64(),
+                trailer["tool_missed"].as_bool()
+            ),
+            (Some(0), Some(0), Some(false))
+        );
+        // A tool that gives none (the members are not in its object): no such members in the trailer.
+        let (none, _) = ran(&PROCS, &Fake::code(1, &tool_object("\"cyclic\"", "")), &[]);
+        let trailer: serde_json::Value = serde_json::from_str(none.last().unwrap()).unwrap();
+        assert_eq!(trailer["escaped_records"].as_u64(), Some(0));
+        for member in ["tool_escaped_records", "tool_clipped_records", "tool_missed"] {
+            assert!(trailer.get(member).is_none(), "{member}");
+        }
+        // The same for the real golden as it is today, whichever it says: its own counts are passed on if it has
+        // them, and a golden that has them and is clean misses nothing.
+        let golden_object = golden("procs");
+        let has = members(&golden_object).is_some_and(|m| m.contains_key("escaped_records"));
+        let (real, _) = ran(&PROCS, &Fake::code(1, &golden_object), &[]);
+        let trailer: serde_json::Value = serde_json::from_str(real.last().unwrap()).unwrap();
+        assert_eq!(trailer.get("tool_escaped_records").is_some(), has, "{trailer}");
+        if has {
+            assert_eq!(
+                trailer["tool_missed"],
+                trailer["escaped_records"].as_u64().unwrap() > 0 || trailer["clipped_records"].as_u64().unwrap() > 0
+            );
+        }
     }
 
     #[test]
