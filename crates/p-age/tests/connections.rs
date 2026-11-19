@@ -893,3 +893,25 @@ async fn a_slow_check_does_not_leave_a_request_held_past_its_deadline() {
     assert_eq!(refusal(&answer), BrokerReason::Deadline);
     assert_eq!(w.broker.held_count(), 0);
 }
+
+#[tokio::test]
+async fn without_a_valid_directory_a_sign_in_is_told_directory_stale_and_the_connection_closes() {
+    let w = World::without_directory();
+    // the right key, a document made for this connection: told exactly why, and closed
+    let mut c = open_pledge(&w).await;
+    let nonce = c.recv().await["nonce"].as_str().unwrap().to_owned();
+    c.send_json(signin_message("jan", &w.jan_connection, &nonce, BINDING)).await;
+    assert_eq!(c.recv().await["error"], "directory-stale");
+    c.expect_closed().await;
+    // a document that is not for this connection (another nonce) is told nothing of the broker's state
+    let mut c = open_pledge(&w).await;
+    let _ = c.recv().await;
+    c.send_json(signin_message("jan", &w.jan_connection, "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=", BINDING))
+        .await;
+    assert_eq!(c.recv().await["error"], "signin");
+    c.expect_closed().await;
+    // and with a directory, the same sign-in works (the control)
+    let w = World::new();
+    let mut c = open_pledge(&w).await;
+    assert!(!c.sign_in("jan", &w.jan_connection).await.is_empty());
+}

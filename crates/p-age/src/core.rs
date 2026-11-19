@@ -88,8 +88,8 @@ pub enum StateError {
     Perm(#[from] PermError),
     #[error("cannot read {path}: {source}")]
     Read { path: String, source: std::io::Error },
-    #[error("{path} is not a register: {}", crate::util::shown_error(source))]
-    Parse { path: String, source: serde_json::Error },
+    #[error("{path} is not a register: {source}")]
+    Parse { path: String, source: p_ermit::json::JsonError },
     #[error("{path} is a register that cannot be read whole: {member} has an entry that is not valid")]
     Invalid { path: String, member: &'static str },
     #[error("{path} is version {v} of the register, which this broker does not know")]
@@ -545,7 +545,7 @@ impl Core {
         perm::check_private_file(path)?;
         let bytes = std::fs::read(path).map_err(|source| StateError::Read { path: shown.clone(), source })?;
         let snapshot: Snapshot =
-            serde_json::from_slice(&bytes).map_err(|source| StateError::Parse { path: shown.clone(), source })?;
+            p_ermit::json::from_slice(&bytes).map_err(|source| StateError::Parse { path: shown.clone(), source })?;
         if snapshot.v != 1 {
             return Err(StateError::Version { path: shown, v: snapshot.v });
         }
@@ -561,7 +561,7 @@ impl Core {
             return Err(StateError::Exists { path: path.display().to_string() });
         }
         let bytes = serde_json::to_vec(&Register::default().snapshot())
-            .map_err(|source| StateError::Parse { path: path.display().to_string(), source })?;
+            .map_err(|e| StateError::Read { path: path.display().to_string(), source: std::io::Error::other(e) })?;
         perm::replace_private_file(path, &bytes)
             .map_err(|source| StateError::Read { path: path.display().to_string(), source })
     }
@@ -728,6 +728,10 @@ impl Core {
         // A blocked agent key, or the delegation key behind it, is a delegation that stops here (check 2).
         if self.register.is_key_blocked(fingerprint.as_str()) || self.delegation_key_blocked(&person) {
             return deny(self, Some(person), BrokerReason::Delegation);
+        }
+        // No valid directory.json: nobody is active, and the service is told the exact reason.
+        if self.site.directory().is_none() {
+            return deny(self, Some(person), BrokerReason::DirectoryStale);
         }
         if !self.site.person(&person).is_some_and(|p| p.enabled) {
             return deny(self, Some(person), BrokerReason::Person);
@@ -1401,6 +1405,12 @@ mod tests {
     }
 
     fn site() -> Arc<Site> {
+        let json = site_json();
+        let directory = r#"{"v":1,"source":"model","as_of":"2026-11-19T10:00:00Z","active":["jan","eva"],"members":{"ops":["eva","jan"]}}"#;
+        Arc::new(Site::from_texts(&json, directory, std::time::SystemTime::now()).unwrap())
+    }
+
+    fn site_json() -> String {
         // `off` is in the site file and not active, so it is not enabled; `jan` has keys 1 to 4, `eva` 9 to 12 and
         // `off` 17 to 20.
         let person = |name: &str, first: u8| {
@@ -1413,15 +1423,13 @@ mod tests {
                 row(3)
             )
         };
-        let json = format!(
+        format!(
             r#"{{"v":1,"persons":[{},{},{}],"hosts":[{{"name":"a.example","key":"{}"}}],"groups":["ops"]}}"#,
             person("jan", 1),
             person("off", 17),
             person("eva", 9),
             key_line(30)
-        );
-        let directory = r#"{"v":1,"source":"model","as_of":"2026-11-19T10:00:00Z","active":["jan","eva"],"members":{"ops":["eva","jan"]}}"#;
-        Arc::new(Site::from_texts(&json, directory, std::time::SystemTime::now()).unwrap())
+        )
     }
 
     struct Fixture {
@@ -1574,6 +1582,26 @@ mod tests {
         let v = vetted("eva", "SHA256:DDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDD", 4, 120);
         assert_eq!(refusal_of(&f.core.submit(SVC, v, now(0))), Some(BrokerReason::Person));
         assert_eq!(f.core.held_count(), 0);
+    }
+
+    #[test]
+    fn without_a_valid_directory_a_request_is_refused_directory_stale_and_blocks_still_work() {
+        let mut f = fixture(5);
+        // the view of a broker that started without a valid directory.json: nobody is active
+        f.core.site = Arc::new(Site::combine(&crate::site::SiteBase::from_text(&site_json()).unwrap(), None));
+        assert_eq!(BrokerReason::DirectoryStale.wire(), "directory-stale");
+        let fx = f.core.submit(SVC, vetted("jan", AGENT_A, 1, 120), now(0));
+        assert_eq!(refusal_of(&fx), Some(BrokerReason::DirectoryStale));
+        assert_eq!(f.core.held_count(), 0);
+        assert_eq!(f.log.entries().last().map(|e| e.result.clone()).as_deref(), Some("refused:directory-stale"));
+        // a delegation that is not valid is still told why it is not (the stronger refusals come first)
+        let fx =
+            f.core.submit(SVC, vetted("jan", "SHA256:ZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZ", 2, 120), now(0));
+        assert_eq!(refusal_of(&fx), Some(BrokerReason::Delegation));
+        // blocks and withdrawals work
+        let (_, stored) = f.core.block_person("jan", admin(), now(1));
+        assert_eq!(stored, Stored::Yes);
+        assert!(f.core.is_blocked("jan"));
     }
 
     #[test]

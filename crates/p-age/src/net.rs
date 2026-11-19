@@ -635,6 +635,14 @@ where
         }
     };
     let (nonce, binding) = (*nonce, *binding);
+    // No valid directory.json: nobody can sign in, and a sign-in for this connection is told exactly that (the
+    // `error` answers it and the connection closes). Only a document made for this nonce and this binding is told.
+    if broker.site.directory().is_none()
+        && ConnectionDocument::parse_unverified(signed.doc.clone()).ok().is_some_and(|d| d.is_for(&nonce, &binding))
+    {
+        send_pledge_error(wr, ErrorCode::DirectoryStale).await;
+        return None;
+    }
     let verified = async {
         let doc = ConnectionDocument::parse_unverified(signed.doc).ok()?;
         if !doc.is_for(&nonce, &binding) {

@@ -97,7 +97,7 @@ impl Command {
     /// Read a command line. `None` for anything that is not exactly one command.
     #[must_use]
     pub fn parse(line: &[u8]) -> Option<Command> {
-        let wire: CommandWire = serde_json::from_slice(line).ok()?;
+        let wire: CommandWire = p_ermit::json::from_slice(line).ok()?;
         if wire.schema_version != 1 {
             return None;
         }
@@ -301,7 +301,7 @@ impl Reply {
     /// Read an answer line. `None` for anything that is not exactly one answer.
     #[must_use]
     pub fn parse(line: &[u8]) -> Option<Reply> {
-        let w: ReplyWire = serde_json::from_slice(line).ok()?;
+        let w: ReplyWire = p_ermit::json::from_slice(line).ok()?;
         if w.schema_version != 1 {
             return None;
         }

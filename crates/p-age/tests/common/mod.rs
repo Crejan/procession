@@ -139,11 +139,25 @@ impl World {
         World::with_crypto(settings, timeouts, |c| c)
     }
 
+    /// A world whose broker started without a valid `directory.json`: nobody is active.
+    pub fn without_directory() -> World {
+        World::assemble(Settings::default(), Timeouts::default(), |c| c, false)
+    }
+
     /// As [`World::with`], the broker's signature work wrapped by `wrap` (a test that makes it slow).
     pub fn with_crypto(
         settings: Settings,
         timeouts: Timeouts,
         wrap: impl FnOnce(Arc<dyn p_age::crypto::Crypto>) -> Arc<dyn p_age::crypto::Crypto>,
+    ) -> World {
+        World::assemble(settings, timeouts, wrap, true)
+    }
+
+    fn assemble(
+        settings: Settings,
+        timeouts: Timeouts,
+        wrap: impl FnOnce(Arc<dyn p_age::crypto::Crypto>) -> Arc<dyn p_age::crypto::Crypto>,
+        directory: bool,
     ) -> World {
         let keys = Keys::new();
         let site_ca = keys.key("site-ca");
@@ -159,7 +173,7 @@ impl World {
         let eva_confirmed = keys.certified("eva-confirmed", &site_ca, "eva:confirmed", VALID, &[]);
         let eva_automatic = keys.certified("eva-automatic", &site_ca, "eva:automatic", VALID, &[]);
         let line = |k: &Path| keys.public(k).to_string();
-        let site = SiteBuilder::new()
+        let site = if directory { SiteBuilder::new() } else { SiteBuilder::new().without_directory() }
             .person(
                 PersonSpec::new("jan")
                     .keys(&line(&jan_confirmed), &line(&jan_automatic), &line(&jan_delegation), &line(&jan_connection))

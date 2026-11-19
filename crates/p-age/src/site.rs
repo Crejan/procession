@@ -105,36 +105,8 @@ struct DirectoryFile {
     /// When the writer made it, UTC to the second. Shown; stage 2 does not age the file.
     as_of: String,
     active: Vec<String>,
-    /// group -> names. A key repeated is an error of the file's own (read in order, so that it can be seen).
-    members: UniqueKeys,
-}
-
-/// A JSON object read as a list of its members in order, refusing a key that is there twice (a map would keep the last
-/// and say nothing).
-#[derive(Debug)]
-struct UniqueKeys(Vec<(String, Vec<String>)>);
-
-impl<'de> Deserialize<'de> for UniqueKeys {
-    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<UniqueKeys, D::Error> {
-        struct V;
-        impl<'de> serde::de::Visitor<'de> for V {
-            type Value = UniqueKeys;
-            fn expecting(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-                f.write_str("an object of lists of names")
-            }
-            fn visit_map<A: serde::de::MapAccess<'de>>(self, mut map: A) -> Result<UniqueKeys, A::Error> {
-                let mut out: Vec<(String, Vec<String>)> = Vec::new();
-                while let Some((k, v)) = map.next_entry::<String, Vec<String>>()? {
-                    if out.iter().any(|(seen, _)| *seen == k) {
-                        return Err(serde::de::Error::custom("a key of `members` is there twice"));
-                    }
-                    out.push((k, v));
-                }
-                Ok(UniqueKeys(out))
-            }
-        }
-        d.deserialize_map(V)
-    }
+    /// group -> names. A key repeated is refused by the reader (`p_act::settings`, which uses `p_ermit::json`).
+    members: BTreeMap<String, Vec<String>>,
 }
 
 /// A person's four keys: the purposes are a closed vocabulary, each exactly once, and four different keys.
@@ -404,7 +376,7 @@ impl Directory {
             }
         }
         let mut members = BTreeMap::new();
-        for (group, logins) in d.members.0 {
+        for (group, logins) in d.members {
             if !group_name_ok(&group) {
                 return Err(DirectoryError::BadName { place: "the keys of `members`", name: group });
             }
