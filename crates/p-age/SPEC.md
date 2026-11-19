@@ -421,8 +421,10 @@ person or a group from the site file must not be held back until a fitting
   its own faults) the broker is in **the same state as a directory that is too
   old** (`directory-stale`, whose age setting is stage 3) and looks the same:
   nobody is active, so no sign-in and no clearance is issued to anyone
-  (**`directory-stale`** is the refusal a pledge is to get; until p-act has that
-  code it gets the refusal of a person who is not enabled), blocks and
+  (**`directory-stale`** is what is said: `error` `directory-stale` to a sign-in
+  made for the connection, which then closes, and `refused` `directory-stale` to a
+  request that needs a clearance, once its delegation is valid; stronger
+  refusals such as `delegation` come first), blocks and
   withdrawals work and are the register's, and `page status` says
   `directory: none (why)`, gives a condition line `directory-none` and **exits
   5** (degraded). Code 5 stays one meaning, "the broker is degraded"; the

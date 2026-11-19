@@ -99,6 +99,7 @@ pub struct SiteBuilder {
     persons: Vec<PersonSpec>,
     hosts: Vec<(String, String)>,
     members: Option<BTreeMap<String, Vec<String>>>,
+    no_directory: bool,
 }
 
 impl SiteBuilder {
@@ -195,9 +196,20 @@ impl SiteBuilder {
         json!({"v": 1, "source": "model", "as_of": as_of, "active": active, "members": members}).to_string()
     }
 
+    /// A site with **no valid `directory.json`**: `build` gives the view of a broker that started without one (nobody
+    /// is active).
+    #[must_use]
+    pub fn without_directory(mut self) -> SiteBuilder {
+        self.no_directory = true;
+        self
+    }
+
     /// The pair, read as the broker reads it, with `directory.json` made now.
     pub fn build(&self) -> Result<Site, crate::site::LoadError> {
         let now = std::time::SystemTime::now();
+        if self.no_directory {
+            return Ok(Site::combine(&crate::site::SiteBase::from_text(&self.json())?, None));
+        }
         Site::from_texts(&self.json(), &self.directory_json(&as_of(now)), now)
     }
 
