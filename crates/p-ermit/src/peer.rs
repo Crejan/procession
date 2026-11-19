@@ -33,6 +33,112 @@ pub fn own_uid() -> u32 {
     unsafe { libc::getuid() }
 }
 
+/// The most supplementary groups [`peer_groups`] returns. A peer in more is **refused**, never truncated: a group list
+/// cut short could leave out the group that decides. (The kernel allows 65 536; 4096 is 16 KiB of answer.)
+pub const MAX_PEER_GROUPS: usize = 4096;
+
+/// The longest group name [`group_id`] looks up, in bytes.
+pub const MAX_GROUP_NAME_BYTES: usize = 256;
+
+/// The largest buffer [`group_id`] grows to for an entry with many members, in bytes.
+const MAX_GROUP_BUFFER: usize = 1 << 20;
+
+/// Whether this system can tell the supplementary groups of a socket's peer ([`peer_groups`]): Linux (`SO_PEERGROUPS`).
+/// A program that needs them checks this at start and refuses to run where they are not.
+#[must_use]
+pub const fn groups_supported() -> bool {
+    cfg!(target_os = "linux")
+}
+
+/// This process's own group (the real group id).
+#[must_use]
+pub fn own_gid() -> u32 {
+    // SAFETY: `getgid` has no preconditions.
+    unsafe { libc::getgid() }
+}
+
+/// The **supplementary** groups of `socket`'s peer, as the kernel recorded them when the connection was made
+/// (`SO_PEERGROUPS`); the primary group is [`Peer::gid`], not in this list. No account database is asked, so what a
+/// directory service says about the peer's account does not matter.
+///
+/// Linux only: elsewhere the error is `Unsupported` ([`PeerError::is_unsupported`]), never an empty list, which would
+/// read as "in no group". A peer in more than [`MAX_PEER_GROUPS`] groups is an error, not a shorter list.
+pub fn peer_groups<S: AsRawFd>(socket: &S) -> Result<Vec<u32>, PeerError> {
+    #[cfg(target_os = "linux")]
+    {
+        let fd = socket.as_raw_fd();
+        let mut groups: Vec<libc::gid_t> = vec![0; 64];
+        // One retry is enough: the kernel says how long the list is, and a second answer can only differ if the peer
+        // changed, which a connected socket's credentials do not.
+        for _ in 0..2 {
+            let mut len = libc::socklen_t::try_from(groups.len() * std::mem::size_of::<libc::gid_t>())
+                .map_err(|_| PeerError::new(io::ErrorKind::InvalidInput, "the group buffer is too large"))?;
+            // SAFETY: `groups` is valid for `len` bytes, `len` is that size, and the kernel writes at most `len` bytes
+            // and sets `len` to the length it wants or wrote.
+            let status = unsafe {
+                libc::getsockopt(fd, libc::SOL_SOCKET, libc::SO_PEERGROUPS, groups.as_mut_ptr().cast(), &raw mut len)
+            };
+            if status == 0 {
+                let count = len as usize / std::mem::size_of::<libc::gid_t>();
+                groups.truncate(count);
+                return Ok(groups);
+            }
+            let error = io::Error::last_os_error();
+            if error.raw_os_error() != Some(libc::ERANGE) {
+                return Err(PeerError { source: error });
+            }
+            let needed = len as usize / std::mem::size_of::<libc::gid_t>();
+            if needed > MAX_PEER_GROUPS {
+                return Err(PeerError::new(io::ErrorKind::InvalidData, "the peer is in too many groups to be judged"));
+            }
+            groups = vec![0; needed.max(1)];
+        }
+        Err(PeerError::new(io::ErrorKind::InvalidData, "the peer's group list kept changing"))
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = socket;
+        Err(PeerError::new(io::ErrorKind::Unsupported, "the groups of a peer are not read on this system"))
+    }
+}
+
+/// The id of the group called `name`, from the system's group database (`getgrnam_r`): `Ok(Some(gid))`, **`Ok(None)` if
+/// there is no such group**, and `Err` if the lookup could not be made (a name that is empty, has a NUL byte or is
+/// longer than [`MAX_GROUP_NAME_BYTES`], or an error of the database). The two are told apart so that a start can say
+/// "no such group" and "cannot look" differently.
+///
+/// For use **once, at start**, to turn a configured name into an id; decisions are by the id. **It can block, and for a
+/// long time**, on a site with a directory (LDAP, NIS): no timeout is added here.
+pub fn group_id(name: &str) -> Result<Option<u32>, PeerError> {
+    if name.is_empty() || name.len() > MAX_GROUP_NAME_BYTES || name.bytes().any(|b| b == 0) {
+        return Err(PeerError::new(io::ErrorKind::InvalidInput, "not a group name"));
+    }
+    let name =
+        std::ffi::CString::new(name).map_err(|_| PeerError::new(io::ErrorKind::InvalidInput, "not a group name"))?;
+    let mut buffer = vec![0_u8; 1024];
+    loop {
+        // SAFETY: `group` is plain data for which all-zero is valid; it is read only after `getgrnam_r` filled it.
+        let mut group: libc::group = unsafe { std::mem::zeroed() };
+        let mut found: *mut libc::group = std::ptr::null_mut();
+        // SAFETY: `name` is a NUL-terminated string; `group`, `buffer` and `found` are valid for the call, `buffer.len()`
+        // is its size, and `getgrnam_r` writes only inside them.
+        let status = unsafe {
+            libc::getgrnam_r(name.as_ptr(), &raw mut group, buffer.as_mut_ptr().cast(), buffer.len(), &raw mut found)
+        };
+        if status == libc::ERANGE && buffer.len() < MAX_GROUP_BUFFER {
+            buffer.resize(buffer.len() * 2, 0);
+            continue;
+        }
+        return match status {
+            0 if found.is_null() => Ok(None),
+            0 => Ok(Some(group.gr_gid)),
+            // What POSIX allows a database to say for "there is no such group".
+            libc::ENOENT | libc::ESRCH | libc::EBADF | libc::EPERM => Ok(None),
+            other => Err(PeerError { source: io::Error::from_raw_os_error(other) }),
+        };
+    }
+}
+
 /// The longest account name [`account_of`] returns, in characters.
 pub const MAX_ACCOUNT_NAME_CHARS: usize = 64;
 
@@ -101,6 +207,16 @@ pub struct PeerError {
 }
 
 impl PeerError {
+    fn new(kind: io::ErrorKind, what: &'static str) -> PeerError {
+        PeerError { source: io::Error::new(kind, what) }
+    }
+
+    /// Whether the platform has no such read (an `Unsupported` error), as opposed to a read that failed.
+    #[must_use]
+    pub fn is_unsupported(&self) -> bool {
+        self.source.kind() == io::ErrorKind::Unsupported
+    }
+
     /// The operating system's error.
     #[must_use]
     pub fn source_error(&self) -> &io::Error {
@@ -580,5 +696,82 @@ mod tests {
                 assert!(crate::text::check(&name).is_ok(), "{uid}");
             }
         }
+    }
+
+    #[test]
+    fn own_gid_and_what_this_system_can_read_of_a_peers_groups() {
+        // SAFETY: `getgid` has no preconditions.
+        assert_eq!(own_gid(), unsafe { libc::getgid() });
+        assert_eq!(groups_supported(), cfg!(target_os = "linux"));
+        if !groups_supported() {
+            let (a, _b) = UnixStream::pair().unwrap();
+            let e = peer_groups(&a).unwrap_err();
+            assert!(e.is_unsupported(), "{e}");
+            assert!(!e.to_string().is_empty());
+        }
+    }
+
+    #[test]
+    fn a_group_is_found_by_name_or_not_and_a_bad_name_is_a_failed_lookup_not_an_absence() {
+        // The group of gid 0 is `wheel` on a Mac and `root` on Linux.
+        let zero = if cfg!(target_os = "macos") { "wheel" } else { "root" };
+        assert_eq!(group_id(zero).unwrap(), Some(0));
+        assert_eq!(group_id("no-such-group-p-ermit-0000").unwrap(), None);
+        assert_eq!(group_id("Wheel ").unwrap(), None, "a name with a space is a name that is not there");
+        for bad in ["", "a\0b", &"g".repeat(MAX_GROUP_NAME_BYTES + 1)] {
+            let e = group_id(bad).unwrap_err();
+            assert_eq!(e.source_error().kind(), io::ErrorKind::InvalidInput);
+            assert!(!e.to_string().contains('g') || bad.is_empty() || e.to_string() == "not a group name", "{e}");
+        }
+        assert!(group_id(&"g".repeat(MAX_GROUP_NAME_BYTES)).unwrap().is_none());
+    }
+
+    /// Linux only: **not run on the Mac this was written on.**
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn the_supplementary_groups_of_a_socketpair_peer_are_this_processs() {
+        let (a, _b) = UnixStream::pair().unwrap();
+        let mut ours = vec![0 as libc::gid_t; 4096];
+        // SAFETY: the buffer is valid for the count given.
+        let n = unsafe { libc::getgroups(4096, ours.as_mut_ptr()) };
+        assert!(n >= 0);
+        ours.truncate(n as usize);
+        let peers = peer_groups(&a).unwrap();
+        // The primary group may or may not be in `getgroups`; it is never in the peer's supplementary list.
+        let (mut ours, mut peers) = (ours, peers);
+        ours.retain(|g| *g != own_gid());
+        peers.sort_unstable();
+        ours.sort_unstable();
+        assert_eq!(peers, ours);
+        assert!(!peers.contains(&Peer::read_credentials(&a).unwrap().gid()));
+    }
+
+    /// Linux only: **not run on the Mac this was written on.** A peer over a bound socket, as the broker has them.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn the_groups_of_a_connected_peer_over_a_bound_socket() {
+        use std::os::unix::net::UnixListener;
+        let dir = tempfile::Builder::new()
+            .prefix("p-ermit-")
+            .tempdir_in("/tmp/claude")
+            .or_else(|_| tempfile::tempdir())
+            .unwrap();
+        let path = dir.path().join("s");
+        let Ok(listener) = UnixListener::bind(&path) else {
+            assert!(std::env::var_os("PACT_REQUIRE_TCP").is_none_or(|v| v.is_empty() || v == "0"), "cannot bind");
+            eprintln!("SKIPPED: this environment does not allow binding a Unix socket");
+            return;
+        };
+        let _client = UnixStream::connect(&path).unwrap();
+        let (server_side, _) = listener.accept().unwrap();
+        let mut ours = vec![0 as libc::gid_t; 4096];
+        // SAFETY: the buffer is valid for the count given.
+        let n = unsafe { libc::getgroups(4096, ours.as_mut_ptr()) };
+        ours.truncate(usize::try_from(n).unwrap());
+        ours.retain(|g| *g != own_gid());
+        let mut peers = peer_groups(&server_side).unwrap();
+        peers.sort_unstable();
+        ours.sort_unstable();
+        assert_eq!(peers, ours);
     }
 }
