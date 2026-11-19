@@ -23,7 +23,7 @@ test-verbs = []
 
 [dependencies]
 p-act = { path = "../p-act", version = "0.0.0" }
-p-ermit = { path = "../p-ermit", version = "0.1.0" }
+p-ermit = { path = "../p-ermit", version = "0.1.0", features = ["json"] }
 libc = "0.2"
 serde_json = { version = "1", features = ["raw_value"] }
 serde = { version = "1", features = ["derive"] }

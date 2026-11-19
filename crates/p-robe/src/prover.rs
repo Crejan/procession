@@ -93,6 +93,8 @@ pub enum Failure {
     Killed(i32),
     Timeout,
     NotAnObject,
+    /// An object with a repeated key, at any depth: refused, neither the first nor the last taken.
+    DuplicateKey,
     ObjectTooLarge,
     WrongObject,
     ReservedType,
@@ -109,6 +111,7 @@ impl Failure {
             Failure::Killed(signal) => format!("tool-killed:{signal}"),
             Failure::Timeout => "tool-timeout".into(),
             Failure::NotAnObject => "not-an-object".into(),
+            Failure::DuplicateKey => "duplicate-key".into(),
             Failure::ObjectTooLarge => "object-too-large".into(),
             Failure::WrongObject => "wrong-object".into(),
             Failure::ReservedType => "reserved-type".into(),
@@ -124,6 +127,7 @@ impl Failure {
             Failure::Killed(_) => "tool-killed",
             Failure::Timeout => "tool-timeout",
             Failure::NotAnObject => "not-an-object",
+            Failure::DuplicateKey => "duplicate-key",
             Failure::ObjectTooLarge => "object-too-large",
             Failure::WrongObject => "wrong-object",
             Failure::ReservedType => "reserved-type",
@@ -301,6 +305,13 @@ fn read_object(row: &Row, bytes: &[u8]) -> Result<Lines, Failure> {
         return Err(Failure::ObjectTooLarge);
     }
     let text = std::str::from_utf8(bytes).map_err(|_| Failure::NotAnObject)?;
+    // The tool's object is JSON from outside that is decided on: one strict reader first, so that a repeated key anywhere (a
+    // member, a record, a finding's subject) is refused, and what is read below cannot differ from what another reader sees.
+    match p_ermit::json::check(text) {
+        Ok(()) => {}
+        Err(p_ermit::json::JsonError::DuplicateKey { .. }) => return Err(Failure::DuplicateKey),
+        Err(_) => return Err(Failure::NotAnObject),
+    }
     let object = members(text).ok_or(Failure::NotAnObject)?;
     let number = |key: &str| object.get(key).and_then(|raw| serde_json::from_str::<u64>(raw.get()).ok());
     let word = |key: &str| object.get(key).and_then(|raw| string(raw));
@@ -658,6 +669,21 @@ mod tests {
             ("an array", Fake::code(0, "[1,2]"), "not-an-object"),
             ("empty", Fake::code(1, ""), "not-an-object"),
             ("two objects", Fake::code(0, &format!("{object}{object}")), "not-an-object"),
+            (
+                "a repeated member at the top",
+                Fake::code(0, &with("\"mode\"", "\"mode\": \"x\", \"mode\"")),
+                "duplicate-key",
+            ),
+            (
+                "a repeated key inside a record",
+                Fake::code(0, &with("{\"type\":\"policy\"", "{\"type\":\"policy\",\"type\":\"irq\"")),
+                "duplicate-key",
+            ),
+            (
+                "a repeated key deep in a finding",
+                Fake::code(0, &with("\"kind\": \"host\"", "\"kind\": \"host\", \"kind\": \"other\"")),
+                "duplicate-key",
+            ),
             (
                 "not utf-8",
                 Fake(Mutex::new(Some(Ok(Ran { code: 0, stdout: vec![0xff, 0xfe] }))), Mutex::default()),

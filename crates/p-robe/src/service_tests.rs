@@ -1129,6 +1129,48 @@ mod with_test_verbs {
     }
 
     #[test]
+    fn an_mcp_message_with_a_repeated_key_at_any_depth_is_a_parse_error_and_nobody_is_asked() {
+        use crate::mcp::{HttpRequest, Mcp};
+        use serde_json::Value;
+        let rig = Rig::new(Plan::Silent);
+        let mcp = Mcp::new(&rig.service);
+        let post = |body: &str| HttpRequest {
+            method: "POST".into(),
+            path: "/mcp".into(),
+            headers: vec![
+                ("Accept".into(), "application/json, text/event-stream".into()),
+                ("Content-Type".into(), "application/json".into()),
+            ],
+            body: body.as_bytes().to_vec(),
+        };
+        let cancel = AtomicBool::new(false);
+        let value = |resp: crate::mcp::HttpResponse| -> Value { serde_json::from_slice(&resp.body).unwrap() };
+        // A clean one is answered.
+        let clean = value(mcp.handle(&post(r#"{"jsonrpc":"2.0","id":1,"method":"tools/list"}"#), &cancel));
+        assert!(clean["result"]["tools"].is_array(), "{clean}");
+        // A repeated key at the top, in `_meta` (where the signed call travels), in the arguments, and in a list of objects.
+        for (what, body) in [
+            ("top", r#"{"jsonrpc":"2.0","id":1,"id":2,"method":"tools/list"}"#),
+            ("method", r#"{"jsonrpc":"2.0","id":1,"method":"tools/list","method":"tools/call"}"#),
+            (
+                "_meta",
+                r#"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"sys_kit","arguments":{"params":[]},"_meta":{"procession/call":"a","procession/call":"b","procession/call_sig":"c"}}}"#,
+            ),
+            (
+                "arguments",
+                r#"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"test_echo","arguments":{"params":[],"params":["x"]}}}"#,
+            ),
+            ("nested", r#"{"jsonrpc":"2.0","id":1,"method":"x","params":{"a":[{"b":1,"b":2}]}}"#),
+        ] {
+            let resp = value(mcp.handle(&post(body), &cancel));
+            // As the other malformed messages: a JSON-RPC parse error, with no value from the message in it.
+            assert_eq!(resp["error"]["code"], -32700, "{what}: {resp}");
+            assert_eq!(resp["error"]["message"], "not a JSON object", "{what}: {resp}");
+        }
+        assert_eq!(rig.pledge.count("submit"), 0, "nobody was asked");
+    }
+
+    #[test]
     fn the_mcp_layer_takes_a_call_in_meta_and_answers_with_the_outcome_object_first() {
         use crate::mcp::{HttpRequest, Mcp};
         use serde_json::{Value, json};
