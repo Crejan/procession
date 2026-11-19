@@ -51,14 +51,15 @@ done
 
 # -- 3. the service's key and its certificate ---------------------------------------------------------------------
 # sys kit first: it says whether ssh-keygen can be used under the rule (fixed path, ownership, version).
-CALL=$(fresh_id 1)
-KIT=$(su -s /bin/sh -c "sudo -n $PROBE --within secret,lasting,outage,text --call $CALL --until $(( $(date +%s) + 300 )) sys kit" "$SVC" 2>&1)
-printf '%s\n' "$KIT" | grep -q '"ssh_keygen_usable":true' && pass "sys kit: ssh-keygen $(printf '%s\n' "$KIT" | sed -n 's/.*"ssh_keygen_version":"\([^"]*\)".*/\1/p' | head -1) is usable under the rule" \
-  || stop "sys kit says ssh-keygen cannot be used: $(printf '%s\n' "$KIT" | sed -n 's/.*"ssh_keygen_problem":"\([^"]*\)".*/\1/p' | head -1)"
+kit_via_rule 1
+require_kit
+require_installed_commit
+require_keygen_usable
 if "$PROBE" setup --host-key /etc/ssh/ssh_host_ed25519_key --host "$HOST" --out "$KEYDIR"; then pass "probe setup made the service's key and certificate"; else stop "probe setup failed (its words are above); nothing after this is meaningful"; fi
 chown "$SVC:$SVC" "$KEYDIR/service-key" "$KEYDIR/service-key.pub" "$KEYDIR/service-key-cert.pub"
 chmod 0600 "$KEYDIR/service-key"; chmod 0644 "$KEYDIR/service-key.pub" "$KEYDIR/service-key-cert.pub"
-if ssh-keygen -L -f "$KEYDIR/service-key-cert.pub" | grep -q "probe@$HOST"; then pass "the certificate is for probe@$HOST"; else fail "the certificate does not name probe@$HOST"; fi
+CERT=$(ssh-keygen -L -f "$KEYDIR/service-key-cert.pub" 2>&1)
+if printf '%s\n' "$CERT" | grep -q "probe@$HOST"; then pass "the certificate is for probe@$HOST"; else fail "the certificate does not name probe@$HOST; what ssh-keygen -L says follows"; show_output "-" "$CERT"; fi
 
 # -- 4. /etc/probe.json ---------------------------------------------------------------------------------------------
 TMP=$(tmpfile settings) || stop "mktemp failed"
@@ -82,7 +83,7 @@ rm -f "$STATEDIR/verify.out"
 systemctl daemon-reload
 systemctl enable --now probe-setup.timer >/dev/null 2>&1 && pass "probe-setup.timer enabled" || fail "probe-setup.timer did not enable"
 systemctl start probe-setup.service
-if journalctl -u probe-setup.service --no-pager -n 20 2>/dev/null | grep -q 'Not due: 30 days'; then pass "the renewal unit ran and said: not due, 30 days left"; else fail "the renewal unit did not say 'Not due: 30 days' (journalctl -u probe-setup.service)"; fi
+if journalctl -u probe-setup.service --no-pager -n 20 2>/dev/null | grep -q 'Not due: 30 days'; then pass "the renewal unit ran and said: not due, 30 days left"; else fail "the renewal unit did not say 'Not due: 30 days'; what its journal says follows"; show_output "-" "$(journalctl -u probe-setup.service --no-pager -n 20 2>&1)"; fi
 systemctl enable --now probe-serve.service >/dev/null 2>&1
 # Wait up to 20 s for the service to listen.
 n=0
@@ -92,7 +93,7 @@ while [ "$n" -lt 20 ]; do
 done
 if systemctl is-active --quiet probe-serve.service && journalctl -u probe-serve.service --no-pager -n 30 | grep -q "listening on $LISTEN"; then
   pass "probe-serve is active and listening on $LISTEN"
-  journalctl -u probe-serve.service --no-pager -n 30 | grep -q "for $PERSON, pledge reachable" && pass "the service reaches pledge" || fail "the service says pledge is not reachable (journalctl -u probe-serve)"
+  if journalctl -u probe-serve.service --no-pager -n 30 | grep -q "for $PERSON, pledge reachable"; then pass "the service reaches pledge"; else fail "the service does not say that pledge is reachable; its journal follows"; show_output "-" "$(journalctl -u probe-serve.service --no-pager -n 30 2>&1)"; fi
 else
   fail "probe-serve is not active or does not listen: $(systemctl status probe-serve.service --no-pager 2>&1 | tail -15)"
 fi

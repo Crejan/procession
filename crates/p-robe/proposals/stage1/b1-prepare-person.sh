@@ -27,6 +27,10 @@ command -v groupadd >/dev/null && command -v usermod >/dev/null || stop "groupad
 as_owner "command -v cargo >/dev/null" || stop "cargo is not on the PATH of $PERSON (a login shell): the owner builds the checkout"
 find_pledge
 commit_of_checkout
+# The probe in /usr/local/bin must be the build of this checkout (a2's rule and everything after depend on it): asked through the rule.
+kit_via_rule 2
+require_kit
+require_installed_commit
 echo "checkout $CHECKOUT at $COMMIT; person $PERSON (uid $PUID, group $PGROUP, home $PHOME); host $HOST"
 echo "pledge: $PLEDGE"
 

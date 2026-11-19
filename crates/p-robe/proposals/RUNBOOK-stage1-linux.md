@@ -314,7 +314,7 @@ it that is not absolute, has `..`, or is near the top of the file system. Guards
 ### What you do, in order
 
 0. **Before:** Stage A passed (`a1`, `a2`, `a3`), and `undo.sh` was not run since. The person's cargo works in a login shell. `systemd` runs (`/run/systemd/system` exists).
-1. As root: `sh stage1/b1-prepare-person.sh CHECKOUT`. It checks everything first (Stage A in place, no leftovers, the host name's characters, cargo), then makes: an Ed25519 host key if the host has none, the group and the memberships, `/run/pledge-<person>`, `/etc/probe`,
+1. As root: `sh stage1/b1-prepare-person.sh CHECKOUT`. It checks everything first (**the probe installed in `/usr/local/bin` is the build of this checkout's commit**, asked through the sudo rule with `sys kit`, whose record now says `built_from`; if not, it stops and says to run `undo.sh`, build, and run `a1` again; Stage A in place, no leftovers, the host name's characters, cargo), then makes: an Ed25519 host key if the host has none, the group and the memberships, `/run/pledge-<person>`, `/etc/probe`,
    pledge's state directory and `config.json` (the person, this host and its key, the service `probe` at `http://127.0.0.1:8765/mcp`, the group), and **prints the two things you do by hand**. Passed: `PASS: prepared ...`. Did not pass: `STOP: ...` with the reason; nothing after it was changed.
 2. **By hand, terminal 1** (leave it open; it is pledge's terminal and the person's dialogs appear in it): the command `b1` printed, `su - alice -c "<pledge> serve --state-dir ... --socket-dir /run/pledge-alice"`. Passed: a warning, then
    `pledge: serving. SSH agent socket: ...`. Did not pass: it names the directory, its mode or the group (then `alice` is not in `pledge-svc` in that login).

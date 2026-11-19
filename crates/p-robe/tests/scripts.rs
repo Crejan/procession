@@ -470,3 +470,111 @@ impl UidOf for std::fs::Metadata {
         std::os::unix::fs::MetadataExt::uid(self)
     }
 }
+
+// -- a call that fails is told from a record that says no, and nothing it printed is thrown away -----------------
+
+/// Runs `body` after b-common.sh with the globals of a canned `sys kit` call set; returns (exit code, stdout).
+fn canned_kit(rc: i32, out: &str, extra: &str) -> (i32, String) {
+    let script = format!(
+        ". '{}'\nSVC=x; COMMIT=abc123def456\nKIT_RC={rc}\nKIT_OUT='{}'\nKIT_REC=$(printf '%s\\n' \"$KIT_OUT\" | grep '\"type\":\"installation\"' | head -1)\n{extra}",
+        stage1("b-common.sh").display(),
+        out.replace('\'', "'\"'\"'")
+    );
+    let result = std::process::Command::new("sh").arg("-c").arg(script).output().unwrap();
+    (result.status.code().unwrap_or(-1), String::from_utf8(result.stdout).unwrap())
+}
+
+const REC_OK: &str = "{\"type\":\"installation\",\"version\":\"0.0.0\",\"built_from\":\"abc123def456\",\"ssh_keygen\":\"/usr/bin/ssh-keygen\",\"ssh_keygen_version\":\"10.0\",\"ssh_keygen_usable\":true,\"ssh_keygen_problem\":null}";
+
+#[test]
+fn a_call_that_failed_is_told_from_a_record_that_says_no_and_the_whole_answer_is_shown() {
+    // Each way the call itself can fail: the answer is shown whole with its exit code, and the cause is words, never empty.
+    for (rc, out, cause) in [
+        (1, "sudo: a password is required", "sudo refused it"),
+        (64, "probe: refused: bad --within: expected exposure,damage,disruption", "the dispatcher refused the call"),
+        (3, "probe: unavailable: cannot write the audit line", "unavailable"),
+        (1, "", "no output at all"),
+        (0, "some text that is not json", "printed no sys kit record"),
+        (7, "garbage", "no sys kit record"),
+    ] {
+        let (code, text) = canned_kit(rc, out, "require_kit");
+        assert_eq!(code, 1, "{out}");
+        assert!(text.starts_with("STOP: the call itself failed"), "{text}");
+        assert!(text.contains(cause), "{out}: {text}");
+        assert!(text.contains(&format!("exit code: {rc}")), "{text}");
+        if !out.is_empty() {
+            assert!(text.contains(&format!("| {out}")), "the whole answer is shown: {text}");
+        } else {
+            assert!(text.contains("printed nothing"), "{text}");
+        }
+    }
+    // The old probe's refusal of four tokens gets the hint.
+    let (_, text) = canned_kit(64, "probe: refused: bad --within: expected exposure,damage,disruption", "require_kit");
+    assert!(text.contains("older than this checkout"), "{text}");
+    // A record that is there passes `require_kit`.
+    let (code, text) = canned_kit(0, REC_OK, "require_kit; echo went-on");
+    assert!((code, text.trim()) == (0, "went-on"), "{text}");
+}
+
+#[test]
+fn the_installed_probe_must_be_the_build_of_the_checkouts_commit() {
+    let (code, text) = canned_kit(0, REC_OK, "require_installed_commit");
+    assert_eq!(code, 0, "{text}");
+    assert!(
+        text.contains("PASS: /usr/local/bin/probe is the build of this checkout's commit (abc123def456)"),
+        "{text}"
+    );
+    let other = REC_OK.replace("abc123def456", "967b64c0aaaa");
+    let (code, text) = canned_kit(0, &other, "require_installed_commit");
+    assert_eq!(code, 1);
+    assert!(
+        text.contains("967b64c0aaaa")
+            && text.contains("abc123def456")
+            && text.contains("undo.sh")
+            && text.contains("a1"),
+        "{text}"
+    );
+    // An older probe that does not say its commit at all.
+    let old = REC_OK.replace("\"built_from\":\"abc123def456\",", "");
+    let (code, text) = canned_kit(0, &old, "require_installed_commit");
+    assert_eq!(code, 1);
+    assert!(
+        text.contains("does not say which commit") && text.contains("whole") == false && text.contains("exit code"),
+        "{text}"
+    );
+}
+
+#[test]
+fn a_keygen_that_cannot_be_used_always_gives_a_reason_even_when_the_record_has_none() {
+    let usable = canned_kit(0, REC_OK, "require_keygen_usable");
+    assert!(
+        usable.0 == 0 && usable.1.contains("PASS: sys kit: ssh-keygen 10.0 at /usr/bin/ssh-keygen is usable"),
+        "{usable:?}"
+    );
+    let with_reason = REC_OK.replace(
+        "\"ssh_keygen_usable\":true,\"ssh_keygen_problem\":null",
+        "\"ssh_keygen_usable\":false,\"ssh_keygen_problem\":\"/usr/bin is not trusted: group-writable\"",
+    );
+    let (code, text) = canned_kit(0, &with_reason, "require_keygen_usable");
+    assert!(
+        code == 1
+            && text.contains("cannot be used: /usr/bin is not trusted: group-writable")
+            && text.contains("exit code: 0"),
+        "{text}"
+    );
+    // `false` and no reason (null, or absent): it says so, and shows the record.
+    for none in ["\"ssh_keygen_usable\":false,\"ssh_keygen_problem\":null", "\"ssh_keygen_usable\":false"] {
+        let record = REC_OK.replace("\"ssh_keygen_usable\":true,\"ssh_keygen_problem\":null", none);
+        let (code, text) = canned_kit(0, &record, "require_keygen_usable");
+        assert!(
+            code == 1
+                && text.contains("cannot be used: the record gives no reason")
+                && text.contains("| {\"type\":\"installation\""),
+            "{text}"
+        );
+    }
+    // No such member at all: said, with the answer.
+    let missing = REC_OK.replace("\"ssh_keygen_usable\":true,\"ssh_keygen_problem\":null", "\"x\":1");
+    let (code, text) = canned_kit(0, &missing, "require_keygen_usable");
+    assert!(code == 1 && text.contains("has no ssh_keygen_usable member") && text.contains("| {"), "{text}");
+}

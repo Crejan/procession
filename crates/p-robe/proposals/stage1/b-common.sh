@@ -113,7 +113,8 @@ ensure_statedir() {
 # tmpfile NAME: a fresh file in the root-only directory (mktemp: unpredictable name, created exclusively, 0600).
 tmpfile() { mktemp "$STATEDIR/$1.XXXXXX"; }
 
-# One call through the rule, as probe-svc, like a2's. ID is a fresh identifier. Prints the output.
+# fresh_id N: the identifier of this script family's N-th call. The dispatcher does not refuse an identifier it has seen (the
+# service's own store does, for calls that come through it; these go straight through the rule), so a rerun is not refused.
 fresh_id() { printf '3f2b6c1e-8a57-4d0e-9b1a-5c2e7d9f0b%02d' "$1"; }
 
 # public_key_of LIST PURPOSE: the public key of that purpose from the text of `pledge keys list`
@@ -148,4 +149,83 @@ probe_settings_json() {
   "probe": "$PROBE"
 }
 JSON
+}
+
+# -- calls through the rule: nothing is thrown away, and "the call failed" is told from "the record says no" --------------
+
+# show_output RC OUTPUT: the whole of what a call printed and its exit code, indented, so that the cause is on the screen.
+show_output() {
+  echo "    exit code: $1"
+  if [ -n "$2" ]; then printf '%s\n' "$2" | sed 's/^/    | /'; else echo "    | (it printed nothing)"; fi
+}
+
+# json_word LINE NAME: a member of one record line: its string, or true/false/null/a number; empty if it is not there.
+json_word() {
+  v=$(printf '%s\n' "$1" | sed -n "s/.*\"$2\":\"\([^\"]*\)\".*/\1/p" | head -1)
+  [ -n "$v" ] || v=$(printf '%s\n' "$1" | sed -n "s/.*\"$2\":\([A-Za-z0-9.-]*\).*/\1/p" | head -1)
+  printf '%s\n' "$v"
+}
+
+# classify_failure RC OUTPUT: why a call through the rule gave no answer, in words (never empty).
+classify_failure() {
+  case "$2" in
+    *"sudo:"*) echo "sudo refused it (the rule does not match this form, or a password is wanted)"; return ;;
+  esac
+  case "$1" in
+    64) echo "the dispatcher refused the call: $(printf '%s\n' "$2" | grep 'probe:' | tail -1)" ;;
+    3) echo "the dispatcher answered 'unavailable' (it could not write its audit line, or the verb cannot run here)" ;;
+    75) echo "the dispatcher was busy (another call holds the lock)" ;;
+    76) echo "the dispatcher found the deadline already past" ;;
+    0) echo "it exited 0 but printed no sys kit record (an older probe, or not JSON)" ;;
+    *) if [ -z "$2" ]; then echo "exit code $1 and no output at all"; else echo "exit code $1 and no sys kit record in what it printed"; fi ;;
+  esac
+}
+
+# kit_via_rule N: `sys kit` as probe-svc through the sudo rule, like the service will. Sets KIT_RC, KIT_OUT (stdout and
+# stderr together) and KIT_REC (the installation record, if there is one).
+kit_via_rule() {
+  kit_id=$(fresh_id "$1")
+  KIT_OUT=$(su -s /bin/sh -c "sudo -n $PROBE --within secret,lasting,outage,text --call $kit_id --until $(( $(date +%s) + 300 )) sys kit" "$SVC" 2>&1)
+  KIT_RC=$?
+  KIT_REC=$(printf '%s\n' "$KIT_OUT" | grep '"type":"installation"' | head -1)
+}
+
+# require_kit: stops, with the whole answer and the exit code, unless the call itself gave an installation record.
+require_kit() {
+  if [ "$KIT_RC" != 0 ] || [ -z "$KIT_REC" ]; then
+    echo "STOP: the call itself failed (not ssh-keygen, which it never got to say): $(classify_failure "$KIT_RC" "$KIT_OUT")"
+    show_output "$KIT_RC" "$KIT_OUT"
+    case "$KIT_OUT" in *"bad --within"*) echo "      That is the message of a probe that does not take the fourth token of --within: /usr/local/bin/probe is older than this checkout. Run undo.sh and a1 again with a fresh build." ;; esac
+    exit 1
+  fi
+}
+
+# require_installed_commit: the probe in /usr/local/bin is the build of the checkout's commit (COMMIT, from commit_of_checkout).
+require_installed_commit() {
+  built=$(json_word "$KIT_REC" built_from)
+  if [ -z "$built" ]; then
+    echo "STOP: /usr/local/bin/probe does not say which commit it was built from: it is older than this checkout ($COMMIT). Run undo.sh, build ( cargo build --workspace --features p-robe/test-verbs,p-act/pact as the person) and run a1 again."
+    show_output "$KIT_RC" "$KIT_OUT"; exit 1
+  fi
+  if [ "$built" != "$COMMIT" ]; then
+    echo "STOP: /usr/local/bin/probe is the build of $built, and the checkout is at $COMMIT. Run undo.sh, build the checkout ( cargo build --workspace --features p-robe/test-verbs,p-act/pact as the person) and run a1 again."
+    exit 1
+  fi
+  pass "/usr/local/bin/probe is the build of this checkout's commit ($COMMIT)"
+}
+
+# require_keygen_usable: the record says ssh-keygen can be used under the rule; else the reason, or that there is none, and the record.
+require_keygen_usable() {
+  usable=$(json_word "$KIT_REC" ssh_keygen_usable)
+  case "$usable" in
+    true) pass "sys kit: ssh-keygen $(json_word "$KIT_REC" ssh_keygen_version) at $(json_word "$KIT_REC" ssh_keygen) is usable under the rule" ;;
+    false)
+      reason=$(json_word "$KIT_REC" ssh_keygen_problem)
+      case "$reason" in ""|null) reason="the record gives no reason" ;; esac
+      echo "STOP: sys kit says ssh-keygen cannot be used: $reason"
+      show_output "$KIT_RC" "$KIT_OUT"; exit 1 ;;
+    *)
+      echo "STOP: the installation record has no ssh_keygen_usable member (an older probe than this checkout's?): the answer follows"
+      show_output "$KIT_RC" "$KIT_OUT"; exit 1 ;;
+  esac
 }

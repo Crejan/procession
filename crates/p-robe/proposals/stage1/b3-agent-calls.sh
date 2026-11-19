@@ -34,13 +34,14 @@ mark CALLER_MADE "$CALLER"
 
 say() { echo; echo ">>> $*"; }
 # pact_call TOOL JSON: prints pact's one line.
-pact_call() { as_person "sh '$CALLER' call $1 '$2'"; }
+# (stderr with stdout, and the exit code in PACT_RC: a failure shows everything pact said.)
+pact_call() { as_person "sh '$CALLER' call $1 '$2' 2>&1"; }
 id_of() { printf '%s\n' "$1" | sed -n 's/.*"id":"\([0-9a-f-]\{36\}\)".*/\1/p' | head -1; }
 IDS=""
 # expect LABEL OUTPUT WANT: the outcome word of pact's result.
 expect() {
   id=$(id_of "$2")
-  if printf '%s\n' "$2" | grep -q "\"outcome\":\"$3\""; then pass "$1: $3 (call $id)"; else fail "$1: expected $3; pact said: $(printf '%s\n' "$2" | cut -c1-300)"; fi
+  if printf '%s\n' "$2" | grep -q "\"outcome\":\"$3\""; then pass "$1: $3 (call $id)"; else fail "$1: expected $3; pact's whole answer follows"; show_output "${PACT_RC:-?}" "$2"; fi
   IDS="$IDS $id:$3"
 }
 
@@ -52,33 +53,34 @@ mark BUNDLE_MADE "$BUNDLE"
 [ "$(stat -c '%a %U' "$BUNDLE")" = "600 $PERSON" ] && pass "the bundle is 0600 and the person's" || stop "the bundle is '$(stat -c '%a %U' "$BUNDLE")', expected '600 $PERSON'"
 
 # -- the catalogue ------------------------------------------------------------------------------------------
-TOOLS=$(as_person "sh '$CALLER' tools") || stop "pact tools failed (its words are above): the service is not reachable at http://$LISTEN/mcp, or the bundle is refused"
+TOOLS=$(as_person "sh '$CALLER' tools 2>&1"); TOOLS_RC=$?
+if [ "$TOOLS_RC" != 0 ]; then echo "STOP: pact tools failed: the service is not reachable at http://$LISTEN/mcp, or the bundle is refused; everything it said follows"; show_output "$TOOLS_RC" "$TOOLS"; exit 1; fi
 for t in sys_kit test_echo test_peak test_read; do
-  printf '%s\n' "$TOOLS" | grep -q "\"$t\"" && pass "pact tools lists $t" || fail "pact tools does not list $t: $(printf '%s\n' "$TOOLS" | cut -c1-300)"
+  if printf '%s\n' "$TOOLS" | grep -q "\"$t\""; then pass "pact tools lists $t"; else fail "pact tools does not list $t; its whole answer follows"; show_output "$TOOLS_RC" "$TOOLS"; fi
 done
 [ "$FAILED" = 0 ] || stop "the catalogue is not what the rest needs"
 
 # -- the calls ----------------------------------------------------------------------------------------------
 say "sys_kit: harmless, automatic: nothing to answer."
-R=$(pact_call sys_kit '{"params":[]}'); expect "sys_kit (automatic; the verb runs as root through the sudo rule)" "$R" done
-printf '%s\n' "$R" | grep -q '"euid":0' && pass "its answer says euid 0: the dispatcher ran as root" || fail "its answer does not say euid 0"
+R=$(pact_call sys_kit '{"params":[]}'); PACT_RC=$?; expect "sys_kit (automatic; the verb runs as root through the sudo rule)" "$R" done
+if printf '%s\n' "$R" | grep -q '"euid":0'; then pass "its answer says euid 0: the dispatcher ran as root"; else fail "its answer does not say euid 0; the whole answer follows"; show_output "${PACT_RC:-?}" "$R"; fi
 say "test_echo: harmless, automatic: nothing to answer."
-R=$(pact_call test_echo '{"params":["hello"]}'); expect "test_echo (automatic)" "$R" done
-printf '%s\n' "$R" | grep -q 'hello' && pass "its answer carries the argument" || fail "its answer does not carry the argument"
+R=$(pact_call test_echo '{"params":["hello"]}'); PACT_RC=$?; expect "test_echo (automatic)" "$R" done
+if printf '%s\n' "$R" | grep -q 'hello'; then pass "its answer carries the argument"; else fail "its answer does not carry the argument; the whole answer follows"; show_output "${PACT_RC:-?}" "$R"; fi
 
 say "test_peak is rated at the top of a scale: pledge asks. In pledge's terminal answer  y  to the request and  y  to the presence check. This call waits for you."
-R=$(pact_call test_peak '{"params":[]}'); expect "test_peak, asked and confirmed" "$R" done
+R=$(pact_call test_peak '{"params":[]}'); PACT_RC=$?; expect "test_peak, asked and confirmed" "$R" done
 
 say "test_peak again. This time answer  n  in pledge's terminal. This call waits for you."
-R=$(pact_call test_peak '{"params":[]}'); expect "test_peak, declined" "$R" declined
+R=$(pact_call test_peak '{"params":[]}'); PACT_RC=$?; expect "test_peak, declined" "$R" declined
 
 say "test_read of /etc/hostname: a file outside the test's open place is rated secret: pledge asks. Answer  y  and  y. Its answer is a record with the file's bytes, which the service makes visible if they hold anything odd."
-R=$(pact_call test_read '{"params":["/etc/hostname"]}'); expect "test_read, asked and confirmed" "$R" done
-printf '%s\n' "$R" | grep -q '"type":"file"' && pass "its answer has a file record" || fail "its answer has no file record"
+R=$(pact_call test_read '{"params":["/etc/hostname"]}'); PACT_RC=$?; expect "test_read, asked and confirmed" "$R" done
+if printf '%s\n' "$R" | grep -q '"type":"file"'; then pass "its answer has a file record"; else fail "its answer has no file record; the whole answer follows"; show_output "${PACT_RC:-?}" "$R"; fi
 
 say "test_peak, the LONG one: pact gives up on a silent stream after 45 seconds; the service sends a comment every 15. WAIT at least 60 SECONDS in pledge's terminal before you answer  y  and  y. Start counting when the question appears."
 T0=$(date +%s)
-R=$(pact_call test_peak '{"params":[]}'); T1=$(date +%s)
+R=$(pact_call test_peak '{"params":[]}'); PACT_RC=$?; T1=$(date +%s)
 expect "test_peak, answered late" "$R" done
 WAITED=$((T1 - T0))
 if [ "$WAITED" -ge 50 ]; then pass "the call lasted $WAITED s: past pact's 45 s idle timeout, so the service's keepalive comments arrived"; else fail "the call lasted only $WAITED s: it did not wait long enough to show a keepalive (answer after 60 s)"; fi
@@ -91,7 +93,7 @@ for pair in $IDS; do
   [ -n "$id" ] || continue
   line=$(printf '%s\n' "$HIST" | grep "call=$id" | grep -v 'received' | head -1)
   case "$want" in done) word=approved ;; declined) word=declined ;; *) word=$want ;; esac
-  if printf '%s\n' "$line" | grep -q " $word"; then pass "pledge's record has $word for $id"; else fail "pledge's record has no '$word' entry for $id: $line"; fi
+  if printf '%s\n' "$line" | grep -q " $word"; then pass "pledge's record has $word for $id"; else fail "pledge's record has no '$word' entry for $id; every entry that names the call follows"; show_output "-" "$(printf '%s\n' "$HIST" | grep "call=$id")"; fi
   printf '%s\n' "$line" | grep -q "peer-uid=$SVCUID" && pass "…received from uid $SVCUID ($SVC), read by pledge from the socket" || fail "…the entry of $id does not show peer-uid=$SVCUID"
 done
 
@@ -103,11 +105,11 @@ for pair in $IDS; do
   [ -n "$id" ] || continue
   if [ "$want" = done ]; then
     printf '%s\n' "$JOURNAL" | grep "call=$id" | grep -q 'event=start' && printf '%s\n' "$JOURNAL" | grep "call=$id" | grep -q 'event=done' \
-      && pass "the journal has start and done of the dispatcher for $id (identity=$SVC)" || fail "the journal lacks the dispatcher's start/done for $id"
+      && pass "the journal has start and done of the dispatcher for $id (identity=$SVC)" || { fail "the journal lacks the dispatcher's start/done for $id; the lines that name the call follow"; show_output "-" "$(printf '%s\n' "$JOURNAL" | grep "$id")"; }
   else
     printf '%s\n' "$JOURNAL" | grep "call=$id" | grep -q 'event=start' && fail "the journal has a start for $id, which was declined: the verb ran" || pass "no dispatcher line for $id: the declined call did not run"
   fi
-  printf '%s\n' "$JOURNAL" | grep "id=$id" | grep -q "outcome=$want" && pass "the service's own line says outcome=$want for $id" || fail "the service's log has no 'outcome=$want' for $id"
+  if printf '%s\n' "$JOURNAL" | grep "id=$id" | grep -q "outcome=$want"; then pass "the service's own line says outcome=$want for $id"; else fail "the service's log has no 'outcome=$want' for $id; the lines that name the call follow"; show_output "-" "$(printf '%s\n' "$JOURNAL" | grep "$id")"; fi
 done
 
 echo
