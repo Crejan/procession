@@ -128,6 +128,9 @@ pub fn broker(reason: BrokerReason) -> Outcome {
         // clearance). Nothing is wrong with the call, and nothing is asked again in a loop: the service says
         // `unavailable` and logs `broker:not-ready`.
         B::NotReady => Outcome::Unavailable,
+        // The broker has no valid directory data (who may be asked, whose keys): nothing was done. The agent's class stays
+        // `unavailable`; the exact reason is logged as for the others (`broker:directory-stale`).
+        B::DirectoryStale => Outcome::Unavailable,
     }
 }
 
@@ -188,6 +191,7 @@ mod tests {
             ("too-many-waiting", "refused/try-later"),
             ("busy", "refused/try-later"),
             ("not-ready", "unavailable"),
+            ("directory-stale", "unavailable"),
         ];
         assert_eq!(BrokerReason::ALL.len(), expected.len(), "a code was added: say what an agent sees");
         for (wire, agent) in expected {
@@ -229,5 +233,6 @@ mod tests {
         assert_eq!(refusal(Refused::Pledge(PledgeReason::Ceiling)).1, "pledge:ceiling");
         assert_eq!(refusal(Refused::Broker(BrokerReason::Busy)).1, "broker:busy");
         assert_eq!(refusal(Refused::Broker(BrokerReason::NotReady)).1, "broker:not-ready");
+        assert_eq!(refusal(Refused::Broker(BrokerReason::DirectoryStale)).1, "broker:directory-stale");
     }
 }

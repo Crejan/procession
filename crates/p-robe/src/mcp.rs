@@ -184,7 +184,9 @@ impl Mcp<'_> {
         if request.body.len() > BODY_MAX {
             return send(out, &HttpResponse::status(413));
         }
-        let Ok(Value::Object(message)) = serde_json::from_slice::<Value>(&request.body) else {
+        // The agent's message is decided on (the call in `_meta`, the arguments): read by the one strict reader, which refuses a
+        // repeated key at any depth (never the first, never the last) and echoes nothing. Refused like any malformed message.
+        let Ok(Value::Object(message)) = p_ermit::json::parse_slice(&request.body) else {
             return send(out, &rpc_error(&Value::Null, -32700, "not a JSON object"));
         };
         let Some(method) = message.get("method").and_then(Value::as_str) else {

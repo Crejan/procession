@@ -181,13 +181,13 @@ code never becomes the dispatcher's**; it travels in the output, as `rc`:
 | 0, 1, 2 (the row's result codes: nothing above info, warnings, critical) | `done` | the lines above, trailer `rc` 0/1/2 and `result` `info`/`warnings`/`critical` |
 | 3 (the diagnostic itself failed) | `done` | the lines the tool gave, trailer `rc` 3 and `result` `failed-diagnostic`: an agent must not read an empty answer as "all fine" |
 | 4, any other code, a signal, a timeout, a tool that cannot be run | **failed** | no tool lines; one `error` record with a `code` (`tool-refused` for 4: the row and the tool disagree about the arguments; `tool-failed`, `tool-killed`, `tool-timeout`, `tool-unusable`), then the trailer with `rc` null and `result` `failed` |
-| not one JSON object, over the limit, the wrong `subcommand` or `schema_version`, a record of a reserved type | **failed** | no tool lines; one `error` record (`not-an-object`, `object-too-large`, `wrong-object`, `reserved-type`), trailer `result` `failed` |
+| not one JSON object, **an object with a repeated key at any depth** (`duplicate-key`: refused, neither the first nor the last taken; read by `p_ermit::json`, which echoes no value), over the limit, the wrong `subcommand` or `schema_version`, a record of a reserved type | **failed** | no tool lines; one `error` record (`not-an-object`, `object-too-large`, `wrong-object`, `reserved-type`), trailer `result` `failed` |
 
 A failed call never ends with half an output. The dispatcher's exit code for a verb that was
 started and did not produce a usable result is **70** (decided; not 2): a tool code outside the row's
 result codes, a signal, a timeout, a bad or too large object, a reserved record type. The `done` audit
 line carries `rc=70` and `cause=` (`tool-refused`, `tool-failed:N`, `tool-killed:N`, `tool-timeout`,
-`tool-unusable:why`, `not-an-object`, `object-too-large`, `wrong-object`, `reserved-type`; for a verb of this
+`tool-unusable:why`, `not-an-object`, `duplicate-key`, `object-too-large`, `wrong-object`, `reserved-type`; for a verb of this
 program `verb-code:N` and `answer-lost`). The service tells the agent `failed` (not `unavailable`: that is
 only for a verb that certainly did not start) and logs the cause under the call's identifier.
 

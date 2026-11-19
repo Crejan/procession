@@ -884,6 +884,10 @@ mod tests {
             ("exit 9".to_string(), "tool-failed:9"),
             ("kill -9 $$".to_string(), "tool-killed:9"),
             ("echo nonsense".to_string(), "not-an-object"),
+            (
+                format!("echo '{}'", OBJECT.replace("\"mode\":\"observe\"", "\"mode\":\"observe\",\"mode\":\"x\"")),
+                "duplicate-key",
+            ),
             (format!("echo '{}'", OBJECT.replace("\"procs\",\"host", "\"irq\",\"host")), "wrong-object"),
             (format!("echo '{}'", OBJECT.replace("\"thread\"", "\"finding\"")), "reserved-type"),
         ] {
