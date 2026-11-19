@@ -104,6 +104,8 @@ pub fn run(env: &Env, _args: &[String], answer: &mut Answer<'_>) -> Result<u8, F
     answer.record(
         &Record::new("installation")
             .str("version", env!("CARGO_PKG_VERSION"))
+            // The commit this binary was built from (`build.rs`), so that a script can tell an old install from the checkout's.
+            .str("built_from", env!("PROBE_BUILT_FROM"))
             .opt_str("executable", executable.as_deref())
             .str("os", std::env::consts::OS)
             .str("arch", std::env::consts::ARCH)

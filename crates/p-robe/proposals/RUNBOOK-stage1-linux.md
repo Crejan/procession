@@ -30,7 +30,7 @@ service over HTTP. Nothing in it has been run on Linux. Terms are those of
 | `pact`'s HTTP client | p-act's, `ureq` 3 (`pact::http::HttpTransport`), merged; its socket tests never ran over a real socket either |
 | the cross run through `SudoRunner` | **run and passed** by the owner on 2026-11-18 at `2a38839` (Debian 13, unprivileged LXC container; writer: p-act): `tests/stage1_sudo.rs`, 1.13 s |
 | the cross run over real HTTP with the real `pact` | **run and passed** by the owner on 2026-11-18 at `51920c2` (Debian 13, unprivileged LXC, as root, `PROBE_PLEDGE_BIN`/`PROBE_PACT_BIN` set by hand): `tests/stage1_http.rs`, 0.26 s. Shown for the first time: the HTTP transport on a real TCP port; the real `pact` (ureq) reading the stream; pledge and the service starting `/usr/bin/ssh-keygen` under the `Keygen` rule (OpenSSH 10.0p2); `pact`'s bundle and peer checks. **Not shown:** the verb through sudo (not run with `PROBE_STAGE1_SUDO`); a wait long enough for a keepalive comment (15 s) or the 45 s idle timeout; the service as its own account and unit; a person at the dialog; the account split and the group on `service.sock` (everything ran as root) |
-| the scripts of Stage B (`stage1/b1`, `b2`, `b3`, `undo-b.sh`) | **written, `sh -n` and the pieces tested here** (the config and settings they write are read by the real readers; the pledge part was rehearsed with the real `pledge` on macOS); **never run on Linux** |
+| the scripts of Stage B (`stage1/b1`, `b2`, `b3`, `undo-b.sh`) | **run by the owner on 2026-11-19 at `e78c90a13e5a`: `b3` "ALL PASSED"** (Debian 13 LXC; section 7); `b2` passed but for one grep, fixed since; the scripts have changed since that run (a1 takes the checkout, the marker in `/etc/probe-stage1`, outputs shown whole, the 29/30 fix), so the final run is still to be made on the final commit |
 | the scripts of Stage A (`stage1/a1` to `a3`, `undo.sh`) | **run and passed** by the owner on 2026-11-18 at `2a38839`, unedited: a1, a2 (23 PASS lines), a3 ("PASSED (exit 0)"). a3 has since changed (it names the test executable from cargo's JSON; `ac1fcba`) and is not yet run in that form |
 
 So the runbook has two stages. **Stage A runs today on a Linux machine**: the
@@ -57,7 +57,7 @@ programs have today, and what is not yet there is marked.
   `git bundle create probe.bundle integration` (on the Mac) and `git clone
   probe.bundle checkout` (on the Linux machine). The runbook assumes the
   checkout is at `/home/alice/CHECKOUT`.
-- Build, as `alice`, in the checkout:
+- Build, as `alice`, in the checkout (**only needed for the by-hand forms, `stage1_http` and `pact`: `a1` and `a3` and `b1` to `b3` build what they use themselves**):
   ```
   cargo build --workspace --features p-robe/test-verbs,p-act/pact
   ```
@@ -164,7 +164,7 @@ programs have today, and what is not yet there is marked.
 | Change | By | Undone by |
 |---|---|---|
 | the account `probe-svc` and its home `/var/lib/probe-svc` | `a1-prepare.sh` | `undo.sh` (`userdel -r`; not if the account existed before) |
-| `/usr/local/bin/probe` (root, 0755) | `a1-prepare.sh` | `undo.sh` |
+| `/usr/local/bin/probe` (root, 0755): **the build of the checkout's commit, made by `a1` itself** | `a1-prepare.sh` | `undo.sh` |
 | `/var/lib/probe/locks` (root, 0755), `/var/lib/probe/used` (probe-svc, 0700) | `a1-prepare.sh` | `undo.sh` (removes `/var/lib/probe`) |
 | `/etc/sudoers.d/probe-svc` (0440) | `a1-prepare.sh`, after `visudo -cf` | `undo.sh` |
 | lines in syslog or the journal (tag `probe`, facility `auth`) | the dispatcher, on every call | not undone: they are history |
@@ -194,14 +194,15 @@ check anything unless a1 passed), but a wrong order would only confuse the outpu
 ### A1. Prepare
 
 ```
-sh stage1/a1-prepare.sh /home/alice/CHECKOUT/target/debug/probe
+sh stage1/a1-prepare.sh /home/alice/CHECKOUT
 ```
 
-Passed: the last lines are `PASS: /etc/sudoers.d/probe-svc installed (visudo -cf
-accepted it)` and `PASS: prepared`. Did not pass: it prints `FAIL:` and why
-(a missing `logger`, `visudo`, `ssh-keygen`, a leftover file from before, or
-`visudo -cf` refusing the rule, in which case **nothing was put into
-`/etc/sudoers.d`**). Run `undo.sh` before trying again.
+**It takes the checkout, not a binary** (a file as the argument is refused with a line that says so). a1 **builds `probe` with `--features test-verbs` itself**, as the checkout's owner in a login shell,
+takes the path of the binary from cargo's own messages (`stage1/find-artifact.sh`) and installs that: no binary is named by hand, so none can be an old one. It checks everything first, **the build included**
+(the tools `visudo`, `logger`, `ssh-keygen`, `useradd`; cargo for the owner; no leftover `/etc/sudoers.d/probe-svc`, `/usr/local/bin/probe` or `/var/lib/probe`), and only then changes the machine; the rule is checked with `visudo -cf` first.
+**If it stops after its first change it takes back what it did** (an EXIT trap: the account if it made it, the program, `/var/lib/probe`, the rule, the temporary file, the state directory if it made that), so a stopped run leaves nothing behind.
+Passed: the last lines are `PASS: /etc/sudoers.d/probe-svc installed, and the whole sudoers configuration checks` and `PASS: prepared: probe built from <commit> is installed.` Did not pass: it prints `STOP:` or `FAIL:` and why
+(a missing `logger`, `visudo`, `ssh-keygen`, a build that failed, a leftover from before, or `visudo -cf` refusing the rule, in which case **nothing was put into `/etc/sudoers.d`**). Run `undo.sh` before trying again if it says a leftover exists.
 
 ### A2. Check the rule
 
@@ -314,7 +315,7 @@ it that is not absolute, has `..`, or is near the top of the file system. Guards
 ### What you do, in order
 
 0. **Before:** Stage A passed (`a1`, `a2`, `a3`), and `undo.sh` was not run since. The person's cargo works in a login shell. `systemd` runs (`/run/systemd/system` exists).
-1. As root: `sh stage1/b1-prepare-person.sh CHECKOUT`. It checks everything first (Stage A in place, no leftovers, the host name's characters, cargo), then makes: an Ed25519 host key if the host has none, the group and the memberships, `/run/pledge-<person>`, `/etc/probe`,
+1. As root: `sh stage1/b1-prepare-person.sh CHECKOUT`. It checks everything first (**the probe installed in `/usr/local/bin` is the build of this checkout's commit**, asked through the sudo rule with `sys kit`, whose record now says `built_from`; if not, it stops and says to run `undo.sh`, build, and run `a1` again; Stage A in place, no leftovers, the host name's characters, cargo), then makes: an Ed25519 host key if the host has none, the group and the memberships, `/run/pledge-<person>`, `/etc/probe`,
    pledge's state directory and `config.json` (the person, this host and its key, the service `probe` at `http://127.0.0.1:8765/mcp`, the group), and **prints the two things you do by hand**. Passed: `PASS: prepared ...`. Did not pass: `STOP: ...` with the reason; nothing after it was changed.
 2. **By hand, terminal 1** (leave it open; it is pledge's terminal and the person's dialogs appear in it): the command `b1` printed, `su - alice -c "<pledge> serve --state-dir ... --socket-dir /run/pledge-alice"`. Passed: a warning, then
    `pledge: serving. SSH agent socket: ...`. Did not pass: it names the directory, its mode or the group (then `alice` is not in `pledge-svc` in that login).
@@ -618,6 +619,17 @@ dev-dependency only, for the in-memory streams of the tests. No TLS crate: betwe
 agent and service TLS is open for stage 2. `pact`'s client is p-act's: `ureq` 3, no runtime.
 
 ## 7. What was run, and where
+
+**Stage B, by the owner, 2026-11-19, at `e78c90a13e5a`** (Debian 13, unprivileged LXC; host `probe-test`, person `test`, `probe-svc` uid 999). `b3` ended **"ALL PASSED"**. Shown there:
+the agent was started and its bundle is 0600; `pact tools` lists 7 tools; `sys_kit` and `test_echo` are automatic, `done`, and the answer says `euid` 0 (the verb ran as root through the sudo rule, from the systemd unit);
+`test_peak` asked and confirmed, `done`; `test_peak` declined, and no dispatcher line for it; `test_read /etc/hostname` confirmed, a `file` record; the long `test_peak` lasted **84 s**, past `pact`'s 45 s idle timeout (so the service's keepalive comments arrived);
+`pledge history --verify`: the chain is intact; every call is `approved` or `declined` in pledge's record, **received from uid 999 (`probe-svc`)** (the group on `service.sock`, read by pledge from the socket); the journal has the dispatcher's start and done per call that ran, `identity=probe-svc`; the service's own line says `outcome=done` or `declined` per call.
+`b2` passed except one check: its grep wanted `Not due: 30 days` and the journal said `29 days left` (the product was right; fixed since: 29 or 30 is accepted). **Stated about that run:** the scripts were those of `e78c90a`; `a1` was given the binary path by hand after a rebuild (the form before it took the checkout); pledge was started in a fresh login
+(an earlier start from an older shell failed with "giving /run/pledge-test to the group pledge-svc: Operation not permitted", as the runbook says it would). **Stated by the owner, not seen as output** (he pasted none): `a2` and `a3` "ran on the current state", that is at `e78c90a13e5a`. So the record is: **Stage A and Stage B both at `e78c90a13e5a`, on the forms with `host_text` (the fourth token of `--within`)**, by his statement for A and by `b3`'s output for B; scripts as of `e78c90a`, `a1` given the binary path by hand.
+**Script faults that run found, and the commits that fix them** (all after `e78c90a`; **none of the fixed scripts has run on Linux**; the root-only directory `/etc/probe-stage1` and `a3`'s `/run/probe-stage1-run.*` are in `e78c90a` and **did run there**: `a1` printed `/etc/probe-stage1/sudoers.lsNzQS: parsed OK`, `b1` to `b3` used the marker in it, and `a3` ran by the owner's statement): the installed `probe` was an old build and nothing detected it (`b1` and `b2` now check that `sys kit`'s `built_from` is the checkout's commit, `81ad889`; and `a1` builds the checkout itself, below); `b2` threw away what the failed call printed and gave an empty reason (every check now prints the whole answer and the exit code, `9a64c84`, `81ad889`);
+`a1` was given a directory, accepted it, made the account and stopped, leaving it behind (`a1` takes the CHECKOUT, builds `probe` itself, and an EXIT trap takes back what it did, `0a96d11`); `b2`'s grep wanted 30 days and the unit said 29 (`1984b51`). The next run, on the final commit, is the first of `a1` with CHECKOUT, the trap, `built_from`, `journal_has` and the changed `b3` limits.
+
+Before that, on the same container at `51920c2`: `stage1_http` passed (section 5 above), and the ssh-keygen rules were met by inspection.
 
 **Stage A, by the owner, 2026-11-18, at `2a38839`, scripts unedited, Debian 13 in an unprivileged LXC container, writer: p-act.**
 a1 and a2 passed (`REPORT-runbook.md` lists the 23 lines). a3, run with the executable cargo named
