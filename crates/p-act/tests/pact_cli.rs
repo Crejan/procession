@@ -442,3 +442,36 @@ fn nothing_raw_comes_out_of_the_binary_whatever_the_bundle_and_the_model_hold() 
         stderr.lines().for_each(|l| assert_clean_in("stderr", l));
     }
 }
+
+#[test]
+fn call_arguments_with_a_repeated_key_are_refused_never_read_as_the_first_or_the_last() {
+    let dir = tempfile::tempdir().unwrap();
+    let (good, _) = bundle(dir.path(), "20200101Z:20990101Z");
+    for (arguments, path) in [
+        (r#"{"params":["a"],"params":["b"]}"#, "params"),
+        (r#"{"claim":"x","claim":"y"}"#, "claim"),
+        (r#"{"params":[{"k":1,"k":2}]}"#, "params[0].k"),
+    ] {
+        let (code, stdout, stderr) = run(&["call", "rt_procs", arguments], &good);
+        assert_eq!(code, 1, "{arguments}: {stderr}");
+        assert!(stdout.is_empty());
+        assert!(stderr.contains(&format!("`{path}` appears twice")), "{arguments}: {stderr}");
+    }
+}
+
+#[test]
+fn a_bundle_configuration_with_a_repeated_key_is_refused_at_any_depth() {
+    let dir = tempfile::tempdir().unwrap();
+    let (good, _) = bundle(dir.path(), "20200101Z:20990101Z");
+    let text = String::from_utf8(good).unwrap();
+    for (from, to) in [
+        (r#""deadline_seconds":5"#, r#""deadline_seconds":5,"deadline_seconds":6"#),
+        (r#""host":"a.example""#, r#""host":"a.example","host":"b.example""#),
+        (r#""name":"probe""#, r#""name":"probe","name":"other""#),
+        (r#""v":1"#, r#""v":1,"v":1"#),
+    ] {
+        let (code, _, stderr) = run(&["tools"], text.replacen(from, to, 1).as_bytes());
+        assert_eq!(code, 1, "{stderr}");
+        assert!(stderr.contains("twice"), "{from}: {stderr}");
+    }
+}

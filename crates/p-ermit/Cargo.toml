@@ -16,6 +16,8 @@ publish = false
 [features]
 # A reader for TOML settings files (`read_toml`, `read_toml_optional`, `parse_toml`): `toml` 0.9 and `serde`.
 toml = ["dep:toml", "dep:serde"]
+# A JSON reader that refuses a repeated key at any depth (`p_ermit::json`): `serde_json` and `serde`.
+json = ["dep:serde_json", "dep:serde"]
 
 # Probe strings (control characters, a bidirectional mark) and `assert_clean`, for other crates' tests: a dev-dependency
 # with this feature.
@@ -24,6 +26,7 @@ test-support = []
 [dependencies]
 libc = "0.2"
 serde = { version = "1", features = ["derive"], optional = true }
+serde_json = { version = "1", optional = true }
 toml = { version = "0.9", default-features = false, features = ["std", "parse", "serde"], optional = true }
 
 [dev-dependencies]
