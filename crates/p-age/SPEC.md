@@ -73,7 +73,8 @@ answer, a refusal with its reason:
    certified, and host and service are the ones the call names.
 2. The call is signed under a delegation that is registered, not ended, not
    withdrawn (`src/register.rs`).
-3. The delegation's person is enabled in the site project and not blocked.
+3. The delegation's person is enabled for the broker (in the site file and
+   active in `directory.json`) and not blocked.
 4. That person may have this action carried out on this host
    (`doc/approvals.md`, R10): one of the delegation's groups (read from the
    extension `groups@procession` of the agent's certificate,
@@ -262,15 +263,13 @@ be the peer: the members of one group connect to `admin.sock` as themselves.
 Blocking a key means: no request is passed to a pledge that signed in with
 it, and no approval by it is given a clearance.
 
-**From the site**, in one format (`page load`): persons with `enabled` and
-their four keys; which groups may use which service on which host; hosts
-with their keys. These come from the site project when the broker's host is
-converged. Who is in which group comes from where the site keeps it: the
-site project on a local site, the directory on a directory site, read by a
-job beside the broker on a timer (5 minutes proposed) and written in the
-same format. The broker does not know what a directory is. It keeps, for
-each part, where it came from and when. It holds a copy and nothing else: no
-rule is made here.
+**From the site**, in two files (`page load`, "What `page load` reads"): the site
+file (hosts with their keys, service bindings, the groups they name, persons =
+name and approval keys) and `directory.json` beside it (who is active, who is
+in which group). The first comes from the site project when the broker's host
+is converged; the second from the same converge on a local site, from the job
+`page-sync` on a directory site (stage 3). The broker does not know what a
+directory is. It holds a copy and nothing else: no rule is made here.
 
 ## What it keeps
 
@@ -356,77 +355,80 @@ agent's public key (`doc/approval-formats.md`, section 3.1).
 
 ## What `page load` reads
 
-The target form of the broker's site file, written once. It is the
-`approval_view` of `doc/fundament-approvals-note.md` (its point 4), which is
-the site model's view and wins on shape; the broker's file follows it when
-`page load` is built (stage 3). One JSON object:
+The broker has **two inputs, the same on every kind of site**: the site file,
+and `directory.json` beside it (`doc/fundament-approvals-note.md`, point 4,
+"The two inputs"). A person is **enabled for the broker exactly if the site
+file has the row and `active` of `directory.json` has the name**. A person who
+is not in the site file is unknown: no sign-in, no clearance, no key held for
+them. A person who is in it and not active is as `enabled: false` once was: no
+sign-in and no clearance (their row stays; blocks and withdrawals still
+work).
+
+**The site file** (from the model, by the converge of the broker's host) holds
+hosts with their keys, service bindings, the groups they name, and persons =
+name and approval keys. **It carries neither `enabled` nor `members`**, on any
+kind of site; either is refused as an unknown member. `v` is `1`.
+
+**`directory.json`** (beside the site file; written 0644 by write-then-rename
+by its writer, read with the usual file checks of `p_act::settings`):
 
 ```json
-{"v":1,
- "persons":{"alice":{"enabled":true,"keys":{
-    "confirmed":{"key":"ecdsa-sha2-nistp256 AAAA...","verified_on":"2026-11-10"},
-    "automatic":{"key":"ecdsa-sha2-nistp256 AAAA..."},
-    "delegation":{"key":"ecdsa-sha2-nistp256 AAAA..."},
-    "connection":{"key":"ecdsa-sha2-nistp256 AAAA..."}}},
-  "bob":{"enabled":false}},
- "services":{"probe":{"a.example":["rt-operators"]}},
- "hosts":{"a.example":"ssh-ed25519 AAAA..."},
- "groups":{"rt-operators":{"description":"Operators of the realtime hosts"}},
- "members":{"rt-operators":["alice"]},
- "ca":"ssh-ed25519 AAAA...",
- "settings":{"waiting_per_agent":5}}
+{"v":1,"source":"model","as_of":"2026-11-19T10:15:00Z",
+ "active":["alice","bob"],
+ "members":{"rt-operators":["alice"],"admins":[]}}
 ```
 
-| Member | Form | Meaning |
-|---|---|---|
-| `v` | number | `1`. A file with a `v` the broker does not know is refused, as the register is |
-| `persons` | login -> `{enabled, keys?}` | every person of the site. `keys` is `{confirmed, automatic, delegation, connection}`, each `{key, verified_on?}`: all four or the file is refused, never on a person who is not enabled, four different keys, none another person's or a host's, each Ed25519 or ECDSA P-256. A person without `keys` can neither sign in nor approve nor have a delegation accepted |
-| `services` | type -> host -> groups | which groups' agents may use the service of that type on that host. The type's name is the service's name in a call (`doc/approval-formats.md`, section 3) |
-| `hosts` | name -> public host key | the hosts that run such a service |
-| `groups` | name -> `{description?}` | the groups some service names; what a pledge is shown |
-| `members` | group -> logins | who is in which group. Present on a local site; absent on a directory site, where the sync job beside the broker writes it in this same form |
-| `ca` | public key | the site CA's public key |
-| `settings` | object | the site's settings for the broker |
+`source` is `model`, `freeipa` or `hosted-ldap`; it is shown by `page status`
+and decides nothing. `as_of` is the writer's time, UTC to the second; it is
+shown. **Every group the site file names is a key of `members`**, possibly with
+an empty list, and `members` holds only persons that are in `active`. R10's
+membership comes from `members`.
 
-An unknown member is refused, at every level.
+**Refused, and what the broker holds stands:** a missing `v` or one it does
+not know; an unknown member; a `source` that is none of the three; an `as_of`
+that is not a UTC time to the second, or more than 60 seconds ahead of the
+clock; a group of the site file that is not a key of `members`; a key of
+`members` that is no group of the site file; a name in `active` or in `members`
+that is no person of the site file, or one that is repeated (in `active`, or in
+one group's list); a member that is not in `active`.
 
-**`members`, absent and empty.** Absent means "the directory's: wait for
-the sync job". Empty means nobody is in any group. A broker that has neither
-a `members` part nor a result of the sync job answers R10 with no.
+**One pair, both or neither.** `page load` (and the broker at start) reads the
+two files and applies them **together**: if either is refused, nothing is
+applied, the pair the broker holds stands, the error names the file that was
+refused (`the site file: ...` or `directory.json: ...`), and at start the
+broker does not start. Why: a half applied pair would be a view nobody wrote.
+A site file that names a new group with the old `directory.json` is exactly
+refused (`GroupMissing`), and a directory that has a person the old site file
+lacks is refused (`UnknownName`), so the order two writers put their files in
+must not matter: the first file to arrive is refused until its partner does, and
+the pair the broker holds stands meanwhile.
 
-**Certificates are not part of this view.** The certificates the broker
-carries to a pledge are products of the converge's signing step: a separate
-input beside the view, with its own check (signed by the site CA; the name;
-the validity). So a view can be replaced without touching the certificates,
-and the certificates without touching the view.
+**Stage 2** reads both files by hand: `directory.json` with `source: model`,
+beside the site file (no member in the configuration names it). **Without the
+setting `directory_max_age_seconds` the file does not age**: that is the whole
+freshness rule of stage 2, and the setting is not built. Stage 3 only, not
+built: `page-sync`, the age setting and the reason `directory-stale`,
+`page directory extend` and `resume`, and the register's `directory_hold`.
 
-**The file read today is the stage-2 stand-in.** Where it differs from the
-form above (`proposals/REPORT.md`, "Where the fundament note ... and my site
-file differ"):
+`page status` shows `directory: source S, as of T` (or `directory: none`).
 
-1. `persons` is a list of `{name, enabled, keys, ...}`, not a mapping by
-   login.
-2. `hosts` is a list of `{name, key}`, not a mapping by name.
-3. `members` is there, optional, in its three states (absent, empty,
-   present). What still differs: there is also a `groups` list inside each
-   person, which the broker only carries to pledge, and there is no
-   `groups` with descriptions.
-4. There is no `services`; check 4 is stage 3.
-5. There is no `ca` and no `settings`; the one setting,
-   `waiting_per_agent`, is in the configuration file.
-6. It has `certificates` per person, checked for shape only, which the form
-   above does not: see the paragraph on certificates. The separate input is
-   not built.
-7. A person who is not enabled: the same in both. The row stays, without
-   keys; keys on such a person are refused.
-8. `v`: the same in both. It is required, `1`, and an unknown one is
-   refused.
-9. The four keys have the same shape. The site model's loader also refuses
-   a key that is a login key or an account's key; the broker refuses a
-   partial set, equal keys within a person, another person's key and a
-   host's key, and does not hold the rest.
-10. An enabled person without `keys` is accepted in both, and can then
-    neither sign in nor have delegations.
+**The file forms freeze with stage 3.** Until then the site file read today is
+the stage-2 stand-in, and differs from the note's form (`proposals/REPORT.md`):
+
+1. `persons` is a list of `{name, keys}`, not a mapping by login; `hosts` a list
+   of `{name, key}`, not a mapping by name.
+2. `groups` is a list of names (the groups the site names), not a mapping with
+   descriptions.
+3. No `services` (check 4 is stage 3), no `ca`, no `settings`: the one setting,
+   `waiting_per_agent`, is in the configuration file, and the CA is `site_ca`.
+4. A person's `keys` are required: the four, each `{key, verified_on?}`, four
+   different keys, none another person's or a host's, each Ed25519 or ECDSA
+   P-256.
+
+**Certificates are not part of this view.** The certificates the broker carries
+to a pledge are products of the converge's signing step: a separate input
+beside the view, with its own check (signed by the site CA; the name; the
+validity), as above under "What it does".
 
 ## Open, each with a proposal
 

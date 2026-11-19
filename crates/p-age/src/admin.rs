@@ -226,6 +226,10 @@ struct ReplyWire {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     broker_uid: Option<u32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    directory_source: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    directory_as_of: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     broker_certificate_path: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     broker_certificate_valid: Option<bool>,
@@ -262,6 +266,8 @@ impl Reply {
                 w.administrators_group = s.administrators.as_ref().map(|g| g.name.clone());
                 w.administrators_gid = s.administrators.as_ref().map(|g| g.gid);
                 w.broker_uid = Some(s.broker_uid);
+                w.directory_source = s.directory.as_ref().map(|d| d.source.clone());
+                w.directory_as_of = s.directory.as_ref().map(|d| d.as_of.clone());
                 let b = &s.broker_certificate;
                 w.broker_certificate_path = Some(b.path.clone());
                 w.broker_certificate_valid = Some(b.valid);
@@ -303,6 +309,8 @@ impl Reply {
                 let keys = w.blocked_keys.iter().flatten().all(|k| k.parse::<Fingerprint>().is_ok());
                 let texts = [
                     &w.keygen_unusable,
+                    &w.directory_source,
+                    &w.directory_as_of,
                     &w.administrators_group,
                     &w.broker_certificate_path,
                     &w.broker_certificate_failure,
@@ -322,6 +330,11 @@ impl Reply {
                     blocked_keys: w.blocked_keys?,
                     keygen_unusable: w.keygen_unusable,
                     broker_uid: w.broker_uid?,
+                    directory: match (w.directory_source, w.directory_as_of) {
+                        (Some(source), Some(as_of)) => Some(crate::site::DirectoryInfo { source, as_of }),
+                        (None, None) => None,
+                        _ => return None,
+                    },
                     administrators: match (w.administrators_group, w.administrators_gid) {
                         (Some(name), Some(gid)) => Some(AdminGroup { name, gid }),
                         (None, None) => None,
@@ -758,6 +771,16 @@ pub fn render(command: &Command, reply: &Reply) -> (String, u8) {
             ));
             out.push_str(&format!("blocked persons: {}\n", list(&s.blocked_persons)));
             out.push_str(&format!("blocked keys: {}\n", list(&s.blocked_keys)));
+            out.push_str(&match &s.directory {
+                Some(d) => {
+                    format!(
+                        "directory: source {}, as of {}\n",
+                        crate::util::shown(&d.source),
+                        crate::util::shown(&d.as_of)
+                    )
+                }
+                None => "directory: none\n".to_owned(),
+            });
             out.push_str(&match &s.administrators {
                 Some(g) => format!("administrators: group {} (gid {})", crate::util::shown(&g.name), g.gid),
                 None => format!("administrators: root and the broker's account (uid {})", s.broker_uid),

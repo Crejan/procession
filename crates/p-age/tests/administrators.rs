@@ -119,6 +119,15 @@ fn status_says_who_may_administer_and_page_says_when_it_runs_as_root() {
         p_age::admin::render(&p_age::admin::Command::Status, &p_age::admin::Reply::Status(Box::new(s.clone()))).0
     };
     assert!(text(&status(None)).contains("administrators: root and the broker's account (uid 501)"));
+    assert!(text(&status(None)).contains("directory: none"));
+    let with_directory = p_age::core::Status {
+        directory: Some(p_age::site::DirectoryInfo {
+            source: "hosted-ldap".into(),
+            as_of: "2026-11-19T10:15:00Z".into(),
+        }),
+        ..base_status()
+    };
+    assert!(text(&with_directory).contains("directory: source hosted-ldap, as of 2026-11-19T10:15:00Z"));
     assert!(!text(&status(None)).contains("root only"));
     assert!(text(&status(Some(group(900)))).contains("administrators: group page-admins (gid 900)"));
     assert!(p_age::admin::recorded_as_root(true, 0));
@@ -129,6 +138,7 @@ fn status_says_who_may_administer_and_page_says_when_it_runs_as_root() {
 fn base_status() -> p_age::core::Status {
     p_age::core::Status {
         administrators: None,
+        directory: None,
         broker_uid: 501,
         keygen_unusable: None,
         degraded: None,

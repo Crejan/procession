@@ -14,7 +14,7 @@ use crate::core::{Core, Settings, Trust};
 use crate::crypto::SshCrypto;
 use crate::log::FileLog;
 use crate::net::{Broker, SystemClock, Timeouts};
-use crate::site::{Site, SiteError};
+use crate::site::Site;
 
 /// Why the configuration could not be used.
 #[derive(Debug, Error)]
@@ -22,7 +22,7 @@ pub enum ConfigError {
     #[error(transparent)]
     Settings(#[from] p_act::settings::SettingsError),
     #[error(transparent)]
-    Site(#[from] SiteError),
+    Site(#[from] crate::site::LoadError),
     #[error(transparent)]
     Perm(#[from] crate::perm::PermError),
     #[error(transparent)]
@@ -105,7 +105,8 @@ impl Config {
     /// The broker this configuration describes, not yet listening.
     pub fn build(&self) -> Result<Arc<Broker>, ConfigError> {
         let group = self.administrators_group.as_deref().map(crate::admin::resolve_group).transpose()?;
-        let site = Arc::new(Site::read(&self.site)?);
+        let now = std::time::SystemTime::now();
+        let site = Arc::new(Site::read_pair(&self.site, &Site::directory_path(&self.site), now)?);
         let register = Core::read_state_for(&self.state_dir.join("register.json"), group.as_ref().map(|g| g.gid))?;
         let log = FileLog::open(&self.log)
             .map_err(|source| ConfigError::Log { path: self.log.display().to_string(), source })?;
@@ -115,7 +116,6 @@ impl Config {
         let bytes = p_act::settings::read_checked(&self.site_ca, 4096).map_err(|e| sa(e.to_string()))?;
         let text = String::from_utf8(bytes).map_err(|_| sa("not UTF-8".to_owned()))?;
         let site_ca = p_act::sign::PublicKey::parse(text.trim_end()).map_err(|e| sa(e.to_string()))?;
-        let now = std::time::SystemTime::now();
         let core = Core::new(
             Arc::clone(&site),
             Settings { waiting_per_agent: self.waiting_per_agent },

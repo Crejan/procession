@@ -38,60 +38,88 @@ fn keys(n: u8) -> serde_json::Value {
     serde_json::json!({"keys": {"confirmed": row(n), "automatic": row(n + 1), "delegation": row(n + 2), "connection": row(n + 3)}})
 }
 
-fn site_error(persons: serde_json::Value, hosts: serde_json::Value, members: Option<serde_json::Value>) -> String {
-    let mut v = serde_json::json!({"v": 1, "persons": persons, "hosts": hosts});
-    if let Some(m) = members {
-        v["members"] = m;
-    }
-    Site::from_json(&v.to_string()).err().map(|e| e.to_string()).expect("the site file should be refused")
+/// The error of a pair of files that is refused (the site file and `directory.json`, as JSON values).
+fn pair_error(site: serde_json::Value, directory: serde_json::Value) -> String {
+    Site::from_texts(&site.to_string(), &directory.to_string(), std::time::SystemTime::now())
+        .err()
+        .map(|e| e.to_string())
+        .expect("the pair should be refused")
+}
+
+fn directory(active: serde_json::Value, members: serde_json::Value) -> serde_json::Value {
+    serde_json::json!({"v": 1, "source": "model", "as_of": "2026-11-19T10:00:00Z", "active": active, "members": members})
 }
 
 #[test]
-fn the_site_file_errors_that_echo_what_failed_escape_it() {
-    let person = |name: &str, extra: serde_json::Value| {
-        let mut p = serde_json::json!({"name": name, "enabled": true});
-        if let (Some(o), Some(e)) = (p.as_object_mut(), extra.as_object()) {
-            o.extend(e.clone());
-        }
+fn the_errors_of_the_two_files_that_echo_what_failed_escape_it() {
+    let person = |name: &str, keys: serde_json::Value| {
+        let mut p = serde_json::json!({"name": name});
+        p.as_object_mut().unwrap().extend(keys.as_object().unwrap().clone());
         p
     };
-    // a bad person name, a bad host name, a duplicate that is bad, a bad date, a bad key line, bad members
-    let cases = [
-        site_error(serde_json::json!([person(NASTY, keys(1))]), serde_json::json!([]), None),
-        site_error(serde_json::json!([]), serde_json::json!([{"name": NASTY, "key": key_line(9)}]), None),
-        site_error(
-            serde_json::json!([person(
-                "jan",
-                serde_json::json!({"keys": {
-                "confirmed": {"key": key_line(1), "verified_on": NASTY},
-                "automatic": {"key": key_line(2)}, "delegation": {"key": key_line(3)}, "connection": {"key": key_line(4)}}})
-            )]),
-            serde_json::json!([]),
-            None,
-        ),
-        site_error(
-            serde_json::json!([person(
-                "jan",
-                serde_json::json!({"keys": {
-                "confirmed": {"key": NASTY}, "automatic": {"key": key_line(2)},
+    let site = |persons: serde_json::Value, hosts: serde_json::Value, groups: serde_json::Value| serde_json::json!({"v": 1, "persons": persons, "hosts": hosts, "groups": groups});
+    let none = directory(serde_json::json!([]), serde_json::json!({}));
+    let jan = || serde_json::json!([person("jan", keys(1))]);
+    let bad_key_rows = |confirmed: serde_json::Value| {
+        serde_json::json!([person(
+            "jan",
+            serde_json::json!({"keys": {"confirmed": confirmed, "automatic": {"key": key_line(2)},
                 "delegation": {"key": key_line(3)}, "connection": {"key": key_line(4)}}})
-            )]),
-            serde_json::json!([]),
-            None,
+        )])
+    };
+    // the site file: a bad person name, host name, date, key line and group name
+    let mut cases = vec![
+        pair_error(
+            site(serde_json::json!([person(NASTY, keys(1))]), serde_json::json!([]), serde_json::json!([])),
+            none.clone(),
         ),
-        site_error(
-            serde_json::json!([person("jan", keys(1))]),
-            serde_json::json!([]),
-            Some(serde_json::json!({ NASTY: ["jan"] })),
+        pair_error(
+            site(
+                serde_json::json!([]),
+                serde_json::json!([{"name": NASTY, "key": key_line(9)}]),
+                serde_json::json!([]),
+            ),
+            none.clone(),
         ),
-        site_error(
-            serde_json::json!([person("jan", keys(1))]),
-            serde_json::json!([]),
-            Some(serde_json::json!({"staff": [NASTY]})),
+        pair_error(
+            site(
+                bad_key_rows(serde_json::json!({"key": key_line(1), "verified_on": NASTY})),
+                serde_json::json!([]),
+                serde_json::json!([]),
+            ),
+            none.clone(),
         ),
+        pair_error(
+            site(bad_key_rows(serde_json::json!({"key": NASTY})), serde_json::json!([]), serde_json::json!([])),
+            none.clone(),
+        ),
+        pair_error(site(jan(), serde_json::json!([]), serde_json::json!([NASTY])), none.clone()),
     ];
+    // directory.json: every error that names a value
+    let named = site(jan(), serde_json::json!([]), serde_json::json!(["ops"]));
+    cases.extend([
+        pair_error(named.clone(), directory(serde_json::json!([NASTY]), serde_json::json!({"ops": []}))),
+        pair_error(named.clone(), directory(serde_json::json!(["jan"]), serde_json::json!({"ops": [NASTY]}))),
+        pair_error(named.clone(), directory(serde_json::json!(["jan"]), serde_json::json!({"ops": [], NASTY: []}))),
+        pair_error(named.clone(), directory(serde_json::json!([]), serde_json::json!({"ops": ["jan"]}))),
+        pair_error(
+            site(jan(), serde_json::json!([]), serde_json::json!([])),
+            directory(serde_json::json!([]), serde_json::json!({NASTY: []})),
+        ),
+        pair_error(named.clone(), {
+            let mut d = directory(serde_json::json!([]), serde_json::json!({"ops": []}));
+            d["source"] = NASTY.into();
+            d
+        }),
+        pair_error(named, {
+            let mut d = directory(serde_json::json!([]), serde_json::json!({"ops": []}));
+            d["as_of"] = NASTY.into();
+            d
+        }),
+    ]);
     for (i, text) in cases.iter().enumerate() {
-        clean(&format!("site error {i}"), text);
+        clean(&format!("error {i}"), text);
+        assert!(!text.is_empty());
     }
 }
 

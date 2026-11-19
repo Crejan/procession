@@ -296,7 +296,7 @@ fn the_configuration_names_the_site_ca_and_may_name_the_directory() {
 fn SiteBuilder_write(w: &World) {
     // the broker reads the site file the configuration names
     let line = |k: &Path| w.keys.public(k).to_string();
-    p_age::testing::SiteBuilder::new()
+    let site = p_age::testing::SiteBuilder::new()
         .person(p_age::testing::PersonSpec::new("jan").keys(
             &line(&w.jan_confirmed),
             &line(&w.jan_automatic),
@@ -309,17 +309,21 @@ fn SiteBuilder_write(w: &World) {
             &line(&w.eva_delegation),
             &line(&w.eva_connection),
         ))
-        .host("a.example", &line(&w.host_key))
-        .write(&w.keys.path("site.json"))
-        .unwrap();
+        .host("a.example", &line(&w.host_key));
+    site.write(&w.keys.path("site.json")).unwrap();
+    site.write_directory(&w.keys.path("directory.json")).unwrap();
 }
 
 #[test]
 fn the_site_file_has_no_certificates_member_any_more() {
     let w = World::new();
     let json = format!(
-        r#"{{"v":1,"persons":[{{"name":"jan","enabled":true,"certificates":["{}"]}}],"hosts":[]}}"#,
+        r#"{{"v":1,"persons":[{{"name":"jan","certificates":["{}"]}}],"hosts":[]}}"#,
         w.keys.cert_line(&w.jan_confirmed)
     );
-    assert!(p_age::site::Site::from_json(&json).is_err(), "refused as unknown");
+    let directory = r#"{"v":1,"source":"model","as_of":"2026-11-19T10:00:00Z","active":[],"members":{}}"#;
+    assert!(
+        p_age::site::Site::from_texts(&json, directory, std::time::SystemTime::now()).is_err(),
+        "refused as unknown"
+    );
 }

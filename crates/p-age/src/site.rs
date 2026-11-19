@@ -32,8 +32,6 @@ pub enum SiteError {
     BadMembers { group: String, why: String },
     #[error("`verified_on` of `{}` is not a date (YYYY-MM-DD): {}", shown(name), shown(value))]
     BadDate { name: String, value: String },
-    #[error("`{}` is not enabled and has keys: the view the broker is given has none for a person who is not enabled", shown(.0))]
-    KeysOnDisabled(String),
     #[error("`{}`'s keys: {}", shown(name), shown(why))]
     KeysClash { name: String, why: String },
 }
@@ -67,18 +65,13 @@ struct KeysFile {
     connection: KeyRow,
 }
 
+/// A person of the site file: the name and the four approval keys. **Nothing else**: whether the person is enabled and
+/// which groups they are in come from `directory.json`, never from here.
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct PersonFile {
     name: String,
-    enabled: bool,
-    /// The person's four keys. Absent for a person who has no approval keys at all (they can neither sign in nor
-    /// approve); never partial, and never on a person who is not enabled (the view the broker is given has none).
-    #[serde(default)]
-    keys: Option<KeysFile>,
-    /// The names of the person's groups, to be offered to the person; they decide nothing.
-    #[serde(default)]
-    groups: Vec<String>,
+    keys: KeysFile,
 }
 
 #[derive(Debug, Deserialize)]
@@ -88,6 +81,7 @@ struct HostFile {
     key: String,
 }
 
+/// The site file. It carries neither `enabled` nor `members`, on any kind of site.
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct SiteFile {
@@ -95,21 +89,23 @@ struct SiteFile {
     v: u32,
     persons: Vec<PersonFile>,
     hosts: Vec<HostFile>,
-    /// Who is in which group: group -> logins. **Absent is not empty**: absent means the members are the
-    /// directory's, to come from the sync job; `{}` means nobody is in any group. `null` is refused, so that the
-    /// two cannot be confused by a writer.
-    #[serde(default, deserialize_with = "present")]
-    members: Option<BTreeMap<String, Vec<String>>>,
+    /// The groups the site names: the keys `directory.json`'s `members` must have, no more and no fewer.
+    #[serde(default)]
+    groups: Vec<String>,
 }
 
-/// A member that is there is read as what it is; one that is not there stays `None`. `null` is an error (it would
-/// otherwise read as absent).
-fn present<'de, D, T>(d: D) -> Result<Option<T>, D::Error>
-where
-    D: serde::Deserializer<'de>,
-    T: Deserialize<'de>,
-{
-    T::deserialize(d).map(Some)
+/// `directory.json`: who is active and who is in which group, from the model, a directory or a hosted provider. The
+/// same on every kind of site.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct DirectoryFile {
+    v: u32,
+    /// `model`, `freeipa` or `hosted-ldap`. Shown by `page status`; decides nothing.
+    source: String,
+    /// When the writer made it, UTC to the second. Shown; stage 2 does not age the file.
+    as_of: String,
+    active: Vec<String>,
+    members: BTreeMap<String, Vec<String>>,
 }
 
 /// A person's four keys: the purposes are a closed vocabulary, each exactly once, and four different keys.
@@ -128,41 +124,119 @@ pub struct PersonKeys {
 /// A person of the site.
 #[derive(Debug, Clone)]
 pub struct Person {
-    /// `enabled` in the site project.
+    /// In the site file **and** in `active` of `directory.json`. A person who is not active has no sign-in and no
+    /// clearance, as `enabled: false` once meant.
     pub enabled: bool,
-    /// The four keys, if the person has any.
+    /// The four keys (the site file's: every person of the file has them).
     pub keys: Option<PersonKeys>,
+    /// The groups the person is in, from `members` of `directory.json`; offered to the person, they decide nothing.
     pub groups: Vec<String>,
 }
 
-/// The site's persons and hosts.
+/// Where the directory part of the broker's view came from, as `page status` shows it. It decides nothing.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DirectoryInfo {
+    /// `model`, `freeipa` or `hosted-ldap`.
+    pub source: String,
+    /// The writer's time, UTC to the second.
+    pub as_of: String,
+}
+
+/// The broker's view of the site: the site file and `directory.json`, **together** (both or neither).
 #[derive(Debug, Clone, Default)]
 pub struct Site {
     persons: BTreeMap<String, Person>,
     hosts: BTreeMap<String, PublicKey>,
-    /// Who is in which group, in **three states**: `None` (the file has no `members`: the directory's, to come from
-    /// the sync job), `Some` of an empty map (nobody is in any group) and `Some` of groups with logins.
+    /// Who is in which group, from `directory.json`: every group the site file names is a key.
     members: Option<BTreeMap<String, Vec<String>>>,
+    directory: Option<DirectoryInfo>,
+}
+
+/// Why the pair of files was not used: which of the two, and why.
+#[derive(Debug, Error)]
+pub enum LoadError {
+    #[error("the site file: {0}")]
+    Site(#[from] SiteError),
+    #[error("directory.json: {0}")]
+    Directory(#[from] DirectoryError),
+}
+
+/// Why `directory.json` was refused. The file the broker holds stands.
+#[derive(Debug, Error)]
+pub enum DirectoryError {
+    #[error(transparent)]
+    Settings(#[from] p_act::settings::SettingsError),
+    #[error("it is version {0}, which this broker does not know")]
+    Version(u32),
+    #[error("`source` is `{}`, not one of model, freeipa, hosted-ldap", shown(.0))]
+    Source(String),
+    #[error("`as_of` is not a UTC time to the second: `{}`", shown(.0))]
+    AsOf(String),
+    #[error("`as_of` is more than 60 seconds ahead of the clock")]
+    AsOfAhead,
+    #[error("the site file names the group `{}` and `members` has no key for it", shown(.0))]
+    GroupMissing(String),
+    #[error("`members` has a key `{}` that is no group of the site file", shown(.0))]
+    GroupUnknown(String),
+    #[error("`{}` in {place} is not a person of the site file", shown(name))]
+    UnknownName { place: &'static str, name: String },
+    #[error("`{}` is repeated in {place}", shown(name))]
+    Repeated { place: &'static str, name: String },
+    #[error("`{}` is in `members` of `{}` and not in `active`", shown(name), shown(group))]
+    NotActive { group: String, name: String },
 }
 
 fn key(what: &'static str, name: &str, line: &str) -> Result<PublicKey, SiteError> {
     PublicKey::parse(line).map_err(|source| SiteError::BadKey { what, name: name.to_owned(), source })
 }
 
+/// A name a standing may carry as a group's (and that the site file may name).
+fn group_name_ok(name: &str) -> bool {
+    let probe = StandingContent {
+        to: "probe".to_owned(),
+        nonce: [0; 32],
+        n: 0,
+        at: crate::core::stamp(std::time::SystemTime::UNIX_EPOCH),
+        blocked: false,
+        blocked_keys: Vec::new(),
+        withdrawn: Vec::new(),
+        certificates: Vec::new(),
+        groups: vec![name.to_owned()],
+    };
+    Standing::compose(&probe).is_ok()
+}
+
 impl Site {
-    /// Read the site file: JSON, one object, an unknown member refused, the file refused if anyone but its owner or
-    /// root can write it (`p_act::settings`). `{"v":1,"persons":[{"name","enabled","keys":{"confirmed":{"key"},"automatic":…,
-    /// "delegation":…,"connection":…}}],"hosts":[{"name","key"}]}`.
-    pub fn read(path: &Path) -> Result<Site, SiteError> {
-        Site::from_file(p_act::settings::read(path)?)
+    /// Read the pair: the site file and `directory.json`, each with the usual file checks (`p_act::settings`: JSON,
+    /// one object, an unknown member refused, nobody but the owner or root can write it). **Both or neither**: if
+    /// either is refused there is no `Site`, and the caller keeps the one it holds. `now` judges `as_of`.
+    pub fn read_pair(site: &Path, directory: &Path, now: std::time::SystemTime) -> Result<Site, LoadError> {
+        let site_file: SiteFile = p_act::settings::read(site).map_err(SiteError::from)?;
+        let directory_file: DirectoryFile = p_act::settings::read(directory).map_err(DirectoryError::from)?;
+        Site::from_files(site_file, directory_file, now)
     }
 
-    /// From JSON text, for tests.
-    pub fn from_json(text: &str) -> Result<Site, SiteError> {
-        Site::from_file(p_act::settings::parse(text.as_bytes())?)
+    /// From the texts of the two files (tests, and the checks of `page load`).
+    pub fn from_texts(site: &str, directory: &str, now: std::time::SystemTime) -> Result<Site, LoadError> {
+        let site_file: SiteFile = p_act::settings::parse(site.as_bytes()).map_err(SiteError::from)?;
+        let directory_file: DirectoryFile =
+            p_act::settings::parse(directory.as_bytes()).map_err(DirectoryError::from)?;
+        Site::from_files(site_file, directory_file, now)
     }
 
-    fn from_file(file: SiteFile) -> Result<Site, SiteError> {
+    /// Where `directory.json` is: beside the site file.
+    #[must_use]
+    pub fn directory_path(site: &Path) -> std::path::PathBuf {
+        site.with_file_name("directory.json")
+    }
+
+    fn from_files(file: SiteFile, directory: DirectoryFile, now: std::time::SystemTime) -> Result<Site, LoadError> {
+        let mut site = Site::from_site_file(file)?;
+        site.apply_directory(directory, now)?;
+        Ok(site)
+    }
+
+    fn from_site_file(file: SiteFile) -> Result<Site, SiteError> {
         if file.v != 1 {
             return Err(SiteError::Version(file.v));
         }
@@ -171,62 +245,35 @@ impl Site {
             if !valid_name(&p.name) {
                 return Err(SiteError::BadName(p.name));
             }
-            // What is carried to pledge is a set: sorted, each entry once. Whatever a standing may not carry is refused
-            // here, when the file is read, and not when a pledge signs in.
-            let sorted = |mut v: Vec<String>| {
-                v.sort_unstable();
-                v.dedup();
-                v
-            };
-            let groups = sorted(p.groups);
-            let probe = StandingContent {
-                to: p.name.clone(),
-                nonce: [0; 32],
-                n: 0,
-                at: crate::core::stamp(std::time::SystemTime::UNIX_EPOCH),
-                blocked: false,
-                blocked_keys: Vec::new(),
-                withdrawn: Vec::new(),
-                certificates: Vec::new(),
-                groups: groups.clone(),
-            };
-            Standing::compose(&probe).map_err(|source| SiteError::BadStanding { name: p.name.clone(), source })?;
-            let keys = match p.keys {
-                None => None,
-                Some(_) if !p.enabled => return Err(SiteError::KeysOnDisabled(p.name)),
-                Some(k) => {
-                    for row in [&k.confirmed, &k.automatic, &k.delegation, &k.connection] {
-                        if let Some(date) = &row.verified_on
-                            && !is_date(date)
-                        {
-                            return Err(SiteError::BadDate { name: p.name, value: date.clone() });
-                        }
-                    }
-                    let parsed = PersonKeys {
-                        confirmed: key("confirmed key", &p.name, &k.confirmed.key)?,
-                        automatic: key("automatic key", &p.name, &k.automatic.key)?,
-                        delegation: key("delegation key", &p.name, &k.delegation.key)?,
-                        connection: key("connection key", &p.name, &k.connection.key)?,
-                    };
-                    // One key under two names would make a confirmed approval of an automatic one (and a
-                    // delegation of a sign-in): the four are four different keys.
-                    let fingerprints: Vec<_> =
-                        [&parsed.confirmed, &parsed.automatic, &parsed.delegation, &parsed.connection]
-                            .iter()
-                            .map(|k| k.fingerprint())
-                            .collect();
-                    for (i, a) in fingerprints.iter().enumerate() {
-                        if fingerprints[i + 1..].contains(a) {
-                            return Err(SiteError::KeysClash {
-                                name: p.name,
-                                why: "two of the four are the same key".to_owned(),
-                            });
-                        }
-                    }
-                    Some(parsed)
+            let k = p.keys;
+            for row in [&k.confirmed, &k.automatic, &k.delegation, &k.connection] {
+                if let Some(date) = &row.verified_on
+                    && !is_date(date)
+                {
+                    return Err(SiteError::BadDate { name: p.name, value: date.clone() });
                 }
+            }
+            let parsed = PersonKeys {
+                confirmed: key("confirmed key", &p.name, &k.confirmed.key)?,
+                automatic: key("automatic key", &p.name, &k.automatic.key)?,
+                delegation: key("delegation key", &p.name, &k.delegation.key)?,
+                connection: key("connection key", &p.name, &k.connection.key)?,
             };
-            let person = Person { enabled: p.enabled, keys, groups };
+            // One key under two names would make a confirmed approval of an automatic one (and a delegation of a
+            // sign-in): the four are four different keys.
+            let fingerprints: Vec<_> = [&parsed.confirmed, &parsed.automatic, &parsed.delegation, &parsed.connection]
+                .iter()
+                .map(|k| k.fingerprint())
+                .collect();
+            for (i, a) in fingerprints.iter().enumerate() {
+                if fingerprints[i + 1..].contains(a) {
+                    return Err(SiteError::KeysClash {
+                        name: p.name,
+                        why: "two of the four are the same key".to_owned(),
+                    });
+                }
+            }
+            let person = Person { enabled: false, keys: Some(parsed), groups: Vec::new() };
             if site.persons.insert(p.name.clone(), person).is_some() {
                 return Err(SiteError::Duplicate(p.name));
             }
@@ -240,33 +287,17 @@ impl Site {
                 return Err(SiteError::Duplicate(h.name));
             }
         }
-        if let Some(members) = file.members {
-            let mut checked = BTreeMap::new();
-            for (group, logins) in members {
-                let bad = |why: &str| SiteError::BadMembers { group: group.clone(), why: why.to_owned() };
-                // A group name is whatever a standing may carry as one, and a member is a person of the file.
-                let probe = StandingContent {
-                    to: "probe".to_owned(),
-                    nonce: [0; 32],
-                    n: 0,
-                    at: crate::core::stamp(std::time::SystemTime::UNIX_EPOCH),
-                    blocked: false,
-                    blocked_keys: Vec::new(),
-                    withdrawn: Vec::new(),
-                    certificates: Vec::new(),
-                    groups: vec![group.clone()],
-                };
-                Standing::compose(&probe).map_err(|_| bad("not a group name"))?;
-                let mut logins = logins;
-                logins.sort_unstable();
-                logins.dedup();
-                if let Some(unknown) = logins.iter().find(|l| !site.persons.contains_key(*l)) {
-                    return Err(bad(&format!("`{unknown}` is not a person of the file")));
-                }
-                checked.insert(group, logins);
+        let mut groups = BTreeMap::new();
+        for g in file.groups {
+            // A group name is whatever a standing may carry as one.
+            if !group_name_ok(&g) {
+                return Err(SiteError::BadMembers { group: g, why: "not a group name".to_owned() });
             }
-            site.members = Some(checked);
+            if groups.insert(g.clone(), Vec::new()).is_some() {
+                return Err(SiteError::Duplicate(g));
+            }
         }
+        site.members = Some(groups);
         // No key is another person's, and none is a host's.
         let mut seen: BTreeMap<String, String> = BTreeMap::new();
         for (name, person) in &site.persons {
@@ -287,15 +318,81 @@ impl Site {
         Ok(site)
     }
 
-    /// Who is in which group, if the file says: `None` is **absent** (the directory's, from the sync job), `Some` of an
-    /// empty map is **nobody in any group**. They are never the same.
+    /// Put `directory.json` over the site file: who is enabled, who is in which group. Every refusal leaves nothing
+    /// half applied: the caller holds the old `Site` and this one is dropped.
+    fn apply_directory(&mut self, d: DirectoryFile, now: std::time::SystemTime) -> Result<(), DirectoryError> {
+        if d.v != 1 {
+            return Err(DirectoryError::Version(d.v));
+        }
+        if !matches!(d.source.as_str(), "model" | "freeipa" | "hosted-ldap") {
+            return Err(DirectoryError::Source(d.source));
+        }
+        let as_of: p_act::Timestamp = d.as_of.parse().map_err(|_| DirectoryError::AsOf(d.as_of.clone()))?;
+        let ahead = as_of.unix()
+            - i64::try_from(now.duration_since(std::time::UNIX_EPOCH).map_or(0, |t| t.as_secs())).unwrap_or(0);
+        if ahead > 60 {
+            return Err(DirectoryError::AsOfAhead);
+        }
+        // `active`: persons of the site file, each once.
+        let mut active = std::collections::BTreeSet::new();
+        for name in &d.active {
+            if !self.persons.contains_key(name) {
+                return Err(DirectoryError::UnknownName { place: "`active`", name: name.clone() });
+            }
+            if !active.insert(name.as_str()) {
+                return Err(DirectoryError::Repeated { place: "`active`", name: name.clone() });
+            }
+        }
+        // `members`: exactly the groups the site file names; persons of the file, each once per group, all active.
+        let named: Vec<String> = self.members.iter().flat_map(|m| m.keys().cloned()).collect();
+        for group in &named {
+            if !d.members.contains_key(group) {
+                return Err(DirectoryError::GroupMissing(group.clone()));
+            }
+        }
+        let mut members = BTreeMap::new();
+        for (group, logins) in &d.members {
+            if !named.contains(group) {
+                return Err(DirectoryError::GroupUnknown(group.clone()));
+            }
+            let mut seen = std::collections::BTreeSet::new();
+            for login in logins {
+                if !self.persons.contains_key(login) {
+                    return Err(DirectoryError::UnknownName { place: "`members`", name: login.clone() });
+                }
+                if !seen.insert(login.as_str()) {
+                    return Err(DirectoryError::Repeated { place: "`members`", name: login.clone() });
+                }
+                if !active.contains(login.as_str()) {
+                    return Err(DirectoryError::NotActive { group: group.clone(), name: login.clone() });
+                }
+            }
+            let mut logins = logins.clone();
+            logins.sort_unstable();
+            members.insert(group.clone(), logins);
+        }
+        for (name, person) in &mut self.persons {
+            person.enabled = active.contains(name.as_str());
+            person.groups = members.iter().filter(|(_, l)| l.contains(name)).map(|(g, _)| g.clone()).collect();
+        }
+        self.members = Some(members);
+        self.directory = Some(DirectoryInfo { source: d.source, as_of: d.as_of });
+        Ok(())
+    }
+
+    /// Where the directory part came from and when it was made, as `page status` shows it.
+    #[must_use]
+    pub fn directory(&self) -> Option<&DirectoryInfo> {
+        self.directory.as_ref()
+    }
+
+    /// Who is in which group: every group the site file names is a key (possibly with nobody).
     #[must_use]
     pub fn members(&self) -> Option<&BTreeMap<String, Vec<String>>> {
         self.members.as_ref()
     }
 
-    /// Whether `person` is in `group`. **No when the file has no `members` part** (and no sync result exists yet):
-    /// a broker that does not know who is in a group answers no (R10).
+    /// Whether `person` is in `group` (R10).
     #[must_use]
     pub fn in_group(&self, person: &str, group: &str) -> bool {
         self.members.as_ref().and_then(|m| m.get(group)).is_some_and(|logins| logins.iter().any(|l| l == person))

@@ -128,8 +128,13 @@ fn the_files_the_script_writes_are_read_by_the_broker_that_will_read_them() {
         text = text.replace(&format!("$(publine \"$WORK/jan-{name}.pub\")"), &key(u8::try_from(n).unwrap() + 1));
     }
     assert!(!text.contains('$'), "a placeholder is left: {text}");
-    let site = p_age::site::Site::from_json(&text).unwrap_or_else(|e| panic!("{e}\n{text}"));
-    assert!(site.person("jan").is_some());
+    let start = script.find("cat > \"$WORK/directory.json\" <<JSON\n").unwrap()
+        + "cat > \"$WORK/directory.json\" <<JSON\n".len();
+    let directory = script[start..start + script[start..].find("\nJSON\n").unwrap()]
+        .replace("$(date -u +%Y-%m-%dT%H:%M:%SZ)", "2026-11-19T10:00:00Z");
+    let site = p_age::site::Site::from_texts(&text, &directory, std::time::SystemTime::now())
+        .unwrap_or_else(|e| panic!("{e}\n{text}\n{directory}"));
+    assert!(site.person("jan").is_some_and(|p| p.enabled));
     // the configuration's members are the broker's (an unknown member would be refused)
     let start = script.find("cat > \"$WORK/page.json\" <<JSON\n").unwrap() + "cat > \"$WORK/page.json\" <<JSON\n".len();
     let template = &script[start..start + script[start..].find("\nJSON\n").unwrap()];
