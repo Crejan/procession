@@ -220,7 +220,7 @@ fn cmd_call(options: &Options) -> Result<(), String> {
     let (tool, rest) = options.positional.split_first().ok_or("call needs a tool name")?;
     let arguments: Value = match rest {
         [] => Value::Null,
-        [json] => serde_json::from_str(json).map_err(|e| format!("the arguments are not JSON: {e}"))?,
+        [json] => p_ermit::json::parse(json).map_err(|e| format!("the arguments are not JSON: {e}"))?,
         _ => return Err("call takes a tool name and at most one JSON argument".into()),
     };
     let ctx = context(options)?;

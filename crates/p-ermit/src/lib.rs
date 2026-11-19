@@ -5,6 +5,9 @@
 //! libc only by default. The feature `toml` adds a reader for TOML settings files (`toml` 0.9 and `serde`).
 //! Unix only: on another system the crate is empty.
 
+/// A JSON reader that refuses a repeated key at every depth.
+#[cfg(feature = "json")]
+pub mod json;
 #[cfg(unix)]
 pub mod peer;
 /// Probe strings and `assert_clean` for the tests of programs that show text from elsewhere.

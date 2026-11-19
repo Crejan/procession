@@ -195,7 +195,7 @@ pub fn from_response(response: &Value, id: &CallId) -> (ModelResult, Option<Stri
         .filter_map(|c| c.get("text").and_then(Value::as_str))
         .collect();
     let Some(first) = texts.first() else { return unknown("no text") };
-    let Ok(Value::Object(line)) = serde_json::from_str::<Value>(first) else {
+    let Ok(Value::Object(line)) = p_ermit::json::parse(first) else {
         return unknown("the first text is not an object");
     };
     let word = |k: &str| line.get(k).and_then(Value::as_str);
@@ -604,6 +604,15 @@ mod tests {
         let e = ModelResult::model_error(&format!("there is no tool `{PROBE_ALL}{}`", "x".repeat(2000)));
         assert_clean_in("model error", &e.to_string());
         assert!(e["content"][0]["text"].as_str().unwrap().chars().count() <= MAX_MODEL_ERROR_CHARS);
+    }
+
+    #[test]
+    fn an_outcome_line_with_a_repeated_key_is_unknown_never_the_first_or_the_last() {
+        let line = format!(r#"{{"type":"outcome","outcome":"done","outcome":"declined","id":"{}","rc":0}}"#, id());
+        let r = map(&line, &["data"]);
+        assert_eq!(r.outcome, Outcome::Unknown);
+        let line = format!(r#"{{"type":"outcome","outcome":"done","id":"{0}","id":"{0}","rc":0,"rc":1}}"#, id());
+        assert_eq!(map(&line, &[]).outcome, Outcome::Unknown);
     }
 
     #[test]

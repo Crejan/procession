@@ -13,6 +13,10 @@ What may be trusted on a Unix system, checked the same way by every program that
   bidirectional marks); `escape`, `escape_bytes`, `escape_clipped`, `unescape` are the one escape form for diagnostic data
   that is shown or passed on instead: `\u{202e}`, `\x{ff}` for bytes that are not UTF-8, `\\` for a backslash,
   reversible, and the result passes `check`.
+- **JSON with no repeated key** (`p_ermit::json`, feature `json`: `serde_json`): `parse`, `parse_slice`, `check`, `from_str`,
+  `from_slice` refuse an object with a key twice **at every depth** (never the first, never the last), with an error that
+  names the path (`services[0].host`) and no value. `serde_json` alone keeps the last of a repeated key in a `Value` or a
+  map.
 - **a TOML settings file** (feature `toml`, off by default; brings `toml` 0.9 and `serde`): `read_toml`,
   `read_toml_optional`, `parse_toml`, with the same checks, and errors that name the offending *key* and its line and
   column but never print a *value*. Unknown keys are refused by the caller's own `#[serde(deny_unknown_fields)]`;

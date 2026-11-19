@@ -43,6 +43,8 @@ pub fn parse<T: serde::de::DeserializeOwned>(bytes: &[u8]) -> Result<T, Settings
     let text = text_of(bytes)?;
     // One object, nothing after it, no member twice at the top.
     crate::object::Object::parse(text, "").map_err(|e| SettingsError::NotAnObject(e.to_string()))?;
+    // And none twice at any depth (a nested map, a flattened member, a `Value`): `serde` alone keeps the last there.
+    p_ermit::json::check(text).map_err(|e| SettingsError::Invalid(e.to_string()))?;
     serde_json::from_str(text).map_err(|e| SettingsError::Invalid(describe(&e)))
 }
 
@@ -288,5 +290,31 @@ mod tests {
         // The path is one word for a shell, whatever it holds.
         let text = check_owner_and_mode("/tmp/it's here/s.json", 0, 0o666, 1000).unwrap_err().to_string();
         assert!(text.contains(r#"chmod 600 '/tmp/it'\''s here/s.json'"#), "{text}");
+    }
+
+    #[test]
+    fn a_key_twice_at_any_depth_is_refused_where_serde_alone_would_keep_the_last() {
+        #[derive(Debug, Deserialize, PartialEq)]
+        struct WithMap {
+            #[serde(default)]
+            map: std::collections::HashMap<String, u8>,
+            #[serde(default)]
+            any: Option<serde_json::Value>,
+        }
+        // `serde_json` alone: the last of a map's two keys, silently.
+        assert_eq!(serde_json::from_str::<WithMap>(r#"{"map":{"k":1,"k":2}}"#).unwrap().map["k"], 2);
+        for (text, path) in [
+            (r#"{"map":{"k":1,"k":2}}"#, "map.k"),
+            (r#"{"any":{"a":[{"b":1,"b":2}]}}"#, "any.a[0].b"),
+            (r#"{"any":{"x":1,"x":1}}"#, "any.x"),
+        ] {
+            let e = parse::<WithMap>(text.as_bytes()).unwrap_err();
+            assert!(
+                matches!(&e, SettingsError::Invalid(m) if m.contains(&format!("`{path}` appears twice"))),
+                "{text}: {e}"
+            );
+            assert!(!e.to_string().contains('1') || e.to_string().contains(path));
+        }
+        assert!(parse::<WithMap>(br#"{"map":{"k":1},"any":{"k":2}}"#).is_ok());
     }
 }
