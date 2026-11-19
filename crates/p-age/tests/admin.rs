@@ -383,6 +383,8 @@ fn commands_and_answers_are_read_as_strictly_as_everything_else() {
         assert_eq!(Command::parse(&line[..line.len() - 1]), Some(c));
     }
     let status = p_age::core::Status {
+        broker_uid: 501,
+        administrators: Some(p_age::admin::AdminGroup { name: "page-admins".into(), gid: 4711 }),
         keygen_unusable: Some("/usr/bin/ssh-keygen is not trusted: it is owned by user 501".into()),
         degraded: Some("read-only"),
         pledges: 1,

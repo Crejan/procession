@@ -198,6 +198,67 @@ peer is served only if `p_act::peer` read its credentials and its user is the
 broker's own or root (`Policy::OwnUserOrRoot`: the broker runs as the owner of
 its state directory, so no list of users is needed). A peer whose credentials
 cannot be read is dropped, told nothing.
+
+**Who may use the socket: `administrators_group`.** Through `sudo` a caller
+arrives as uid 0, and a name the client passes (`SUDO_USER`) is the client's
+word and is never recorded. So that the register says *who*, the person must
+be the peer: the members of one group connect to `admin.sock` as themselves.
+
+- **The member.** One optional config member, `administrators_group` (a group
+  name; in stage 3 it comes from the site file, in stage 2 this member is the
+  source). Absent: root and the broker's own uid are admitted (without a group
+  the broker commonly runs in a person's own account, in tests or a single-user
+  setup, and that person administers it). Present: root and the group's
+  members are admitted, and **the broker's own uid is refused** (with a group
+  the broker is a service account that is in the group only so that it may set
+  the socket's group). Either way the record for the own uid is the ordinary
+  `by {kind: administrator, uid, account}`. It is
+  resolved to a gid **once, at start**. An unknown name, group 0, and the
+  broker's own primary group (which would admit every process of its user) are
+  refused, naming the member, and so is any system that cannot tell the groups
+  of a peer ("not supported here": Linux only, `SO_PEERGROUPS`); there is no
+  fallback to a lookup.
+- **The socket, and the directory as the guard.** There is no `umask` call (it
+  would need libc); the state directory keeps everyone else out while the socket
+  is made, in this order, and the broker does nothing that accepts before the
+  last step has passed:
+  1. the state directory is **checked, not only set**: the broker's own, a real
+     directory and not a link, mode exactly 0700 (a 0710 left by a former run is
+     made 0700 first; anything else refuses the start);
+  2. `bind`; then `chmod 0600`. Between the two the socket carries the process
+     umask's mode, inside a directory no one else can enter;
+  3. the socket is given to the group, group = the gid, mode 0660;
+  4. **only after that** the directory is given to it, group 0710 (the group may
+     traverse it, nobody else may do anything; `register.json` stays 0600);
+  5. both are looked at again (`lstat`); any difference refuses the start;
+  6. only then is anything accepted, and the broker says `page: ready` on
+     standard error.
+  The broker's account is in the group as a supplementary group (the unit's
+  matter) so that it may set it. Without a group, steps 1, 2 and 5's look at the
+  mode are the same, and the socket stays 0600.
+- **Admission, per connection, from the kernel only.** Peer uid 0; or the
+  peer's groups contain the gid: its primary gid (`SO_PEERCRED`) or one of its
+  supplementary groups (`SO_PEERGROUPS`). No name service decides admission.
+  **The broker's own user is refused although it is in the group.** A peer whose
+  groups cannot be read is dropped, never admitted. Everyone else is dropped
+  without reading, as on every socket. Membership counts when the connection is
+  made; one command per connection; nothing is cached.
+- **Rights.** Members have the same rights as root on this socket: `block`,
+  `unblock`, `withdraw`, `status`. There is no split in stage 2.
+- **The record** is as decided: `by {kind: administrator, uid, account}`; the
+  uid is the record, the account is `account_of` as of then and never stands
+  between a verb and its answer. Nothing new is stored.
+- **Root** may do everything. `page` run as uid 0 while a group is configured
+  does the work and says on standard error: `page: recorded as root; run without
+  sudo to be recorded by name`. Exit codes are unchanged.
+- **`page status`** says `administrators: group NAME (gid N)`, or, without a
+  group, `administrators: root and the broker's account (uid N)`.
+- **Who is in the group is the operating system's matter**, not the broker's.
+- **Not yet run on Linux.** The Linux branch of `p_ermit::peer::peer_groups`
+  (`SO_PEERGROUPS`) and p-age's two Linux tests are **uncompiled and unrun**
+  until the owner's Debian run (`proposals/REPORT.md`, "For the owner"). Until
+  then what is shown of group admission is the pure rule, with the groups
+  injected.
 Blocking a key means: no request is passed to a pledge that signed in with
 it, and no approval by it is given a clearance.
 
@@ -245,8 +306,8 @@ rule is made here.
     uid 0 and nothing more: `SUDO_USER` and anything else the caller could set
     is not read. The trail is as honest as the peer lookup and no more: on most
     hosts it will say uid 0. A site that wants names in it has its
-    administrators run `page` as themselves, which needs more than "root or the
-    broker's user" to connect (the administrators' group, not built).
+    administrators run `page` as themselves, which needs
+    `administrators_group` (above).
   - **Nothing is ever decided by the account database**: not who may connect,
     not what a verb does; the name is shown beside the uid, uid first.
 - When the register cannot be written, what happens goes by direction. A

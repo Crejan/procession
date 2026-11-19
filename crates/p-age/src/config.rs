@@ -27,6 +27,8 @@ pub enum ConfigError {
     Perm(#[from] crate::perm::PermError),
     #[error(transparent)]
     State(#[from] crate::core::StateError),
+    #[error(transparent)]
+    Administrators(#[from] crate::admin::GroupError),
     #[error("`listen` names no address")]
     NoAddress,
     #[error("the site CA key {path}: {}", crate::util::shown(why))]
@@ -74,6 +76,11 @@ pub struct Config {
     /// site file has none). Owned by root or the broker's user, not writable by group or others.
     #[serde(default)]
     pub certificates: Option<PathBuf>,
+    /// A group whose members may use `admin.sock` as themselves (so that the register says who blocked). Absent: the
+    /// broker's own user and root. Resolved to a gid once at start; unknown, group 0 and the broker's own primary
+    /// group are refused. Linux only. In stage 3 the name comes from the site file.
+    #[serde(default)]
+    pub administrators_group: Option<String>,
     /// How many requests of one agent may wait (five by default).
     #[serde(default = "five")]
     pub waiting_per_agent: usize,
@@ -97,8 +104,9 @@ impl Config {
 
     /// The broker this configuration describes, not yet listening.
     pub fn build(&self) -> Result<Arc<Broker>, ConfigError> {
+        let group = self.administrators_group.as_deref().map(crate::admin::resolve_group).transpose()?;
         let site = Arc::new(Site::read(&self.site)?);
-        let register = Core::read_state(&self.state_dir.join("register.json"))?;
+        let register = Core::read_state_for(&self.state_dir.join("register.json"), group.as_ref().map(|g| g.gid))?;
         let log = FileLog::open(&self.log)
             .map_err(|source| ConfigError::Log { path: self.log.display().to_string(), source })?;
         let crypto = Arc::new(SshCrypto::new(&self.broker_key));
@@ -117,6 +125,7 @@ impl Config {
             Box::new(log),
             Trust { site_ca: site_ca.clone(), now },
         );
+        let core = core.with_administrators(group);
         let core = match &self.certificates {
             Some(directory) => {
                 core.with_certificates(crate::certs::CertificateInput { site_ca, directory: directory.clone() }, now)

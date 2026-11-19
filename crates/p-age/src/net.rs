@@ -261,6 +261,16 @@ impl Broker {
         self.with_core(|core, now| ((), core.sweep(now))).await;
     }
 
+    /// Set the group whose members may use `admin.sock` (start, and tests).
+    pub fn set_administrators(&self, group: Option<crate::admin::AdminGroup>) {
+        lock(&self.core).set_administrators(group);
+    }
+
+    /// The group whose members may use `admin.sock`, if one is configured.
+    pub fn administrators(&self) -> Option<crate::admin::AdminGroup> {
+        lock(&self.core).administrators().cloned()
+    }
+
     /// How many requests the broker holds.
     pub fn held_count(&self) -> usize {
         lock(&self.core).held_count()

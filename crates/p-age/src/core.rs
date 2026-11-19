@@ -21,6 +21,7 @@ use p_act::limits::{CLOCK_TOLERANCE_SECONDS, MAX_DEADLINE_AHEAD_SECONDS, MAX_DEL
 use p_act::sign::{Agent, Fingerprint, PublicKey, signature_person};
 use p_act::{Clearance, Document, DocumentHash, Timestamp};
 
+use crate::admin::AdminGroup;
 use crate::certs::{self, BrokerCertificate, BrokerCertificateFailure, CertificateInput, Loaded};
 use crate::crypto::Crypto;
 use crate::log::{LogEntry, LogSink};
@@ -190,6 +191,11 @@ pub struct Status {
     /// Why `ssh-keygen` cannot be used, if it cannot (`p_act`'s `Keygen::system`): the broker can then verify and sign
     /// nothing.
     pub keygen_unusable: Option<String>,
+    /// The group whose members may use `admin.sock` besides root, if one is configured; otherwise root and the broker's
+    /// own account are admitted.
+    pub administrators: Option<AdminGroup>,
+    /// The user id the broker runs as (what `page status` names when there is no group).
+    pub broker_uid: u32,
 }
 
 /// What `page status` says of the broker's own certificate.
@@ -347,6 +353,8 @@ pub struct Core {
     degraded: Option<Degraded>,
     /// The certificates the broker carries to pledge, if that input is configured.
     certs: Option<CertState>,
+    /// The group whose members may use `admin.sock` besides root (`administrators_group`), if one is configured.
+    administrators: Option<AdminGroup>,
     /// The broker's own certificate, checked at start and once a minute. There is no mode in which it is not.
     broker_cert: BrokerCertState,
 }
@@ -400,6 +408,7 @@ impl Core {
             seq: 0,
             degraded: None,
             certs: None,
+            administrators: None,
             broker_cert,
         }
     }
@@ -419,6 +428,24 @@ impl Core {
         report_broker_certificate(Some(&state.result), &result);
         self.broker_cert.last_check = now;
         self.broker_cert.result = result;
+    }
+
+    /// The group whose members may use `admin.sock` (resolved once, at start).
+    #[must_use]
+    pub fn with_administrators(mut self, group: Option<AdminGroup>) -> Core {
+        self.administrators = group;
+        self
+    }
+
+    /// Set the group in a running core.
+    pub fn set_administrators(&mut self, group: Option<AdminGroup>) {
+        self.administrators = group;
+    }
+
+    /// The group whose members may use `admin.sock`, if one is configured.
+    #[must_use]
+    pub fn administrators(&self) -> Option<&AdminGroup> {
+        self.administrators.as_ref()
     }
 
     /// The certificates the broker carries to pledge come from a directory (a separate input), checked against the site
@@ -467,9 +494,14 @@ impl Core {
     /// file and a damaged one are the same doubt, and an empty register in their place would drop the blocks
     /// without a word. The first start is [`Core::init_state`].
     pub fn read_state(path: &std::path::Path) -> Result<Register, StateError> {
+        Core::read_state_for(path, None)
+    }
+
+    /// As [`Core::read_state`]; with the administrators' group the directory may also be 0710 for that group.
+    pub fn read_state_for(path: &std::path::Path, group: Option<u32>) -> Result<Register, StateError> {
         let shown = path.display().to_string();
         if let Some(dir) = path.parent().filter(|d| !d.as_os_str().is_empty()) {
-            perm::ensure_private_dir(dir)?;
+            perm::ensure_dir(dir, group)?;
         }
         if !path.exists() {
             return Err(StateError::Missing { path: shown });
@@ -1165,6 +1197,8 @@ impl Core {
             blocked_persons: self.register.blocked_persons(),
             blocked_keys: self.register.blocked_keys(),
             keygen_unusable: self.crypto.keygen_usable().err(),
+            administrators: self.administrators.clone(),
+            broker_uid: p_ermit::peer::own_uid(),
             broker_certificate: {
                 let secs = u64::try_from(unix(now)).unwrap_or(0);
                 let path = self.crypto.broker_certificate_file().display().to_string();
