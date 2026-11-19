@@ -23,7 +23,7 @@ use crate::core::{Core, Settings, Trust};
 use crate::crypto::{Crypto, SshCrypto};
 use crate::log::MemoryLog;
 use crate::net::{Broker, Clock, SystemClock, Timeouts};
-use crate::site::{Site, SiteError};
+use crate::site::Site;
 use crate::tls;
 
 /// A directory under which a test may bind a Unix socket: `PAGE_TEST_DIR` if set, else `/tmp/claude` if it is there
@@ -64,7 +64,7 @@ pub struct PersonSpec {
 }
 
 impl PersonSpec {
-    /// An enabled person without keys.
+    /// An active person; without `keys` the builder gives them four keys of its own.
     #[must_use]
     pub fn new(name: &str) -> PersonSpec {
         PersonSpec { name: name.to_owned(), enabled: true, keys: None, groups: Vec::new() }
@@ -85,11 +85,10 @@ impl PersonSpec {
         self
     }
 
-    /// A person who is not enabled (the site file has no keys for one).
+    /// A person who is not active: in the site file, not in `active` of `directory.json`.
     #[must_use]
     pub fn disabled(mut self) -> PersonSpec {
         self.enabled = false;
-        self.keys = None;
         self
     }
 }
@@ -130,41 +129,116 @@ impl SiteBuilder {
         self
     }
 
-    /// The file's JSON.
+    /// The four keys of a person who was given none: distinct, and not the ones tests make by hand (bytes 100 and up).
+    fn dummy_keys(&self, index: usize) -> [String; 4] {
+        let line = |n: u8| {
+            let mut raw = vec![0, 0, 0, 11];
+            raw.extend_from_slice(b"ssh-ed25519");
+            raw.extend_from_slice(&[0, 0, 0, 32]);
+            raw.extend_from_slice(&[n; 32]);
+            format!("ssh-ed25519 {}", base64_of(&raw))
+        };
+        let base = u8::try_from(100 + index * 4).unwrap_or(250);
+        [line(base), line(base + 1), line(base + 2), line(base + 3)]
+    }
+
+    /// The groups the site file names: every group any person is in, and every group `members` has.
+    fn group_names(&self) -> Vec<String> {
+        let mut names: Vec<String> = self.persons.iter().flat_map(|p| p.groups.clone()).collect();
+        names.extend(self.members.iter().flat_map(|m| m.keys().cloned()));
+        names.sort_unstable();
+        names.dedup();
+        names
+    }
+
+    /// The site file's JSON: persons with their four keys, hosts, and the groups the site names. Nothing about who is
+    /// enabled or in which group: that is `directory.json` ([`SiteBuilder::directory_json`]).
     #[must_use]
     pub fn json(&self) -> String {
         let row = |key: &str| json!({"key": key, "verified_on": "2026-11-10"});
         let persons: Vec<Value> = self
             .persons
             .iter()
-            .map(|p| {
-                let mut o = json!({"name": p.name, "enabled": p.enabled, "groups": p.groups});
-                if let Some([confirmed, automatic, delegation, connection]) = &p.keys {
-                    o["keys"] = json!({"confirmed": row(confirmed), "automatic": row(automatic),
-                                       "delegation": row(delegation), "connection": row(connection)});
-                }
-                o
+            .enumerate()
+            .map(|(i, p)| {
+                let [confirmed, automatic, delegation, connection] =
+                    p.keys.clone().unwrap_or_else(|| self.dummy_keys(i));
+                json!({"name": p.name, "keys": {"confirmed": row(&confirmed), "automatic": row(&automatic),
+                                                "delegation": row(&delegation), "connection": row(&connection)}})
             })
             .collect();
         let hosts: Vec<Value> = self.hosts.iter().map(|(n, k)| json!({"name": n, "key": k})).collect();
-        let mut file = json!({"v": 1, "persons": persons, "hosts": hosts});
-        if let Some(members) = &self.members {
-            file["members"] = json!(members);
+        json!({"v": 1, "persons": persons, "hosts": hosts, "groups": self.group_names()}).to_string()
+    }
+
+    /// `directory.json`, source `model`, made at `as_of` (UTC to the second): the active persons, and for each group
+    /// the site names the persons in it (an explicit `members` call adds to what the persons' own groups give; a person
+    /// who is not active is in no group).
+    #[must_use]
+    pub fn directory_json(&self, as_of: &str) -> String {
+        let active: Vec<&str> = self.persons.iter().filter(|p| p.enabled).map(|p| p.name.as_str()).collect();
+        let mut members: BTreeMap<String, Vec<String>> =
+            self.group_names().into_iter().map(|g| (g, Vec::new())).collect();
+        for p in self.persons.iter().filter(|p| p.enabled) {
+            for g in &p.groups {
+                members.entry(g.clone()).or_default().push(p.name.clone());
+            }
         }
-        file.to_string()
+        for (g, logins) in self.members.iter().flatten() {
+            let slot = members.entry(g.clone()).or_default();
+            for l in logins {
+                if active.contains(&l.as_str()) && !slot.contains(l) {
+                    slot.push(l.clone());
+                }
+            }
+        }
+        json!({"v": 1, "source": "model", "as_of": as_of, "active": active, "members": members}).to_string()
     }
 
-    /// The site, read as the broker reads it.
-    pub fn build(&self) -> Result<Site, SiteError> {
-        Site::from_json(&self.json())
+    /// The pair, read as the broker reads it, with `directory.json` made now.
+    pub fn build(&self) -> Result<Site, crate::site::LoadError> {
+        let now = std::time::SystemTime::now();
+        Site::from_texts(&self.json(), &self.directory_json(&as_of(now)), now)
     }
 
-    /// The file on disk (mode 0644, as the broker's settings reader wants), for a test that starts `page`.
+    /// The site file on disk (mode 0644, as the broker's settings reader wants), for a test that starts `page`.
     pub fn write(&self, path: &Path) -> std::io::Result<()> {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::write(path, self.json())?;
-        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o644))
+        write_0644(path, &self.json())
     }
+
+    /// `directory.json` beside it.
+    pub fn write_directory(&self, path: &Path) -> std::io::Result<()> {
+        write_0644(path, &self.directory_json(&as_of(std::time::SystemTime::now())))
+    }
+}
+
+fn write_0644(path: &Path, text: &str) -> std::io::Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::write(path, text)?;
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o644))
+}
+
+/// Standard base64 with padding (the test support has no base64 crate of its own).
+fn base64_of(bytes: &[u8]) -> String {
+    const A: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut out = String::new();
+    for chunk in bytes.chunks(3) {
+        let n = chunk.iter().enumerate().fold(0_u32, |n, (i, b)| n | (u32::from(*b) << (16 - 8 * i)));
+        for i in 0..4 {
+            if i <= chunk.len() {
+                out.push(char::from(A[((n >> (18 - 6 * i)) & 63) as usize]));
+            } else {
+                out.push('=');
+            }
+        }
+    }
+    out
+}
+
+/// A time as `directory.json` writes it.
+fn as_of(t: std::time::SystemTime) -> String {
+    let secs = t.duration_since(std::time::UNIX_EPOCH).map_or(0, |d| i64::try_from(d.as_secs()).unwrap_or(0));
+    p_act::Timestamp::from_unix(secs).map_or_else(String::new, |t| t.to_string())
 }
 
 /// A broker over a site, with a register in `state_dir`, the broker's key and an in-memory log.

@@ -41,8 +41,14 @@ fn a_configuration_builds_a_broker_with_defaults_for_what_is_left_out() {
         dir.path(),
         "site.json",
         &format!(
-            r#"{{"v":1,"persons":[{{"name":"jan","enabled":true}}],"hosts":[{{"name":"a.example","key":"{KEY}"}}]}}"#
+            r#"{{"v":1,"persons":[{{"name":"jan",{}}}],"hosts":[{{"name":"a.example","key":"{KEY}"}}]}}"#,
+            keys(1)
         ),
+    );
+    write(
+        dir.path(),
+        "directory.json",
+        r#"{"v":1,"source":"model","as_of":"2026-11-19T10:00:00Z","active":["jan"],"members":{}}"#,
     );
     let path = write(dir.path(), "page.json", &config_text(dir.path(), ""));
     let config = Config::read(&path).unwrap();
@@ -99,28 +105,34 @@ fn keys(first: u8) -> String {
     )
 }
 
-#[test]
-fn a_site_file_with_a_bad_key_a_bad_name_or_a_duplicate_is_refused() {
-    use p_age::site::Site;
-    let person = |name: &str, keys: &str| format!(r#"{{"name":"{name}","enabled":true,{keys}}}"#);
-    let site = |persons: String| format!(r#"{{"v":1,"persons":[{persons}],"hosts":[]}}"#);
-    assert!(Site::from_json(&site(person("jan", &keys(1)))).is_ok());
-    assert!(Site::from_json(&site(person("ja n", &keys(1)))).is_err());
-    assert!(Site::from_json(&site(person("jan:confirmed", &keys(1)))).is_err(), "a name never has a colon");
-    assert!(Site::from_json(&site(format!("{},{}", person("jan", &keys(1)), person("jan", &keys(5))))).is_err());
-    let bad = keys(1).replacen(&key_line(1), "not a key", 1);
-    assert!(Site::from_json(&site(person("jan", &bad))).is_err());
-    let rsa = keys(1).replacen("ssh-ed25519", "ssh-rsa", 1);
-    assert!(Site::from_json(&site(person("jan", &rsa))).is_err(), "only Ed25519 and ECDSA P-256");
+/// `directory.json` with nobody active and no groups: enough for a site file that names none.
+const EMPTY_DIRECTORY: &str = r#"{"v":1,"source":"model","as_of":"2026-11-19T10:00:00Z","active":[],"members":{}}"#;
+
+fn pair(site: &str, directory: &str) -> Result<p_age::site::Site, p_age::site::LoadError> {
+    p_age::site::Site::from_texts(site, directory, std::time::SystemTime::now())
 }
 
 #[test]
-fn a_persons_four_keys_are_one_object_all_present_all_different_and_only_for_an_enabled_person() {
-    use p_age::site::{Site, SiteError};
+fn a_site_file_with_a_bad_key_a_bad_name_or_a_duplicate_is_refused() {
+    let person = |name: &str, keys: &str| format!(r#"{{"name":"{name}",{keys}}}"#);
+    let site = |persons: String| format!(r#"{{"v":1,"persons":[{persons}],"hosts":[]}}"#);
+    assert!(pair(&site(person("jan", &keys(1))), EMPTY_DIRECTORY).is_ok());
+    assert!(pair(&site(person("ja n", &keys(1))), EMPTY_DIRECTORY).is_err());
+    assert!(pair(&site(person("jan:confirmed", &keys(1))), EMPTY_DIRECTORY).is_err(), "a name never has a colon");
+    assert!(pair(&site(format!("{},{}", person("jan", &keys(1)), person("jan", &keys(5)))), EMPTY_DIRECTORY).is_err());
+    let bad = keys(1).replacen(&key_line(1), "not a key", 1);
+    assert!(pair(&site(person("jan", &bad)), EMPTY_DIRECTORY).is_err());
+    let rsa = keys(1).replacen("ssh-ed25519", "ssh-rsa", 1);
+    assert!(pair(&site(person("jan", &rsa)), EMPTY_DIRECTORY).is_err(), "only Ed25519 and ECDSA P-256");
+}
+
+#[test]
+fn a_persons_four_keys_are_one_object_all_present_and_all_different_and_the_site_file_says_nothing_of_enabled() {
+    use p_age::site::{LoadError, SiteError};
     let site = |person: String| format!(r#"{{"v":1,"persons":[{person}],"hosts":[]}}"#);
     let row = |n: u8| format!(r#"{{"key":"{}"}}"#, key_line(n));
-    // a person need not have approval keys at all
-    assert!(Site::from_json(&site(r#"{"name":"jan","enabled":true}"#.to_owned())).is_ok());
+    // a person of the site file has approval keys: a row without them is refused
+    assert!(pair(&site(r#"{"name":"jan"}"#.to_owned()), EMPTY_DIRECTORY).is_err());
     // never a partial set
     for missing in ["confirmed", "automatic", "delegation", "connection"] {
         let members: Vec<String> = ["confirmed", "automatic", "delegation", "connection"]
@@ -129,18 +141,18 @@ fn a_persons_four_keys_are_one_object_all_present_all_different_and_only_for_an_
             .filter(|(_, m)| **m != missing)
             .map(|(i, m)| format!(r#""{m}":{}"#, row(u8::try_from(i).unwrap() + 1)))
             .collect();
-        let person = format!(r#"{{"name":"jan","enabled":true,"keys":{{{}}}}}"#, members.join(","));
-        assert!(Site::from_json(&site(person)).is_err(), "without {missing}");
+        let person = format!(r#"{{"name":"jan","keys":{{{}}}}}"#, members.join(","));
+        assert!(pair(&site(person), EMPTY_DIRECTORY).is_err(), "without {missing}");
     }
     // no other member, no unknown purpose, a row is `{key, verified_on?}` and nothing else
     let extra = keys(1).replacen("}}", r#"}, "root": {"key":"x"}}"#, 1);
-    assert!(Site::from_json(&site(format!(r#"{{"name":"jan","enabled":true,{extra}}}"#))).is_err());
+    assert!(pair(&site(format!(r#"{{"name":"jan",{extra}}}"#)), EMPTY_DIRECTORY).is_err());
     let row_extra = keys(1).replacen(r#""verified_on":"2026-11-10""#, r#""verified_on":"2026-11-10","note":"x""#, 1);
-    assert!(Site::from_json(&site(format!(r#"{{"name":"jan","enabled":true,{row_extra}}}"#))).is_err());
+    assert!(pair(&site(format!(r#"{{"name":"jan",{row_extra}}}"#)), EMPTY_DIRECTORY).is_err());
     // `verified_on` is a date
     for bad in ["yesterday", "2026-13-01", "2026-11-32", "26-11-10", "2026/11/10"] {
         let k = keys(1).replacen("2026-11-10", bad, 1);
-        assert!(Site::from_json(&site(format!(r#"{{"name":"jan","enabled":true,{k}}}"#))).is_err(), "{bad}");
+        assert!(pair(&site(format!(r#"{{"name":"jan",{k}}}"#)), EMPTY_DIRECTORY).is_err(), "{bad}");
     }
     // the four are four different keys
     let same = format!(
@@ -150,33 +162,29 @@ fn a_persons_four_keys_are_one_object_all_present_all_different_and_only_for_an_
         r = row(1)
     );
     assert!(matches!(
-        Site::from_json(&site(format!(r#"{{"name":"jan","enabled":true,{same}}}"#))),
-        Err(SiteError::KeysClash { .. })
+        pair(&site(format!(r#"{{"name":"jan",{same}}}"#)), EMPTY_DIRECTORY),
+        Err(LoadError::Site(SiteError::KeysClash { .. }))
     ));
     // no key is another person's, and none is a host's
     let two = format!(
-        r#"{{"v":1,"persons":[{{"name":"jan","enabled":true,{}}},{{"name":"eva","enabled":true,{}}}],"hosts":[]}}"#,
+        r#"{{"v":1,"persons":[{{"name":"jan",{}}},{{"name":"eva",{}}}],"hosts":[]}}"#,
         keys(1),
         keys(4) // 4 is jan's connection key
     );
-    assert!(matches!(Site::from_json(&two), Err(SiteError::KeysClash { .. })));
+    assert!(matches!(pair(&two, EMPTY_DIRECTORY), Err(LoadError::Site(SiteError::KeysClash { .. }))));
     let host = format!(
-        r#"{{"v":1,"persons":[{{"name":"jan","enabled":true,{}}}],"hosts":[{{"name":"a.example","key":"{}"}}]}}"#,
+        r#"{{"v":1,"persons":[{{"name":"jan",{}}}],"hosts":[{{"name":"a.example","key":"{}"}}]}}"#,
         keys(1),
         key_line(2)
     );
-    assert!(matches!(Site::from_json(&host), Err(SiteError::KeysClash { .. })));
-    // a person who is not enabled has no keys in the view the broker is given
-    let off = format!(r#"{{"name":"jan","enabled":false,{}}}"#, keys(1));
-    assert!(matches!(Site::from_json(&site(off)), Err(SiteError::KeysOnDisabled(_))));
-    assert!(Site::from_json(&site(r#"{"name":"jan","enabled":false}"#.to_owned())).is_ok());
-    // the shape of an earlier file (flat members) is refused: nothing is ignored
-    let flat = format!(
-        r#"{{"name":"jan","enabled":true,"connection_key":"{}","delegation_key":"{}"}}"#,
-        key_line(1),
-        key_line(2)
-    );
-    assert!(Site::from_json(&site(flat)).is_err());
+    assert!(matches!(pair(&host, EMPTY_DIRECTORY), Err(LoadError::Site(SiteError::KeysClash { .. }))));
+    // the site file carries neither `enabled` nor `members`, on any kind: both are refused as unknown members
+    assert!(pair(&site(format!(r#"{{"name":"jan","enabled":true,{}}}"#, keys(1))), EMPTY_DIRECTORY).is_err());
+    let with_members = r#"{"v":1,"persons":[],"hosts":[],"members":{}}"#.to_owned();
+    assert!(pair(&with_members, EMPTY_DIRECTORY).is_err());
+    // the shape of an earlier file (flat keys) is refused: nothing is ignored
+    let flat = format!(r#"{{"name":"jan","connection_key":"{}","delegation_key":"{}"}}"#, key_line(1), key_line(2));
+    assert!(pair(&site(flat), EMPTY_DIRECTORY).is_err());
 }
 
 #[test]
@@ -198,9 +206,15 @@ fn a_configuration_or_site_file_that_anyone_but_its_owner_can_write_is_refused()
         assert!(Config::read(&path).is_ok(), "{good:o}");
     }
     let site = write(dir.path(), "site.json", r#"{"v":1,"persons":[],"hosts":[]}"#);
-    assert!(p_age::site::Site::read(&site).is_ok());
+    let directory = write(dir.path(), "directory.json", EMPTY_DIRECTORY);
+    let now = std::time::SystemTime::now();
+    assert!(p_age::site::SiteBase::read(&site).is_ok());
+    assert!(p_age::site::Directory::read(&directory, now).is_ok());
     mode(&site, 0o666);
-    assert!(p_age::site::Site::read(&site).is_err());
+    assert!(p_age::site::SiteBase::read(&site).is_err(), "the site file is checked");
+    mode(&site, 0o644);
+    mode(&directory, 0o666);
+    assert!(p_age::site::Directory::read(&directory, now).is_err(), "so is directory.json");
 }
 
 #[test]
@@ -247,6 +261,7 @@ fn the_register_on_disk_is_private_versioned_and_never_replaced_by_an_empty_one(
 fn a_register_that_cannot_be_read_stops_the_broker_from_being_built() {
     let dir = private_dir();
     write(dir.path(), "site.json", r#"{"v":1,"persons":[],"hosts":[]}"#);
+    write(dir.path(), "directory.json", EMPTY_DIRECTORY);
     let page = write(dir.path(), "page.json", &config_text(dir.path(), ""));
     let state = dir.path().join("register.json");
     std::fs::write(&state, "garbage").unwrap();
@@ -273,50 +288,155 @@ fn the_settings_files_are_read_as_p_act_reads_them_one_object_and_nothing_else()
 }
 
 #[test]
-fn a_site_file_whose_certificates_or_groups_a_standing_could_not_carry_is_refused_when_read() {
-    use p_age::site::Site;
-    let person =
-        |extra: &str| format!(r#"{{"v":1,"persons":[{{"name":"jan","enabled":true,{}{extra}}}],"hosts":[]}}"#, keys(1));
-    assert!(Site::from_json(&person(r#","groups":["ops","dev"]"#)).is_ok());
-    assert!(Site::from_json(&person(r#","groups":["ops","ops"]"#)).is_ok(), "a duplicate is a set's one entry");
-    assert!(Site::from_json(&person(r#","groups":["has space"]"#)).is_err());
-    assert!(Site::from_json(&person(r#","groups":["a,b"]"#)).is_err());
-    assert!(Site::from_json(&person(r#","groups":[""]"#)).is_err());
-    assert!(Site::from_json(&person(r#","certificates":["not a certificate"]"#)).is_err());
+fn the_groups_a_site_file_names_are_names_a_standing_can_carry() {
+    let site =
+        |groups: &str| format!(r#"{{"v":1,"persons":[{{"name":"jan",{}}}],"hosts":[],"groups":{groups}}}"#, keys(1));
+    let dir = |members: &str| {
+        format!(r#"{{"v":1,"source":"model","as_of":"2026-11-19T10:00:00Z","active":["jan"],"members":{members}}}"#)
+    };
+    assert!(pair(&site(r#"["ops","dev"]"#), &dir(r#"{"ops":["jan"],"dev":[]}"#)).is_ok());
+    assert!(pair(&site(r#"["ops","ops"]"#), &dir(r#"{"ops":[]}"#)).is_err(), "a group named twice");
+    assert!(pair(&site(r#"["has space"]"#), &dir(r#"{"has space":[]}"#)).is_err());
+    assert!(pair(&site(r#"["a,b"]"#), &dir(r#"{"a,b":[]}"#)).is_err());
+    assert!(pair(&site(r#"[""]"#), &dir(r#"{"":[]}"#)).is_err());
+    assert!(pair(&site(r#"[]"#).replace(r#""groups":[]"#, r#""certificates":["x"]"#), &dir("{}")).is_err());
 }
 
+/// `directory.json` is read **on its own**: what contradicts itself or its form is refused, whatever the site file says.
 #[test]
-fn the_site_file_has_a_version_and_members_absent_empty_and_present_are_three_states() {
-    use p_age::site::{Site, SiteError};
-    let person = |name: &str| format!(r#"{{"name":"{name}","enabled":true}}"#);
-    let file = |v: &str, members: &str| {
-        format!(r#"{{{v}"persons":[{},{}],"hosts":[]{members}}}"#, person("jan"), person("eva"))
+fn directory_json_is_refused_only_for_what_contradicts_itself_or_its_form() {
+    use p_age::site::{Directory, DirectoryError};
+    let now = std::time::SystemTime::now();
+    let file = |v: &str, source: &str, as_of: &str, active: &str, members: &str| {
+        format!(r#"{{{v}"source":"{source}","as_of":"{as_of}","active":{active},"members":{members}}}"#)
     };
-    // a version, and only 1
-    assert!(Site::from_json(&file(r#""v":1,"#, "")).is_ok());
-    assert!(Site::from_json(&file("", "")).is_err(), "no version");
-    assert!(matches!(Site::from_json(&file(r#""v":2,"#, "")), Err(SiteError::Version(2))));
-    assert!(Site::from_json(&file(r#""v":"1","#, "")).is_err());
-    // absent: the directory's
-    let absent = Site::from_json(&file(r#""v":1,"#, "")).unwrap();
-    assert_eq!(absent.members(), None);
-    assert!(!absent.in_group("jan", "ops"), "a broker that does not know who is in a group answers no");
-    // empty: nobody is in any group
-    let empty = Site::from_json(&file(r#""v":1,"#, r#","members":{}"#)).unwrap();
-    assert_eq!(empty.members().map(|m| m.len()), Some(0));
-    assert!(!empty.in_group("jan", "ops"));
-    // present: sorted, each once
-    let some = Site::from_json(&file(r#""v":1,"#, r#","members":{"ops":["jan","eva","jan"],"dev":[]}"#)).unwrap();
-    assert_eq!(some.members().unwrap()["ops"], ["eva", "jan"]);
-    assert!(some.in_group("jan", "ops") && some.in_group("eva", "ops") && !some.in_group("jan", "dev"));
-    assert!(!some.in_group("jan", "nogroup"));
-    // `null` is neither: refused, so that a writer cannot confuse absent and empty
-    assert!(Site::from_json(&file(r#""v":1,"#, r#","members":null"#)).is_err());
-    // a member must be a person of the file, a group a name a standing can carry
+    let at = "2026-11-19T10:00:00Z";
+    let refused = |text: String| match Directory::from_text(&text, now) {
+        Err(e) => e,
+        Ok(_) => panic!("not refused:\n{text}"),
+    };
+    assert!(
+        Directory::from_text(
+            &file(r#""v":1,"#, "model", at, r#"["jan","eva"]"#, r#"{"ops":["eva","jan"],"dev":[]}"#),
+            now
+        )
+        .is_ok()
+    );
+    for source in ["freeipa", "hosted-ldap"] {
+        assert!(Directory::from_text(&file(r#""v":1,"#, source, at, "[]", "{}"), now).is_ok());
+    }
+    // missing `v`; an unknown one; an unknown member of the object
+    assert!(matches!(refused(file("", "model", at, "[]", "{}")), DirectoryError::Settings(_)));
+    assert!(matches!(refused(file(r#""v":2,"#, "model", at, "[]", "{}")), DirectoryError::Version(2)));
+    assert!(matches!(refused(file(r#""v":1,"max_age":1,"#, "model", at, "[]", "{}")), DirectoryError::Settings(_)));
+    // `source` outside the three
+    assert!(matches!(refused(file(r#""v":1,"#, "ldap", at, "[]", "{}")), DirectoryError::Source(_)));
+    // `as_of` not UTC to the second, and more than 60 s ahead (30 s ahead is not: the clocks differ a little)
+    assert!(matches!(refused(file(r#""v":1,"#, "model", "yesterday", "[]", "{}")), DirectoryError::AsOf(_)));
     assert!(matches!(
-        Site::from_json(&file(r#""v":1,"#, r#","members":{"ops":["nobody"]}"#)),
-        Err(SiteError::BadMembers { .. })
+        refused(file(r#""v":1,"#, "model", "2026-11-19T10:00:00+01:00", "[]", "{}")),
+        DirectoryError::AsOf(_)
     ));
-    assert!(Site::from_json(&file(r#""v":1,"#, r#","members":{"has space":["jan"]}"#)).is_err());
-    assert!(Site::from_json(&file(r#""v":1,"#, r#","members":["jan"]"#)).is_err());
+    let ahead = |secs: u64| {
+        let t = now + std::time::Duration::from_secs(secs);
+        let unix = i64::try_from(t.duration_since(std::time::UNIX_EPOCH).unwrap().as_secs()).unwrap();
+        p_act::Timestamp::from_unix(unix).unwrap().to_string()
+    };
+    assert!(matches!(refused(file(r#""v":1,"#, "model", &ahead(3600), "[]", "{}")), DirectoryError::AsOfAhead));
+    assert!(Directory::from_text(&file(r#""v":1,"#, "model", &ahead(30), "[]", "{}"), now).is_ok());
+    // an old file is not refused for its age: stage 2 does not age it
+    assert!(Directory::from_text(&file(r#""v":1,"#, "model", "2001-01-01T00:00:00Z", "[]", "{}"), now).is_ok());
+    // a name outside the character rules; a name repeated within one list; a key repeated; a member not in `active`
+    assert!(matches!(refused(file(r#""v":1,"#, "model", at, r#"["a b"]"#, "{}")), DirectoryError::BadName { .. }));
+    assert!(matches!(
+        refused(file(r#""v":1,"#, "model", at, r#"["jan"]"#, r#"{"ops":["a b"]}"#)),
+        DirectoryError::BadName { .. }
+    ));
+    assert!(matches!(
+        refused(file(r#""v":1,"#, "model", at, "[]", r#"{"has space":[]}"#)),
+        DirectoryError::BadName { .. }
+    ));
+    assert!(matches!(
+        refused(file(r#""v":1,"#, "model", at, r#"["jan","jan"]"#, "{}")),
+        DirectoryError::Repeated { .. }
+    ));
+    assert!(matches!(
+        refused(file(r#""v":1,"#, "model", at, r#"["jan"]"#, r#"{"ops":["jan","jan"]}"#)),
+        DirectoryError::Repeated { .. }
+    ));
+    assert!(matches!(
+        refused(file(r#""v":1,"#, "model", at, "[]", r#"{"ops":[],"ops":[]}"#)),
+        DirectoryError::Settings(_)
+    ));
+    assert!(matches!(
+        refused(file(r#""v":1,"#, "model", at, r#"["jan"]"#, r#"{"ops":["eva"]}"#)),
+        DirectoryError::NotActive { .. }
+    ));
+}
+
+/// What the broker decides from is the intersection of the two files, computed at load; each difference only restricts.
+#[test]
+fn the_view_is_the_intersection_and_what_one_file_alone_knows_is_ignored_and_counted() {
+    let site = |persons: &[&str], groups: &str| {
+        let rows: Vec<String> = persons
+            .iter()
+            .enumerate()
+            .map(|(i, n)| format!(r#"{{"name":"{n}",{}}}"#, keys(u8::try_from(i).unwrap() * 4 + 1)))
+            .collect();
+        format!(r#"{{"v":1,"persons":[{}],"hosts":[],"groups":{groups}}}"#, rows.join(","))
+    };
+    let directory = |active: &str, members: &str| {
+        format!(r#"{{"v":1,"source":"model","as_of":"2026-11-19T10:00:00Z","active":{active},"members":{members}}}"#)
+    };
+    let enabled = |s: &p_age::site::Site, n: &str| s.person(n).map(|p| p.enabled);
+    // both agree
+    let both = pair(
+        &site(&["jan", "eva", "off"], r#"["ops","dev"]"#),
+        &directory(r#"["jan","eva"]"#, r#"{"ops":["eva","jan"],"dev":[]}"#),
+    )
+    .unwrap();
+    assert_eq!(
+        (enabled(&both, "jan"), enabled(&both, "eva"), enabled(&both, "off"), enabled(&both, "nobody")),
+        (Some(true), Some(true), Some(false), None)
+    );
+    assert_eq!(both.person("jan").unwrap().groups, ["ops"]);
+    assert!(both.in_group("eva", "ops") && !both.in_group("jan", "dev"));
+    assert!(both.mismatch().is_empty());
+    let info = both.directory().unwrap();
+    assert_eq!((info.source.as_str(), info.as_of.as_str()), ("model", "2026-11-19T10:00:00Z"));
+    // the site file loses a person while directory.json still names them: the person is gone at once
+    let lost = pair(
+        &site(&["eva", "off"], r#"["ops","dev"]"#),
+        &directory(r#"["jan","eva"]"#, r#"{"ops":["eva","jan"],"dev":[]}"#),
+    )
+    .unwrap();
+    assert_eq!((enabled(&lost, "jan"), enabled(&lost, "eva")), (None, Some(true)));
+    assert!(
+        !lost.in_group("jan", "ops") && lost.in_group("eva", "ops"),
+        "a name under a key that is no person is ignored"
+    );
+    assert_eq!(lost.mismatch().names_not_in_site, ["jan"]);
+    // the site file gains a group that directory.json does not have yet: it loads, the group is empty, and it is counted
+    let gained = pair(
+        &site(&["jan", "eva"], r#"["ops","dev","new"]"#),
+        &directory(r#"["jan","eva"]"#, r#"{"ops":["jan"],"dev":[]}"#),
+    )
+    .unwrap();
+    assert_eq!(gained.members().unwrap()["new"], Vec::<String>::new());
+    assert_eq!(gained.mismatch().groups_without_members, ["new"]);
+    // and the site file loses a group that directory.json still has: its key is ignored and counted
+    let dropped =
+        pair(&site(&["jan"], r#"["ops"]"#), &directory(r#"["jan"]"#, r#"{"ops":["jan"],"old":["jan"]}"#)).unwrap();
+    assert!(dropped.members().unwrap().get("old").is_none() && dropped.in_group("jan", "ops"));
+    assert_eq!(dropped.mismatch().groups_not_in_site, ["old"]);
+    // directory.json with a stranger in `active` or `members`: it loads, the stranger is counted once
+    let stranger =
+        pair(&site(&["jan"], r#"["ops"]"#), &directory(r#"["jan","stranger"]"#, r#"{"ops":["jan","stranger"]}"#))
+            .unwrap();
+    assert_eq!(stranger.mismatch().names_not_in_site, ["stranger"]);
+    assert_eq!(enabled(&stranger, "stranger"), None);
+    // a person who is in the site file and not active is in no group, whatever `members` could say (and it cannot:
+    // a member must be active)
+    let off = pair(&site(&["jan", "off"], r#"["ops"]"#), &directory(r#"["jan"]"#, r#"{"ops":["jan"]}"#)).unwrap();
+    assert!(off.person("off").unwrap().groups.is_empty() && !off.person("off").unwrap().enabled);
 }

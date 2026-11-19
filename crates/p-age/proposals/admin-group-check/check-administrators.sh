@@ -20,8 +20,8 @@
 #     broker key + cert  ssh-keygen -t ed25519, certified by the CA with principal `broker`, no extension, valid from
 #                        yesterday for 30 days: the broker's own certificate (`<broker_key>-cert.pub`), without which it
 #                        is "not ready"
-#     site file          one person, jan, enabled, with four plain ed25519 public keys, and one host: what `page block jan`
-#                        needs to know the person
+#     site file          one person, jan, with four plain ed25519 public keys, and one host; and directory.json beside it
+#                        (source model, made now, jan active, no groups): what `page block jan` needs to know the person
 #     TLS key + cert     openssl req -x509, P-256, self-signed, for two days: the broker will not start without them;
 #                        nobody connects to its TCP port here
 # Groups without a fresh login: every command of an account is run with `su -s /bin/sh -c`, which sets the account's groups
@@ -99,14 +99,20 @@ install -o "$BROKER" -g "$BGROUP" -m 0644 "$WORK/broker-cert.pub" "$PRIVATE/brok
 install -o root -g root -m 0644 "$WORK/site-ca.pub" "$ROOTDIR/site-ca.pub"
 cat > "$WORK/site.json" <<JSON
 {"v":1,
- "persons":[{"name":"jan","enabled":true,"groups":[],
+ "persons":[{"name":"jan",
    "keys":{"confirmed":{"key":"$(publine "$WORK/jan-confirmed.pub")"},
            "automatic":{"key":"$(publine "$WORK/jan-automatic.pub")"},
            "delegation":{"key":"$(publine "$WORK/jan-delegation.pub")"},
            "connection":{"key":"$(publine "$WORK/jan-connection.pub")"}}}],
- "hosts":[{"name":"a.example","key":"$(publine "$WORK/jan-host.pub")"}]}
+ "hosts":[{"name":"a.example","key":"$(publine "$WORK/jan-host.pub")"}],
+ "groups":[]}
 JSON
 install -o root -g root -m 0644 "$WORK/site.json" "$ROOTDIR/site.json"
+# directory.json beside it: source model, made now, jan active, no groups (the site file names none)
+cat > "$WORK/directory.json" <<JSON
+{"v":1,"source":"model","as_of":"$(date -u +%Y-%m-%dT%H:%M:%SZ)","active":["jan"],"members":{}}
+JSON
+install -o root -g root -m 0644 "$WORK/directory.json" "$ROOTDIR/directory.json"
 OUT=$(openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:prime256v1 -nodes -days 2 -subj /CN=page-admin-check \
   -keyout "$WORK/tls.key" -out "$WORK/tls.pem" 2>&1); must $? "$OUT" "making the TLS certificate"
 install -o "$BROKER" -g "$BGROUP" -m 0600 "$WORK/tls.key" "$PRIVATE/tls.key"
