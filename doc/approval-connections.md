@@ -173,8 +173,9 @@ The sender closes the connection. Nothing is said about the bytes received.
 Shared codes: `malformed-line` (not JSON, a member or string that breaks the
 rules), `line-too-long`, `unsupported-version`, `unknown-type`,
 `too-many-open` (more open requests than the transport allows). The broker's
-own, on its transports: `signin`, `blocked`, `superseded`, `busy`, `timeout`
-(section 5).
+own, on its transports: `signin`, `blocked`, `superseded`, `busy`, `timeout`,
+`directory-stale` (the answer to a sign-in while the broker has no valid
+directory data; section 3.7) (section 5).
 
 ### 3.6 Rules for every receiver
 
@@ -233,6 +234,7 @@ exchange has no notice that a request was shown to the person.
 | `too-many-waiting` | the agent already has as many requests waiting as the site allows |
 | `busy` | the broker's own limits (section 4): too many open, try again soon. It has this one meaning |
 | `not-ready` | the broker is up and cannot vouch for anything: it has no valid certificate of its own (`crates/p-age/SPEC.md`). A service that hears it does not send the same request again in a loop; it tells the agent `unavailable` and logs the exact code. If a person's approval came back while the broker was in this state, the service is answered `refused` `not-ready`, there is no clearance, and the broker logs that an approval was lost to its own state |
+| `directory-stale` | the broker has no valid directory data: who is active and who is in which group is not known to it (in stage 2: no valid `directory.json` beside the site file; from stage 3 also: the file is older than the site allows). Nobody is cleared; blocks and withdrawals still work. A service tells the agent `unavailable` and logs the exact code, as for `not-ready` |
 
 **pledge's answer is final until the call's deadline.** pledge keeps its answers
 on disk, and the same bytes submitted again get **the same answer again** from
