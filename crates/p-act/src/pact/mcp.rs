@@ -123,9 +123,20 @@ pub fn serve(ctx: &Arc<Context>, input: impl Read, output: impl Write + Send + '
                 break;
             }
         };
-        let Ok(message) = serde_json::from_slice::<Value>(&line) else {
-            out.error(&Value::Null, -32700, "parse error");
-            continue;
+        // A repeated key at any depth is refused: never read as the first or the last (`p_ermit::json`).
+        let message = match p_ermit::json::parse_slice(&line) {
+            Ok(message) => message,
+            // Not JSON: a parse error. A key twice: an invalid request, with its path in a message of this program's own
+            // and **`id` null**, since the id of such a message is not taken from it (`id` may be the repeated member).
+            // Nothing of it is acted on.
+            Err(e @ p_ermit::json::JsonError::DuplicateKey { .. }) => {
+                out.error(&Value::Null, -32600, &format!("invalid request: {e}"));
+                continue;
+            }
+            Err(_) => {
+                out.error(&Value::Null, -32700, "parse error");
+                continue;
+            }
         };
         let Some(object) = message.as_object() else {
             out.error(&Value::Null, -32600, "a message is one JSON object");
@@ -808,6 +819,42 @@ mod tests {
         for line in &lines {
             assert_clean_in("a line pact wrote", line);
         }
+    }
+
+    #[test]
+    fn a_message_with_a_repeated_key_is_refused_at_every_depth_never_read_as_the_first_or_the_last() {
+        let e = env(|_, _, _| unreachable!());
+        let mut c = connect(&e.ctx);
+        for (what, line) in [
+            ("method twice", r#"{"jsonrpc":"2.0","id":1,"method":"ping","method":"tools/list"}"#),
+            ("id twice", r#"{"jsonrpc":"2.0","id":1,"id":2,"method":"ping"}"#),
+            (
+                "params twice in a call",
+                r#"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"rt_procs","arguments":{}},"params":{}}"#,
+            ),
+            (
+                "the arguments' params twice",
+                r#"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"rt_procs","arguments":{"params":["a"],"params":["b"]}}}"#,
+            ),
+            (
+                "_meta twice",
+                r#"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"rt_procs","arguments":{},"_meta":{"progressToken":1,"progressToken":2}}}"#,
+            ),
+            (
+                "the name twice",
+                r#"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"a","name":"rt_procs"}}"#,
+            ),
+        ] {
+            c.raw(line);
+            let r = c.recv();
+            assert_eq!(r["error"]["code"], -32600, "{what}: {r}");
+            assert_eq!(r["id"], Value::Null, "the id of such a message is not taken from it: {what}");
+            assert!(r["error"]["message"].as_str().unwrap().contains("appears twice"), "{what}: {r}");
+        }
+        // The same session still answers.
+        c.send(&json!({"jsonrpc": "2.0", "id": 9, "method": "ping"}));
+        assert_eq!(c.recv()["id"], 9);
+        c.finish();
     }
 
     #[test]

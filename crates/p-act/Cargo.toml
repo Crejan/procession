@@ -15,7 +15,7 @@ publish = false
 # `p-act` as before gets what it had; a crate that wants only `p_act::peer` (who is on the other end of a Unix
 # socket) says `default-features = false` and has `libc` and `p-ermit` (which has libc) and nothing else.
 default = ["formats"]
-formats = ["dep:base64", "dep:serde", "dep:serde_json", "dep:ring", "dep:tempfile", "dep:thiserror"]
+formats = ["dep:base64", "dep:serde", "dep:serde_json", "dep:ring", "dep:tempfile", "dep:thiserror", "p-ermit/json"]
 # The agent-side signer `pact` (proposals/pact.md): the library the binary is made of, and the binary.
 pact = ["formats", "dep:ureq"]
 # For tests only, never for a release: turns on `serde_json`'s `preserve_order` for the whole build, which any crate

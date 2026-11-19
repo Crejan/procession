@@ -98,10 +98,22 @@ pub fn run(args: Vec<String>) -> i32 {
             return 2;
         }
     };
+    // A command line that is wrong is a usage error before anything is read or connected: exit 2, as for any other.
+    let call = if options.command == "call" {
+        match call_arguments(&options) {
+            Ok(call) => Some(call),
+            Err(e) => {
+                eprintln!("pact: {}\n{USAGE}", escaped(&e));
+                return 2;
+            }
+        }
+    } else {
+        None
+    };
     let result = match options.command.as_str() {
         "serve" => cmd_serve(&options),
         "stdio" => cmd_stdio(&options),
-        "call" => cmd_call(&options),
+        "call" => call.map_or(Ok(()), |(tool, arguments)| cmd_call(&options, &tool, &arguments)),
         "tools" => cmd_tools(&options),
         _ => {
             eprintln!("pact: unknown command\n{USAGE}");
@@ -216,15 +228,21 @@ fn cmd_stdio(options: &Options) -> Result<(), String> {
     Ok(())
 }
 
-fn cmd_call(options: &Options) -> Result<(), String> {
+/// The tool and the arguments of `pact call TOOL [ARGUMENTS_JSON]`: the arguments are one JSON value with **no key twice at any
+/// depth** (never read as the first or the last), or the command line is wrong.
+fn call_arguments(options: &Options) -> Result<(String, Value), String> {
     let (tool, rest) = options.positional.split_first().ok_or("call needs a tool name")?;
     let arguments: Value = match rest {
         [] => Value::Null,
-        [json] => serde_json::from_str(json).map_err(|e| format!("the arguments are not JSON: {e}"))?,
+        [json] => p_ermit::json::parse(json).map_err(|e| format!("the arguments are not JSON: {e}"))?,
         _ => return Err("call takes a tool name and at most one JSON argument".into()),
     };
+    Ok((tool.clone(), arguments))
+}
+
+fn cmd_call(options: &Options, tool: &str, arguments: &Value) -> Result<(), String> {
     let ctx = context(options)?;
-    println!("{}", super::canon::line(&call_once(&ctx, tool, &arguments)));
+    println!("{}", super::canon::line(&call_once(&ctx, tool, arguments)));
     Ok(())
 }
 
