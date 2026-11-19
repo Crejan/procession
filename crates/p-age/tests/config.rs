@@ -440,3 +440,82 @@ fn the_view_is_the_intersection_and_what_one_file_alone_knows_is_ignored_and_cou
     let off = pair(&site(&["jan", "off"], r#"["ops"]"#), &directory(r#"["jan"]"#, r#"{"ops":["jan"]}"#)).unwrap();
     assert!(off.person("off").unwrap().groups.is_empty() && !off.person("off").unwrap().enabled);
 }
+
+#[test]
+fn at_start_the_site_file_is_required_and_directory_json_is_not_nobody_is_active_without_it() {
+    let dir = private_dir();
+    let site_text = format!(r#"{{"v":1,"persons":[{{"name":"jan",{}}}],"hosts":[]}}"#, keys(1));
+    write(dir.path(), "site.json", &site_text);
+    let page = write(dir.path(), "page.json", &config_text(dir.path(), ""));
+    p_age::core::Core::init_state(&dir.path().join("register.json")).unwrap();
+    write(dir.path(), "site-ca.pub", KEY);
+    let config = Config::read(&page).unwrap();
+    let now = std::time::SystemTime::now();
+    let site = dir.path().join("site.json");
+    let directory = dir.path().join("directory.json");
+    // directory.json missing: the broker is built, nobody is active, and the view says why
+    let view = p_age::site::Site::load(&site, &directory, now).unwrap();
+    assert_eq!(view.person("jan").map(|p| p.enabled), Some(false));
+    assert!(view.directory().is_none() && view.directory_problem().unwrap().starts_with("directory.json:"));
+    assert!(config.build().is_ok(), "it starts, and clears nothing");
+    // it looks the same as a directory that is too old: `page status` exits 5 (degraded) with a line of its own
+    let status = p_age::core::Status {
+        directory: None,
+        directory_problem: view.directory_problem().map(str::to_owned),
+        ..status_of(&view)
+    };
+    let (text, code) =
+        p_age::admin::render(&p_age::admin::Command::Status, &p_age::admin::Reply::Status(Box::new(status)));
+    assert_eq!(code, 5, "{text}");
+    assert!(text.contains("directory: none (directory.json:") && text.contains("5  no valid directory.json"), "{text}");
+    // refused on its own faults: the same
+    write(
+        dir.path(),
+        "directory.json",
+        r#"{"v":1,"source":"ldap","as_of":"2026-11-19T10:00:00Z","active":["jan"],"members":{}}"#,
+    );
+    let view = p_age::site::Site::load(&site, &directory, now).unwrap();
+    assert_eq!(view.person("jan").map(|p| p.enabled), Some(false), "nobody is active on a file that is refused");
+    assert!(view.directory_problem().is_some());
+    assert!(config.build().is_ok());
+    // a good one: jan is active
+    write(
+        dir.path(),
+        "directory.json",
+        r#"{"v":1,"source":"model","as_of":"2026-11-19T10:00:00Z","active":["jan"],"members":{}}"#,
+    );
+    let view = p_age::site::Site::load(&site, &directory, now).unwrap();
+    assert_eq!((view.person("jan").map(|p| p.enabled), view.directory_problem()), (Some(true), None));
+    // the site file is required: refused or missing, there is no broker, whatever directory.json says
+    write(dir.path(), "site.json", r#"{"v":1,"persons":[{"name":"jan"}],"hosts":[]}"#);
+    assert!(p_age::site::Site::load(&site, &directory, now).is_err());
+    assert!(config.build().err().expect("a bad site file").to_string().starts_with("the site file:"));
+    std::fs::remove_file(&site).unwrap();
+    assert!(config.build().is_err());
+}
+
+/// A `Status` for a view, with nothing else wrong.
+fn status_of(view: &p_age::site::Site) -> p_age::core::Status {
+    p_age::core::Status {
+        administrators: None,
+        directory: view.directory().cloned(),
+        directory_problem: None,
+        directory_sets: view.mismatch().clone(),
+        broker_uid: 501,
+        keygen_unusable: None,
+        degraded: None,
+        pledges: 0,
+        held: 0,
+        delegations: 0,
+        withdrawn: 0,
+        blocked_persons: vec![],
+        blocked_keys: vec![],
+        broker_certificate: p_age::core::BrokerCertificateStatus {
+            path: "/x".into(),
+            valid: true,
+            days_left: Some(3),
+            failure: None,
+        },
+        certificates: None,
+    }
+}
