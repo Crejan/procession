@@ -119,7 +119,6 @@ fn status_says_who_may_administer_and_page_says_when_it_runs_as_root() {
         p_age::admin::render(&p_age::admin::Command::Status, &p_age::admin::Reply::Status(Box::new(s.clone()))).0
     };
     assert!(text(&status(None)).contains("administrators: root and the broker's account (uid 501)"));
-    assert!(text(&status(None)).contains("directory: none"));
     let with_directory = p_age::core::Status {
         directory: Some(p_age::site::DirectoryInfo {
             source: "hosted-ldap".into(),
@@ -135,7 +134,6 @@ fn status_says_who_may_administer_and_page_says_when_it_runs_as_root() {
             groups_not_in_site: vec!["old".into()],
             groups_without_members: vec![],
         },
-        directory_problem: Some("directory.json: missing".into()),
         ..base_status()
     };
     let (shown, code) =
@@ -145,8 +143,22 @@ fn status_says_who_may_administer_and_page_says_when_it_runs_as_root() {
         shown.contains("groups not in the site file: 1 (old)") && shown.contains("without members key: 0\n"),
         "{shown}"
     );
-    assert!(shown.contains("directory: none (directory.json: missing)"));
     assert_eq!(code, 0, "the exit code is not changed by them");
+    // no valid directory.json: the same state as a directory that is too old: a condition of code 5 (degraded), a line
+    // of its own, and `directory: none (why)`
+    let none = p_age::core::Status {
+        directory: None,
+        directory_problem: Some("directory.json: missing".into()),
+        ..base_status()
+    };
+    let (shown, code) =
+        p_age::admin::render(&p_age::admin::Command::Status, &p_age::admin::Reply::Status(Box::new(none.clone())));
+    assert_eq!(code, 5, "{shown}");
+    assert!(
+        shown.contains("directory: none (directory.json: missing)") && shown.contains("5  no valid directory.json"),
+        "{shown}"
+    );
+    assert!(p_age::admin::conditions(&none).iter().any(|c| c.name == "directory-none" && c.code == 5));
     assert!(!text(&status(None)).contains("root only"));
     assert!(text(&status(Some(group(900)))).contains("administrators: group page-admins (gid 900)"));
     assert!(p_age::admin::recorded_as_root(true, 0));
@@ -157,7 +169,7 @@ fn status_says_who_may_administer_and_page_says_when_it_runs_as_root() {
 fn base_status() -> p_age::core::Status {
     p_age::core::Status {
         administrators: None,
-        directory: None,
+        directory: Some(p_age::site::DirectoryInfo { source: "model".into(), as_of: "2026-11-19T10:00:00Z".into() }),
         directory_problem: None,
         directory_sets: Default::default(),
         broker_uid: 501,

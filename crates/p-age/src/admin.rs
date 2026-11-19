@@ -743,7 +743,7 @@ pub fn socket_path(state_dir: &Path) -> PathBuf {
 }
 
 /// The exit codes of the verbs, one meaning each (`SPEC.md`).
-pub const EXIT_TABLE: &str = "exit codes:\n  0  done (and stored, where something is stored)\n  1  refused\n  2  usage\n  3  no broker answers\n  4  in force but NOT stored (block, withdraw)\n  5  the broker is degraded (`status` only)\n  6  an enabled person has no valid certificate for a purpose (`status` only)\n  7  the broker has no valid certificate of its own: it issues no clearances (`status` only)\nThe exit code of `status` is the gravest condition that holds, in the order 7, 5, 6; its lines are the complete list\nof the conditions that hold (`status --format json` gives the same list as an array).";
+pub const EXIT_TABLE: &str = "exit codes:\n  0  done (and stored, where something is stored)\n  1  refused\n  2  usage\n  3  no broker answers\n  4  in force but NOT stored (block, withdraw)\n  5  the broker is degraded: the register cannot be stored, or there is no valid directory.json (`status` only)\n  6  an enabled person has no valid certificate for a purpose (`status` only)\n  7  the broker has no valid certificate of its own: it issues no clearances (`status` only)\nThe exit code of `status` is the gravest condition that holds, in the order 7, 5, 6; its lines are the complete list\nof the conditions that hold (`status --format json` gives the same list as an array).";
 
 /// Done.
 pub const EXIT_DONE: u8 = 0;
@@ -894,6 +894,17 @@ pub fn conditions(s: &Status) -> Vec<Condition> {
             name: "degraded",
             detail: why.to_owned(),
             text: format!("the broker is degraded ({why}): the register cannot be stored; going on from memory"),
+        });
+    }
+    // No valid directory.json: nobody is active, so no sign-in and no clearance, as for a directory that is too old
+    // (`directory-stale`). The same degraded state, the same code 5, and a line of its own that says why.
+    if s.directory.is_none() {
+        let why = s.directory_problem.clone().unwrap_or_else(|| "directory.json is not in the view".to_owned());
+        list.push(Condition {
+            code: EXIT_DEGRADED,
+            name: "directory-none",
+            detail: why.clone(),
+            text: format!("no valid directory.json ({why}): nobody is active, so no sign-in and no clearance; blocks and withdrawals work"),
         });
     }
     if let Some(c) = &s.certificates {

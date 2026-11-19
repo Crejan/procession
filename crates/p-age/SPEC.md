@@ -122,7 +122,7 @@ print this table:
 | 2 | usage |
 | 3 | no broker answers |
 | 4 | in force but NOT stored (block, withdraw) |
-| 5 | the broker is degraded (`status` only; nothing else returns it) |
+| 5 | the broker is degraded: the register cannot be stored, or there is no valid `directory.json` (`status` only; nothing else returns it) |
 | 6 | an enabled person has no valid certificate for a purpose (`status` only) |
 | 7 | the broker has no valid certificate of its own and issues no clearances (`status` only) |
 
@@ -412,20 +412,26 @@ person or a group from the site file must not be held back until a fitting
   prints, beside `directory: source S, as of T`, the counts and (escaped, the
   first ten) the names of the three kinds: `names not in the site file`,
   `groups not in the site file`, `groups of the site file without members key`;
-  the audit log gets one line, `directory-sets:names=N,groups=N,empty=N`, when
-  the view is made and these sets are not all empty (a reload that changes the
-  sets writes one again: `page load` is not built), and so does standard
-  error. **The exit code is unchanged by them.**
+  the audit log gets one line, `directory-sets:names=N,groups=N,empty=N`, **when
+  the view is made at start** and these sets are not all empty, and so does
+  standard error. A line when the sets *change* comes with `page load` (not
+  built). **The exit code is unchanged by them.**
 - **At start:** the site file is required (missing or refused, there is no
-  broker). `directory.json` is not: without a valid one (missing, or refused
-  on its own faults) **nobody is active**; the broker starts, issues no
-  sign-in and no clearance to anyone, and clears nothing (blocks and
-  withdrawals are the register's and stand); `page status` says
-  `directory: none (why)` and standard error says it. Why start rather than
-  refuse: that only restricts, and a broker that cannot start because an
-  outside system's file is late is a worse failure for the persons waiting
-  than a broker that refuses everyone and says why. If the designer would
-  rather the broker refuse to start, that is one line in `Site::load`.
+  broker). `directory.json` is not: without a valid one (missing, or refused on
+  its own faults) the broker is in **the same state as a directory that is too
+  old** (`directory-stale`, whose age setting is stage 3) and looks the same:
+  nobody is active, so no sign-in and no clearance is issued to anyone
+  (**`directory-stale`** is the refusal a pledge is to get; until p-act has that
+  code it gets the refusal of a person who is not enabled), blocks and
+  withdrawals work and are the register's, and `page status` says
+  `directory: none (why)`, gives a condition line `directory-none` and **exits
+  5** (degraded). Code 5 stays one meaning, "the broker is degraded"; the
+  register that cannot be stored and a missing directory are two of its
+  conditions, each with a line of its own. Why start rather than refuse: that
+  only restricts, and a broker that cannot start because an outside system's
+  file is late is a worse failure for the persons waiting than one that refuses
+  everyone and says why. **A valid file that arrives later is taken without a
+  restart once `page load` exists; until then, restart the broker.**
 
 **Stage 2** reads both files by hand: `directory.json` with `source: model`,
 beside the site file (no member in the configuration names it). **Without the
