@@ -196,6 +196,8 @@ pub struct Status {
     pub administrators: Option<AdminGroup>,
     /// The user id the broker runs as (what `page status` names when there is no group).
     pub broker_uid: u32,
+    /// Where the directory part of the view came from and when (`directory.json`); decides nothing.
+    pub directory: Option<crate::site::DirectoryInfo>,
 }
 
 /// What `page status` says of the broker's own certificate.
@@ -1199,6 +1201,7 @@ impl Core {
             keygen_unusable: self.crypto.keygen_usable().err(),
             administrators: self.administrators.clone(),
             broker_uid: p_ermit::peer::own_uid(),
+            directory: self.site.directory().cloned(),
             broker_certificate: {
                 let secs = u64::try_from(unix(now)).unwrap_or(0);
                 let path = self.crypto.broker_certificate_file().display().to_string();
@@ -1362,11 +1365,12 @@ mod tests {
     }
 
     fn site() -> Arc<Site> {
-        // `off` is not enabled and so has no keys; `jan` has keys 1 to 4 and `eva` 9 to 12.
+        // `off` is in the site file and not active, so it is not enabled; `jan` has keys 1 to 4, `eva` 9 to 12 and
+        // `off` 17 to 20.
         let person = |name: &str, first: u8| {
             let row = |n: u8| format!(r#"{{"key":"{}"}}"#, key_line(first + n));
             format!(
-                r#"{{"name":"{name}","enabled":true,"groups":["ops"],"keys":{{"confirmed":{},"automatic":{},"delegation":{},"connection":{}}}}}"#,
+                r#"{{"name":"{name}","keys":{{"confirmed":{},"automatic":{},"delegation":{},"connection":{}}}}}"#,
                 row(0),
                 row(1),
                 row(2),
@@ -1374,12 +1378,14 @@ mod tests {
             )
         };
         let json = format!(
-            r#"{{"v":1,"persons":[{},{{"name":"off","enabled":false}},{}],"hosts":[{{"name":"a.example","key":"{}"}}]}}"#,
+            r#"{{"v":1,"persons":[{},{},{}],"hosts":[{{"name":"a.example","key":"{}"}}],"groups":["ops"]}}"#,
             person("jan", 1),
+            person("off", 17),
             person("eva", 9),
             key_line(30)
         );
-        Arc::new(Site::from_json(&json).unwrap())
+        let directory = r#"{"v":1,"source":"model","as_of":"2026-11-19T10:00:00Z","active":["jan","eva"],"members":{"ops":["eva","jan"]}}"#;
+        Arc::new(Site::from_texts(&json, directory, std::time::SystemTime::now()).unwrap())
     }
 
     struct Fixture {
