@@ -578,3 +578,46 @@ fn a_keygen_that_cannot_be_used_always_gives_a_reason_even_when_the_record_has_n
     let (code, text) = canned_kit(0, &missing, "require_keygen_usable");
     assert!(code == 1 && text.contains("has no ssh_keygen_usable member") && text.contains("| {"), "{text}");
 }
+
+// -- a1 takes the checkout, builds probe itself, and leaves nothing behind when it stops ---------------------------
+
+#[test]
+fn a1_takes_a_checkout_not_a_binary_and_checks_everything_before_its_first_change() {
+    let a1 = std::fs::read_to_string(stage1("a1-prepare.sh")).unwrap();
+    // Run as an ordinary user, with a file and with nothing: it stops at its argument check, before anything else.
+    let dir = std::env::temp_dir().join(format!("probe-a1-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let file = dir.join("probe");
+    std::fs::write(&file, "").unwrap();
+    let run = |args: &[&str]| {
+        let out = std::process::Command::new("sh").arg(stage1("a1-prepare.sh")).args(args).output().unwrap();
+        (out.status.code(), String::from_utf8(out.stdout).unwrap())
+    };
+    let (code, text) = run(&[file.to_str().unwrap()]);
+    assert_eq!(code, Some(1));
+    assert!(text.starts_with("STOP:") && text.contains("is a file") && text.contains("takes the CHECKOUT"), "{text}");
+    let (code, text) = run(&[]);
+    assert_eq!(code, Some(1));
+    assert!(text.contains("usage: sh a1-prepare.sh /path/to/CHECKOUT"), "{text}");
+    // The order in the script: every check and the build, then the first change, then the rest; and a trap takes back what was done.
+    let at = |needle: &str| a1.find(needle).unwrap_or_else(|| panic!("a1 lacks {needle}"));
+    let checks = [
+        "is a file",
+        "command -v visudo",
+        "command -v useradd",
+        "exists \"$RULE\"",
+        "exists /var/lib/probe",
+        "find_probe",
+    ];
+    let first_change = at("ensure_statedir");
+    for check in checks {
+        assert!(at(check) < first_change, "{check} must come before the first change");
+    }
+    assert!(
+        first_change < at("useradd --system")
+            && at("useradd --system") < at("install -o root -g root -m 0755 \"$PROBE_SRC\"")
+    );
+    assert!(at("trap rollback EXIT") < first_change && a1.contains("userdel -r") && a1.contains("DONE=1"));
+    // The binary is never named by hand any more.
+    assert!(!a1.contains("PROBE_SRC=\"${1"), "a1 must not take a binary");
+}

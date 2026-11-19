@@ -62,6 +62,7 @@ artifact() {
   printf '%s\n' "$path"
 }
 find_pledge() { PLEDGE=$(artifact bin pledge "cargo build -p p-ledge --bin pledge") || exit 1; }
+find_probe() { PROBE_SRC=$(artifact bin probe "cargo build -p p-robe --features test-verbs --bin probe") || exit 1; }
 find_pact() { PACT=$(artifact bin pact "cargo build -p p-act --features pact --bin pact") || exit 1; }
 
 # Pledge's own command line, as the person gives it: the directories are always named.
@@ -195,7 +196,7 @@ require_kit() {
   if [ "$KIT_RC" != 0 ] || [ -z "$KIT_REC" ]; then
     echo "STOP: the call itself failed (not ssh-keygen, which it never got to say): $(classify_failure "$KIT_RC" "$KIT_OUT")"
     show_output "$KIT_RC" "$KIT_OUT"
-    case "$KIT_OUT" in *"bad --within"*) echo "      That is the message of a probe that does not take the fourth token of --within: /usr/local/bin/probe is older than this checkout. Run undo.sh and a1 again with a fresh build." ;; esac
+    case "$KIT_OUT" in *"bad --within"*) echo "      That is the message of a probe that does not take the fourth token of --within: /usr/local/bin/probe is older than this checkout. Rerun Stage A at this commit: (undo-b.sh if Stage B was prepared,) undo.sh, then  sh stage1/a1-prepare.sh CHECKOUT  (a1 builds the checkout itself), a2, a3." ;; esac
     exit 1
   fi
 }
@@ -204,11 +205,11 @@ require_kit() {
 require_installed_commit() {
   built=$(json_word "$KIT_REC" built_from)
   if [ -z "$built" ]; then
-    echo "STOP: /usr/local/bin/probe does not say which commit it was built from: it is older than this checkout ($COMMIT). Run undo.sh, build ( cargo build --workspace --features p-robe/test-verbs,p-act/pact as the person) and run a1 again."
+    echo "STOP: /usr/local/bin/probe does not say which commit it was built from: it is older than this checkout ($COMMIT). Rerun Stage A at this commit: (undo-b.sh if Stage B was prepared,) undo.sh, then  sh stage1/a1-prepare.sh CHECKOUT  (a1 builds the checkout itself), a2, a3."
     show_output "$KIT_RC" "$KIT_OUT"; exit 1
   fi
   if [ "$built" != "$COMMIT" ]; then
-    echo "STOP: /usr/local/bin/probe is the build of $built, and the checkout is at $COMMIT. Run undo.sh, build the checkout ( cargo build --workspace --features p-robe/test-verbs,p-act/pact as the person) and run a1 again."
+    echo "STOP: /usr/local/bin/probe is the build of $built, and the checkout is at $COMMIT. Rerun Stage A at this commit: (undo-b.sh if Stage B was prepared,) undo.sh, then  sh stage1/a1-prepare.sh CHECKOUT  (a1 builds the checkout itself), a2, a3."
     exit 1
   fi
   pass "/usr/local/bin/probe is the build of this checkout's commit ($COMMIT)"
